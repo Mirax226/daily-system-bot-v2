@@ -6,7 +6,7 @@ const welcomeMessage = 'سلام! به ربات روزانه خوش آمدی. ا
 
 export const bot = new Bot(config.telegram.botToken);
 
-const replyKeyboard = new Keyboard().text('🏠 خانه').resizable();
+const replyKeyboard = new Keyboard().text('🏠 خانه').resized();
 
 bot.command('start', async (ctx: Context) => {
   await ctx.reply(welcomeMessage, {
