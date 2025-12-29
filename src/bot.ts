@@ -18,7 +18,13 @@ bot.command('start', async (ctx: Context) => {
   const telegramId = String(ctx.from.id);
   const username = ctx.from.username ?? null;
 
-  await ensureUser({ telegramId, username });
+  try {
+    await ensureUser({ telegramId, username });
+  } catch (error) {
+    console.error({ scope: 'services/users', error });
+    await ctx.reply('خطا در اتصال به بانک اطلاعاتی. لطفاً بعداً دوباره امتحان کن.');
+    return;
+  }
 
   await ctx.reply(welcomeMessage, {
     reply_markup: replyKeyboard

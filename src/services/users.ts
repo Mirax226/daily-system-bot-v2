@@ -1,91 +1,79 @@
 import { getSupabaseClient } from '../db';
-import { config } from '../config';
 import type { Database } from '../types/supabase';
 
-export type UsersTable = Database['public']['Tables']['users'];
-export type UserRecord = UsersTable['Row'];
+export type UserRecord = Database['public']['Tables']['users']['Row'];
 
-export async function getUserByTelegramId(telegramId: string, supabase = getSupabaseClient()): Promise<UserRecord | null> {
+function handleSupabaseError(context: string, error: unknown): never {
+  const message = error instanceof Error ? error.message : 'Unknown error';
+  throw new Error(`${context}: ${message}`);
+}
+
+export async function getUserByTelegramId(telegramId: string): Promise<UserRecord | null> {
+  const supabase = getSupabaseClient();
+
   const { data, error } = await supabase
     .from('users')
-    .select('id, telegram_id, username, timezone, created_at, updated_at')
+    .select('id, telegram_id, username, timezone, home_chat_id, home_message_id, settings_json, created_at, updated_at')
     .eq('telegram_id', telegramId)
-    .limit(1)
     .maybeSingle();
 
   if (error) {
-    throw error;
+    handleSupabaseError('Failed to fetch user', error);
   }
 
   return data ?? null;
 }
 
-export async function createUser(
-  params: { telegramId: string; username: string | null; timezone?: string },
-  supabase = getSupabaseClient()
-): Promise<UserRecord> {
-  const timezone = params.timezone ?? config.defaultTimezone;
+export async function createUser(params: { telegramId: string; username?: string | null }): Promise<UserRecord> {
+  const supabase = getSupabaseClient();
 
   const { data, error } = await supabase
     .from('users')
     .insert({
       telegram_id: params.telegramId,
-      username: params.username,
-      timezone
+      username: params.username ?? null
     })
-    .select('id, telegram_id, username, timezone, created_at, updated_at')
+    .select('id, telegram_id, username, timezone, home_chat_id, home_message_id, settings_json, created_at, updated_at')
     .single();
 
   if (error) {
-    throw error;
+    handleSupabaseError('Failed to create user', error);
   }
 
-  console.log({ scope: 'services/users', event: 'user_created', telegramId: params.telegramId, username: params.username });
-  return data;
+  console.log({ scope: 'services/users', event: 'user_created', telegramId: params.telegramId, username: params.username ?? null });
+  return data as UserRecord;
 }
 
-export async function updateUsernameIfChanged(
-  userId: string,
-  telegramId: string,
-  currentUsername: string | null,
-  nextUsername: string | null | undefined,
-  supabase = getSupabaseClient()
-): Promise<UserRecord | null> {
-  if (!nextUsername || nextUsername === currentUsername) {
-    return getUserByTelegramId(telegramId, supabase);
-  }
-
-  const { data, error } = await supabase
-    .from('users')
-    .update({ username: nextUsername, updated_at: new Date().toISOString() })
-    .eq('id', userId)
-    .select('id, telegram_id, username, timezone, created_at, updated_at')
-    .single();
-
-  if (error) {
-    throw error;
-  }
-
-  console.log({ scope: 'services/users', event: 'user_username_updated', telegramId, username: nextUsername });
-  return data;
-}
-
-export async function ensureUser(
-  params: { telegramId: string | undefined; username: string | null; timezone?: string },
-  supabase = getSupabaseClient()
-): Promise<UserRecord> {
+export async function ensureUser(params: { telegramId: string; username?: string | null }): Promise<UserRecord> {
   const telegramId = params.telegramId;
-
   if (!telegramId) {
     throw new Error('telegramId is required');
   }
 
-  const existing = await getUserByTelegramId(telegramId, supabase);
+  const existing = await getUserByTelegramId(telegramId);
 
-  if (existing) {
-    const updated = await updateUsernameIfChanged(existing.id, telegramId, existing.username, params.username, supabase);
-    return updated ?? existing;
+  if (!existing) {
+    return createUser({ telegramId, username: params.username ?? null });
   }
 
-  return createUser({ telegramId, username: params.username, timezone: params.timezone }, supabase);
+  const shouldUpdateUsername = typeof params.username !== 'undefined' && params.username !== existing.username;
+
+  if (!shouldUpdateUsername) {
+    return existing;
+  }
+
+  const supabase = getSupabaseClient();
+  const { data, error } = await supabase
+    .from('users')
+    .update({ username: params.username ?? null, updated_at: new Date().toISOString() })
+    .eq('id', existing.id)
+    .select('id, telegram_id, username, timezone, home_chat_id, home_message_id, settings_json, created_at, updated_at')
+    .single();
+
+  if (error) {
+    handleSupabaseError('Failed to update user', error);
+  }
+
+  console.log({ scope: 'services/users', event: 'user_username_updated', telegramId, username: params.username ?? null });
+  return data as UserRecord;
 }

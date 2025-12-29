@@ -7,6 +7,9 @@ export type Database = {
           telegram_id: string;
           username: string | null;
           timezone: string;
+          home_chat_id: string | null;
+          home_message_id: string | null;
+          settings_json: Record<string, unknown>;
           created_at: string;
           updated_at: string;
         };
@@ -15,6 +18,9 @@ export type Database = {
           telegram_id: string;
           username?: string | null;
           timezone?: string;
+          home_chat_id?: string | null;
+          home_message_id?: string | null;
+          settings_json?: Record<string, unknown>;
           created_at?: string;
           updated_at?: string;
         };
@@ -23,6 +29,9 @@ export type Database = {
           telegram_id?: string;
           username?: string | null;
           timezone?: string;
+          home_chat_id?: string | null;
+          home_message_id?: string | null;
+          settings_json?: Record<string, unknown>;
           created_at?: string;
           updated_at?: string;
         };
