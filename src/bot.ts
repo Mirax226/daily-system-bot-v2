@@ -3,37 +3,37 @@ import type { BotError, Context } from 'grammy';
 import { config } from './config';
 import { ensureUser } from './services/users';
 import { getSupabaseClient } from './db';
-import { listUpcomingRemindersForUser } from './services/reminders';
 import { formatLocalTime, formatInstantToLocal } from './utils/time';
 import type { ReminderRow } from './types/supabase';
 
 export const bot = new Bot(config.telegram.botToken);
 
-// ----- Keyboards -----
+// ===== Keyboards =====
 
 const homeKeyboard = new Keyboard()
   .text('خانه 🏠')
   .text('🔔 یادآوری‌ها')
   .resized();
 
-const remindersKeyboard = new Keyboard()
+// Main reminders menu (reply keyboard at bottom)
+const remindersMainKeyboard = new Keyboard()
   .text('➕ یادآوری جدید')
   .row()
-  .text('📋 لیست یادآوری‌ها')
+  .text('📋 لیست و مدیریت یادآوری‌ها')
   .row()
-  .text('⚙️ مدیریت یادآوری‌ها')
-  .row()
-  .text('⬅️ بازگشت')
+  .text('⬅️ بازگشت به خانه')
   .resized();
 
-const buildSingleReminderKeyboard = (): Keyboard =>
-  new Keyboard()
-    .text('🔁 تغییر وضعیت فعال/غیرفعال')
-    .row()
-    .text('🗑 حذف یادآوری')
-    .row()
-    .text('⬅️ بازگشت به فهرست یادآوری‌ها')
-    .resized();
+// Per-reminder actions (reply keyboard)
+const reminderActionsKeyboard = new Keyboard()
+  .text('✏️ ویرایش عنوان')
+  .row()
+  .text('🔁 تغییر وضعیت فعال/غیرفعال')
+  .row()
+  .text('🗑 حذف یادآوری')
+  .row()
+  .text('⬅️ بازگشت به لیست یادآوری‌ها')
+  .resized();
 
 // Inline keyboard ONLY for delay selection when creating a reminder
 const buildDelayKeyboard = (): InlineKeyboard =>
@@ -46,15 +46,22 @@ const buildDelayKeyboard = (): InlineKeyboard =>
     .row()
     .text('۱ ساعت دیگر', 'reminders:delay:60');
 
-// ----- State -----
+// ===== State =====
 
 type ReminderCreateState = {
   stage: 'title' | 'delay';
   title?: string;
 };
 
+type ReminderManageStage =
+  | 'idle'
+  | 'list'
+  | 'select_index'
+  | 'actions'
+  | 'edit_title_wait';
+
 type ReminderManageState = {
-  stage: 'select_index' | 'choose_action';
+  stage: ReminderManageStage;
   reminders: ReminderRow[];
   selectedId?: string;
 };
@@ -62,7 +69,7 @@ type ReminderManageState = {
 const createStates = new Map<string, ReminderCreateState>();
 const manageStates = new Map<string, ReminderManageState>();
 
-// ----- Helpers -----
+// ===== Helpers =====
 
 const sendHome = async (ctx: Context): Promise<void> => {
   if (!ctx.from) {
@@ -96,103 +103,126 @@ const renderReminderListText = (
   withIndices = false,
 ): string => {
   if (!reminders.length) {
-    return '🔔 هیچ یادآوری فعالی نداری.';
+    return '🔔 هیچ یادآوری‌ای ثبت نشده است.';
   }
 
   const lines: string[] = [];
   if (withIndices) {
-    lines.push('⚙️ مدیریت یادآوری‌ها');
-    lines.push('یکی از یادآوری‌ها را با ارسال شماره انتخاب کن:');
+    lines.push('📋 لیست و مدیریت یادآوری‌ها');
+    lines.push('یک شماره از فهرست زیر را ارسال کن تا آن یادآوری را مدیریت کنی:');
     lines.push('');
   } else {
-    lines.push('📋 فهرست یادآوری‌های فعال:');
+    lines.push('📋 فهرست یادآوری‌ها:');
   }
-
-  const tz = userTimezone ?? config.defaultTimezone;
 
   reminders.forEach((reminder, idx) => {
     const prefix = withIndices ? `${idx + 1})` : '•';
+    const statusLabel = reminder.enabled ? 'فعال' : 'غیرفعال';
+
     if (reminder.next_run_at_utc) {
-      const local = formatInstantToLocal(reminder.next_run_at_utc, tz);
+      const local = formatInstantToLocal(
+        reminder.next_run_at_utc,
+        userTimezone ?? undefined,
+      );
       lines.push(
-        `${prefix} ${reminder.title}\n   زمان ارسال: ${local.date} | ${local.time}`,
+        `${prefix} [${statusLabel}] ${reminder.title}\n   زمان ارسال: ${local.date} | ${local.time}`,
       );
     } else {
-      lines.push(`${prefix} ${reminder.title}\n   زمان ارسال: نامشخص`);
+      lines.push(
+        `${prefix} [${statusLabel}] ${reminder.title}\n   زمان ارسال: نامشخص`,
+      );
     }
   });
 
   return lines.join('\n');
 };
 
-const reloadAndRenderManageList = async (
-  telegramId: string,
+const loadAllRemindersForUser = async (
   userId: string,
-  userTimezone: string | null,
+): Promise<ReminderRow[]> => {
+  const client = getSupabaseClient();
+  const { data, error } = await client
+    .from('reminders')
+    .select('*')
+    .eq('user_id', userId)
+    .order('next_run_at_utc', { ascending: true })
+    .order('created_at', { ascending: true });
+
+  if (error) {
+    throw new Error(`Failed to load reminders for user ${userId}: ${error.message}`);
+  }
+
+  return (data as ReminderRow[]) ?? [];
+};
+
+const reloadManageList = async (
+  telegramId: string,
   ctx: Context,
 ): Promise<void> => {
-  const reminders = await listUpcomingRemindersForUser(userId, 20);
+  if (!ctx.from) {
+    await ctx.reply('خطا: کاربر یافت نشد.', { reply_markup: remindersMainKeyboard });
+    return;
+  }
+  const username = ctx.from.username ?? null;
+  const user = await ensureUser({ telegramId, username });
+
+  const reminders = await loadAllRemindersForUser(user.id);
+
   if (!reminders.length) {
     manageStates.delete(telegramId);
-    await ctx.reply('یادآوری‌ای برای مدیریت وجود ندارد.', {
-      reply_markup: remindersKeyboard,
+    await ctx.reply('🔔 هنوز یادآوری‌ای ثبت نکرده‌ای.', {
+      reply_markup: remindersMainKeyboard,
     });
     return;
   }
 
   manageStates.set(telegramId, { stage: 'select_index', reminders });
-  const text = renderReminderListText(reminders, userTimezone, true);
+  const text = renderReminderListText(reminders, user.timezone, true);
 
-  await ctx.reply(text, { reply_markup: remindersKeyboard });
+  await ctx.reply(text, { reply_markup: remindersMainKeyboard });
 };
 
-// ----- Commands / main menus -----
+// ===== Commands / main menus =====
 
 bot.command('start', sendHome);
 bot.command('home', sendHome);
 
 bot.hears(['خانه 🏠', '🏠 خانه'], sendHome);
 
+// Main entry to reminders
 bot.hears('🔔 یادآوری‌ها', async (ctx: Context) => {
   await ctx.reply('🔔 مدیریت یادآوری‌ها\nیکی از گزینه‌های زیر را انتخاب کن.', {
-    reply_markup: remindersKeyboard,
+    reply_markup: remindersMainKeyboard,
   });
 });
 
-bot.hears('⬅️ بازگشت', async (ctx: Context) => {
+bot.hears('⬅️ بازگشت به خانه', async (ctx: Context) => {
   await sendHome(ctx);
 });
 
-// ----- Simple list (no management) -----
+// ===== Simple list + manage (merged) =====
 
-bot.hears('📋 لیست یادآوری‌ها', async (ctx: Context) => {
+bot.hears('📋 لیست و مدیریت یادآوری‌ها', async (ctx: Context) => {
   if (!ctx.from) return;
 
   const telegramId = String(ctx.from.id);
-  const username = ctx.from.username ?? null;
 
   try {
-    const user = await ensureUser({ telegramId, username });
-    const reminders = await listUpcomingRemindersForUser(user.id);
-
-    console.log({
-      scope: 'reminders',
-      event: 'list',
-      userId: user.id,
-      count: reminders.length,
-    });
-
-    const text = renderReminderListText(reminders, user.timezone);
-    await ctx.reply(text, { reply_markup: remindersKeyboard });
+    await reloadManageList(telegramId, ctx);
   } catch (error) {
-    console.error({ scope: 'reminders', event: 'list_error', telegramId, error });
-    await ctx.reply('❌ خطا در دریافت یادآوری‌ها.', {
-      reply_markup: remindersKeyboard,
+    console.error({
+      scope: 'reminders',
+      event: 'list_manage_error',
+      telegramId,
+      error,
+    });
+    await ctx.reply('❌ خطا در دریافت لیست یادآوری‌ها.', {
+      reply_markup: remindersMainKeyboard,
     });
   }
 });
 
-// ----- Reminder creation -----
+// ===== Create reminder flow =====
 
 bot.hears('➕ یادآوری جدید', async (ctx: Context) => {
   if (!ctx.from) return;
@@ -203,14 +233,15 @@ bot.hears('➕ یادآوری جدید', async (ctx: Context) => {
   await ctx.reply('✏️ لطفاً عنوان یادآوری را بنویس.\nمثال: دارو، تماس، تمرین و ...');
 });
 
-// Text handler for both creation (title) and management (select index)
+// ===== Global text handler for stateful flows =====
+
 bot.on('message:text', async (ctx: Context) => {
   if (!ctx.from || !ctx.message || typeof ctx.message.text !== 'string') return;
 
   const telegramId = String(ctx.from.id);
   const text = ctx.message.text.trim();
 
-  // 1) Creation: waiting for title
+  // 1) Creation flow: waiting for title
   const createState = createStates.get(telegramId);
   if (createState && createState.stage === 'title') {
     if (!text) {
@@ -226,21 +257,28 @@ bot.on('message:text', async (ctx: Context) => {
     return;
   }
 
-  // 2) Management: waiting for index
+  // 2) Manage flow: waiting for index or new title
   const manageState = manageStates.get(telegramId);
-  if (manageState && manageState.stage === 'select_index') {
+
+  if (!manageState) {
+    // No state: ignore, other hears/commands have already handled.
+    return;
+  }
+
+  // a) user is selecting reminder index
+  if (manageState.stage === 'select_index') {
     const index = Number(text);
     if (!Number.isInteger(index) || index < 1 || index > manageState.reminders.length) {
       await ctx.reply('❗ شماره نامعتبر است. یک عدد از فهرست ارسال کن.', {
-        reply_markup: remindersKeyboard,
+        reply_markup: remindersMainKeyboard,
       });
       return;
     }
 
     const selected = manageState.reminders[index - 1];
     manageStates.set(telegramId, {
-      stage: 'choose_action',
-      reminders: manageState.reminders,
+      ...manageState,
+      stage: 'actions',
       selectedId: selected.id,
     });
 
@@ -248,12 +286,13 @@ bot.on('message:text', async (ctx: Context) => {
       ? formatInstantToLocal(selected.next_run_at_utc, undefined)
       : null;
 
-    const summaryLines = [
+    const summary: string[] = [
       'یادآوری انتخاب شد:',
-      selected.title,
+      `عنوان: ${selected.title}`,
+      `وضعیت: ${selected.enabled ? 'فعال' : 'غیرفعال'}`,
     ];
     if (local) {
-      summaryLines.push(`زمان ارسال: ${local.date} | ${local.time}`);
+      summary.push(`زمان ارسال: ${local.date} | ${local.time}`);
     }
 
     console.log({
@@ -263,16 +302,61 @@ bot.on('message:text', async (ctx: Context) => {
       userId: selected.user_id,
     });
 
-    await ctx.reply(summaryLines.join('\n'), {
-      reply_markup: buildSingleReminderKeyboard(),
-    });
+    await ctx.reply(summary.join('\n'), { reply_markup: reminderActionsKeyboard });
     return;
   }
 
-  // Otherwise: ignore, other handlers (like hears) will have already run.
+  // b) user is sending new title
+  if (manageState.stage === 'edit_title_wait' && manageState.selectedId) {
+    if (!text) {
+      await ctx.reply('❗ عنوان معتبر نیست. دوباره امتحان کن.', {
+        reply_markup: reminderActionsKeyboard,
+      });
+      return;
+    }
+
+    const client = getSupabaseClient();
+
+    try {
+      const { error } = await client
+        .from('reminders')
+        .update({ title: text, updated_at: new Date().toISOString() })
+        .eq('id', manageState.selectedId);
+
+      if (error) throw error;
+
+      // update local copy
+      const updatedReminders = manageState.reminders.map((r) =>
+        r.id === manageState.selectedId ? { ...r, title: text } : r,
+      );
+
+      manageStates.set(telegramId, {
+        stage: 'actions',
+        selectedId: manageState.selectedId,
+        reminders: updatedReminders,
+      });
+
+      await ctx.reply('✅ عنوان یادآوری به‌روزرسانی شد.', {
+        reply_markup: reminderActionsKeyboard,
+      });
+    } catch (error) {
+      console.error({
+        scope: 'reminders',
+        event: 'manage_edit_title_error',
+        reminderId: manageState.selectedId,
+        error,
+      });
+      await ctx.reply('❌ خطا در ویرایش عنوان یادآوری.', {
+        reply_markup: reminderActionsKeyboard,
+      });
+    }
+
+    return;
+  }
 });
 
-// Delay callback (inline)
+// ===== Delay selection (inline) =====
+
 bot.callbackQuery(/reminders:delay:(\d+)/, async (ctx) => {
   if (!ctx.from) {
     await ctx.answerCallbackQuery();
@@ -331,54 +415,47 @@ bot.callbackQuery(/reminders:delay:(\d+)/, async (ctx) => {
   }
 });
 
-// ----- Management actions -----
+// ===== Management actions (reply keyboard) =====
 
-bot.hears('⚙️ مدیریت یادآوری‌ها', async (ctx: Context) => {
+bot.hears('⬅️ بازگشت به لیست یادآوری‌ها', async (ctx: Context) => {
   if (!ctx.from) return;
 
   const telegramId = String(ctx.from.id);
-  const username = ctx.from.username ?? null;
+  const state = manageStates.get(telegramId);
 
-  try {
-    const user = await ensureUser({ telegramId, username });
-
-    console.log({
-      scope: 'reminders',
-      event: 'manage_enter',
-      userId: user.id,
-    });
-
-    await reloadAndRenderManageList(telegramId, user.id, user.timezone, ctx);
-  } catch (error) {
-    console.error({ scope: 'reminders', event: 'manage_error', step: 'enter', error });
-    await ctx.reply('❌ خطا در ورود به مدیریت یادآوری‌ها.', {
-      reply_markup: remindersKeyboard,
-    });
-  }
-});
-
-bot.hears('⬅️ بازگشت به فهرست یادآوری‌ها', async (ctx: Context) => {
-  if (!ctx.from) {
-    await ctx.reply('هیچ لیستی برای بازگشت وجود ندارد.', {
-      reply_markup: remindersKeyboard,
+  if (!state || !state.reminders.length) {
+    await ctx.reply('لیست یادآوری خالی است.', {
+      reply_markup: remindersMainKeyboard,
     });
     return;
   }
+
+  manageStates.set(telegramId, { ...state, stage: 'select_index' });
+
+  await ctx.reply(
+    renderReminderListText(state.reminders, undefined, true),
+    { reply_markup: remindersMainKeyboard },
+  );
+});
+
+bot.hears('✏️ ویرایش عنوان', async (ctx: Context) => {
+  if (!ctx.from) return;
 
   const telegramId = String(ctx.from.id);
   const state = manageStates.get(telegramId);
-  if (!state) {
-    await ctx.reply('هیچ لیستی برای بازگشت وجود ندارد.', {
-      reply_markup: remindersKeyboard,
+
+  if (!state || state.stage !== 'actions' || !state.selectedId) {
+    await ctx.reply('ابتدا از لیست یک یادآوری را انتخاب کن.', {
+      reply_markup: remindersMainKeyboard,
     });
     return;
   }
 
-  // Re-render list with existing reminders
-  const text = renderReminderListText(state.reminders, undefined, true);
-  manageStates.set(telegramId, { ...state, stage: 'select_index' });
+  manageStates.set(telegramId, { ...state, stage: 'edit_title_wait' });
 
-  await ctx.reply(text, { reply_markup: remindersKeyboard });
+  await ctx.reply('✏️ عنوان جدید یادآوری را ارسال کن.', {
+    reply_markup: reminderActionsKeyboard,
+  });
 });
 
 bot.hears('🔁 تغییر وضعیت فعال/غیرفعال', async (ctx: Context) => {
@@ -386,9 +463,10 @@ bot.hears('🔁 تغییر وضعیت فعال/غیرفعال', async (ctx: Cont
 
   const telegramId = String(ctx.from.id);
   const state = manageStates.get(telegramId);
-  if (!state || state.stage !== 'choose_action' || !state.selectedId) {
-    await ctx.reply('ابتدا یک یادآوری را از فهرست انتخاب کن.', {
-      reply_markup: remindersKeyboard,
+
+  if (!state || state.stage !== 'actions' || !state.selectedId) {
+    await ctx.reply('ابتدا از لیست یک یادآوری را انتخاب کن.', {
+      reply_markup: remindersMainKeyboard,
     });
     return;
   }
@@ -396,42 +474,53 @@ bot.hears('🔁 تغییر وضعیت فعال/غیرفعال', async (ctx: Cont
   const client = getSupabaseClient();
 
   try {
-    const { data: reminder, error } = await client
-      .from('reminders')
-      .select('*')
-      .eq('id', state.selectedId)
-      .maybeSingle();
-
-    if (error) throw error;
-    if (!reminder) {
-      await ctx.reply('یادآوری پیدا نشد.', { reply_markup: remindersKeyboard });
+    const current = state.reminders.find((r) => r.id === state.selectedId);
+    if (!current) {
+      await ctx.reply('یادآوری پیدا نشد.', {
+        reply_markup: remindersMainKeyboard,
+      });
       return;
     }
 
-    const nextEnabled = !reminder.enabled;
-    const { error: updateError } = await client
+    const nextEnabled = !current.enabled;
+
+    const { error } = await client
       .from('reminders')
       .update({ enabled: nextEnabled, updated_at: new Date().toISOString() })
-      .eq('id', reminder.id);
+      .eq('id', current.id);
 
-    if (updateError) throw updateError;
+    if (error) throw error;
+
+    const updatedReminders = state.reminders.map((r) =>
+      r.id === current.id ? { ...r, enabled: nextEnabled } : r,
+    );
+
+    manageStates.set(telegramId, {
+      ...state,
+      reminders: updatedReminders,
+    });
 
     console.log({
       scope: 'reminders',
       event: 'manage_toggle',
-      reminderId: reminder.id,
-      userId: reminder.user_id,
+      reminderId: current.id,
+      userId: current.user_id,
       enabled: nextEnabled,
     });
 
     await ctx.reply(
       `وضعیت یادآوری به "${nextEnabled ? 'فعال' : 'غیرفعال'}" تغییر کرد.`,
-      { reply_markup: buildSingleReminderKeyboard() },
+      { reply_markup: reminderActionsKeyboard },
     );
   } catch (error) {
-    console.error({ scope: 'reminders', event: 'manage_error', action: 'toggle', error });
+    console.error({
+      scope: 'reminders',
+      event: 'manage_toggle_error',
+      reminderId: state.selectedId,
+      error,
+    });
     await ctx.reply('❌ خطا در تغییر وضعیت یادآوری.', {
-      reply_markup: buildSingleReminderKeyboard(),
+      reply_markup: reminderActionsKeyboard,
     });
   }
 });
@@ -441,9 +530,10 @@ bot.hears('🗑 حذف یادآوری', async (ctx: Context) => {
 
   const telegramId = String(ctx.from.id);
   const state = manageStates.get(telegramId);
-  if (!state || state.stage !== 'choose_action' || !state.selectedId) {
-    await ctx.reply('ابتدا یک یادآوری را از فهرست انتخاب کن.', {
-      reply_markup: remindersKeyboard,
+
+  if (!state || state.stage !== 'actions' || !state.selectedId) {
+    await ctx.reply('ابتدا از لیست یک یادآوری را انتخاب کن.', {
+      reply_markup: remindersMainKeyboard,
     });
     return;
   }
@@ -451,8 +541,14 @@ bot.hears('🗑 حذف یادآوری', async (ctx: Context) => {
   const client = getSupabaseClient();
 
   try {
-    const { error } = await client.from('reminders').delete().eq('id', state.selectedId);
+    const { error } = await client
+      .from('reminders')
+      .delete()
+      .eq('id', state.selectedId);
+
     if (error) throw error;
+
+    const remaining = state.reminders.filter((r) => r.id !== state.selectedId);
 
     console.log({
       scope: 'reminders',
@@ -460,14 +556,11 @@ bot.hears('🗑 حذف یادآوری', async (ctx: Context) => {
       reminderId: state.selectedId,
     });
 
-    // حذف از آرایه محلی
-    const remaining = state.reminders.filter((r) => r.id !== state.selectedId);
-
-    if (remaining.length === 0) {
+    if (!remaining.length) {
       manageStates.delete(telegramId);
       await ctx.reply(
-        'یادآوری حذف شد و دیگر یادآوری فعالی برای مدیریت وجود ندارد.',
-        { reply_markup: remindersKeyboard },
+        'یادآوری حذف شد و دیگر یادآوری‌ای برای مدیریت وجود ندارد.',
+        { reply_markup: remindersMainKeyboard },
       );
       return;
     }
@@ -478,17 +571,24 @@ bot.hears('🗑 حذف یادآوری', async (ctx: Context) => {
       selectedId: undefined,
     });
 
-    const text = renderReminderListText(remaining, undefined, true);
-    await ctx.reply(text, { reply_markup: remindersKeyboard });
+    await ctx.reply(
+      renderReminderListText(remaining, undefined, true),
+      { reply_markup: remindersMainKeyboard },
+    );
   } catch (error) {
-    console.error({ scope: 'reminders', event: 'manage_error', action: 'delete', error });
+    console.error({
+      scope: 'reminders',
+      event: 'manage_delete_error',
+      reminderId: state.selectedId,
+      error,
+    });
     await ctx.reply('❌ خطا در حذف یادآوری.', {
-      reply_markup: buildSingleReminderKeyboard(),
+      reply_markup: reminderActionsKeyboard,
     });
   }
 });
 
-// ----- Global error handler -----
+// ===== Global error handler =====
 
 bot.catch((err: BotError<Context>) => {
   const { ctx, error } = err;
