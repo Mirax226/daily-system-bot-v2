@@ -29,6 +29,100 @@ export async function findDueReminders(
   return data ?? [];
 }
 
+export async function listRemindersForUser(userId: string, client = getSupabaseClient()): Promise<ReminderRow[]> {
+  const { data, error } = await client
+    .from(REMINDERS_TABLE)
+    .select('*')
+    .eq('user_id', userId)
+    .order('next_run_at_utc', { ascending: true, nullsFirst: false })
+    .order('created_at', { ascending: true });
+
+  if (error) {
+    throw new Error(`Failed to list reminders: ${error.message}`);
+  }
+
+  return (data as ReminderRow[]) ?? [];
+}
+
+export async function getReminderById(reminderId: string, client = getSupabaseClient()): Promise<ReminderRow | null> {
+  const { data, error } = await client.from(REMINDERS_TABLE).select('*').eq('id', reminderId).maybeSingle();
+
+  if (error) {
+    throw new Error(`Failed to load reminder: ${error.message}`);
+  }
+
+  return data ?? null;
+}
+
+export async function createReminder(
+  userId: string,
+  title: string,
+  detail: string | null,
+  nextRunUtc: Date,
+  client = getSupabaseClient()
+): Promise<ReminderRow> {
+  const { data, error } = await client
+    .from(REMINDERS_TABLE)
+    .insert({
+      user_id: userId,
+      title,
+      detail,
+      next_run_at_utc: toIsoString(nextRunUtc),
+      last_sent_at_utc: null,
+      enabled: true
+    })
+    .select('*')
+    .single();
+
+  if (error) {
+    throw new Error(`Failed to create reminder: ${error.message}`);
+  }
+
+  return data as ReminderRow;
+}
+
+export async function updateReminder(
+  reminderId: string,
+  patch: { title?: string; detail?: string | null; nextRunAtUtc?: Date | null; enabled?: boolean },
+  client = getSupabaseClient()
+): Promise<ReminderRow> {
+  const updates: Record<string, unknown> = {
+    updated_at: toIsoString(new Date())
+  };
+
+  if (typeof patch.title !== 'undefined') updates.title = patch.title;
+  if (typeof patch.detail !== 'undefined') updates.detail = patch.detail;
+  if (typeof patch.enabled !== 'undefined') updates.enabled = patch.enabled;
+  if ('nextRunAtUtc' in patch) updates.next_run_at_utc = patch.nextRunAtUtc ? toIsoString(patch.nextRunAtUtc) : null;
+
+  const { data, error } = await client
+    .from(REMINDERS_TABLE)
+    .update(updates)
+    .eq('id', reminderId)
+    .select('*')
+    .maybeSingle();
+
+  if (error) {
+    throw new Error(`Failed to update reminder: ${error.message}`);
+  }
+
+  if (!data) {
+    throw new Error('Failed to update reminder: no data returned');
+  }
+
+  return data as ReminderRow;
+}
+
+export async function toggleReminderEnabled(reminderId: string, client = getSupabaseClient()): Promise<ReminderRow> {
+  const current = await getReminderById(reminderId, client);
+  if (!current) {
+    throw new Error('Reminder not found');
+  }
+
+  const nextEnabled = !current.enabled;
+  return updateReminder(reminderId, { enabled: nextEnabled }, client);
+}
+
 export async function loadUser(userId: string, client = getSupabaseClient()): Promise<UserRow | null> {
   const { data, error } = await client
     .from(USERS_TABLE)
@@ -43,11 +137,7 @@ export async function loadUser(userId: string, client = getSupabaseClient()): Pr
   return data ?? null;
 }
 
-export async function sendReminderMessage(params: {
-  reminder: ReminderRow;
-  user: UserRow;
-  botClient: Bot;
-}): Promise<void> {
+export async function sendReminderMessage(params: { reminder: ReminderRow; user: UserRow; botClient: Bot }): Promise<void> {
   const { reminder, user, botClient } = params;
   const chatId = user.telegram_id;
 
@@ -144,31 +234,6 @@ export async function listUpcomingRemindersForUser(
   }
 
   return data ?? [];
-}
-
-export async function getReminderById(reminderId: string, client = getSupabaseClient()): Promise<ReminderRow | null> {
-  const { data, error } = await client.from(REMINDERS_TABLE).select('*').eq('id', reminderId).maybeSingle();
-
-  if (error) {
-    throw new Error(`Failed to load reminder: ${error.message}`);
-  }
-
-  return data ?? null;
-}
-
-export async function updateReminderEnabled(
-  reminderId: string,
-  enabled: boolean,
-  client = getSupabaseClient()
-): Promise<void> {
-  const { error } = await client
-    .from(REMINDERS_TABLE)
-    .update({ enabled, updated_at: new Date().toISOString() })
-    .eq('id', reminderId);
-
-  if (error) {
-    throw new Error(`Failed to update reminder status: ${error.message}`);
-  }
 }
 
 export async function deleteReminder(reminderId: string, client = getSupabaseClient()): Promise<void> {
