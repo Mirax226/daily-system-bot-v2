@@ -3,6 +3,7 @@ import { webhookCallback } from 'grammy';
 import { bot } from './bot';
 import { config } from './config';
 import { getSupabaseClient } from './db';
+import { processDueReminders } from './services/reminders';
 
 const server = Fastify({ logger: true });
 
@@ -17,12 +18,16 @@ server.post('/cron/tick', async (request: FastifyRequest, reply: FastifyReply) =
   const providedSecret = Array.isArray(headerSecret) ? headerSecret[0] : headerSecret;
 
   if (providedSecret !== config.cron.secret) {
+    console.warn({ scope: 'cron', event: 'cron_unauthorized' });
     reply.code(401);
     return { error: 'unauthorized' };
   }
 
-  console.log({ scope: 'cron', event: 'tick' });
-  return { status: 'ok', processed: [] as unknown[] };
+  const nowUtc = new Date();
+  const result = await processDueReminders(nowUtc, bot);
+
+  console.log({ scope: 'cron', event: 'cron_tick_done', processed: result.processed });
+  return { status: 'ok', processed: result.processed };
 });
 
 const start = async () => {

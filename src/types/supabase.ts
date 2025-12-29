@@ -37,6 +37,42 @@ export type Database = {
         };
         Relationships: [];
       };
+      reminders: {
+        Row: {
+          id: string;
+          user_id: string;
+          title: string;
+          detail: string | null;
+          next_run_at_utc: string | null;
+          last_sent_at_utc: string | null;
+          enabled: boolean;
+          created_at: string;
+          updated_at: string;
+        };
+        Insert: {
+          id?: string;
+          user_id: string;
+          title: string;
+          detail?: string | null;
+          next_run_at_utc?: string | null;
+          last_sent_at_utc?: string | null;
+          enabled?: boolean;
+          created_at?: string;
+          updated_at?: string;
+        };
+        Update: {
+          id?: string;
+          user_id?: string;
+          title?: string;
+          detail?: string | null;
+          next_run_at_utc?: string | null;
+          last_sent_at_utc?: string | null;
+          enabled?: boolean;
+          created_at?: string;
+          updated_at?: string;
+        };
+        Relationships: [];
+      };
     };
     Views: {};
     Functions: {};
@@ -44,3 +80,5 @@ export type Database = {
     CompositeTypes: {};
   };
 };
+
+export type ReminderRow = Database['public']['Tables']['reminders']['Row'];
