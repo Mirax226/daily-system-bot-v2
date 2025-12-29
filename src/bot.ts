@@ -1,12 +1,28 @@
-import { Bot, Keyboard } from 'grammy';
+import { Bot, InlineKeyboard, Keyboard } from 'grammy';
 import type { BotError, Context } from 'grammy';
 import { config } from './config';
 import { ensureUser } from './services/users';
+import { getSupabaseClient } from './db';
+import { listUpcomingRemindersForUser } from './services/reminders';
 import { formatLocalTime } from './utils/time';
 
 export const bot = new Bot(config.telegram.botToken);
 
-const replyKeyboard = new Keyboard().text('خانه 🏠').resized();
+const replyKeyboard = new Keyboard().text('خانه 🏠').text('🔔 یادآوری‌ها').resized();
+
+const remindersMenuKeyboard = new InlineKeyboard()
+  .text('➕ یادآوری جدید', 'reminders:new')
+  .row()
+  .text('📋 لیست یادآوری‌ها', 'reminders:list')
+  .row()
+  .text('⬅️ بازگشت', 'reminders:back');
+
+type ReminderState = {
+  stage: 'title' | 'delay';
+  title?: string;
+};
+
+const reminderStates = new Map<string, ReminderState>();
 
 const sendHome = async (ctx: Context) => {
   if (!ctx.from) {
@@ -45,12 +61,162 @@ bot.hears('🏠 خانه', async (ctx: Context) => {
   await sendHome(ctx);
 });
 
+bot.hears('خانه 🏠', async (ctx: Context) => {
+  await sendHome(ctx);
+});
+
 bot.command('home', async (ctx: Context) => {
   await sendHome(ctx);
 });
 
-bot.hears('خانه 🏠', async (ctx: Context) => {
-  await sendHome(ctx);
+bot.hears('🔔 یادآوری‌ها', async (ctx: Context) => {
+  await ctx.reply('🔔 مدیریت یادآوری‌ها\nیکی از گزینه‌های زیر را انتخاب کن.', {
+    reply_markup: remindersMenuKeyboard
+  });
+});
+
+bot.callbackQuery('reminders:back', async (ctx) => {
+  await ctx.editMessageText('بازگشت به خانه');
+});
+
+bot.callbackQuery('reminders:list', async (ctx) => {
+  if (!ctx.from) {
+    await ctx.answerCallbackQuery();
+    return;
+  }
+
+  const telegramId = String(ctx.from.id);
+  const username = ctx.from.username ?? null;
+
+  try {
+    const user = await ensureUser({ telegramId, username });
+    const reminders = await listUpcomingRemindersForUser(user.id);
+
+    console.log({ scope: 'reminders', event: 'list', userId: user.id, count: reminders.length });
+
+    if (!reminders.length) {
+      await ctx.editMessageText('🔔 هیچ یادآوری فعالی نداری.', { reply_markup: remindersMenuKeyboard });
+      return;
+    }
+
+    const lines = reminders.map((reminder) => `• ${reminder.title} — زمان ارسال: ${reminder.next_run_at_utc ?? 'نامشخص'}`);
+    const text = ['📋 فهرست یادآوری‌های فعال:', ...lines].join('\n');
+
+    await ctx.editMessageText(text, { reply_markup: remindersMenuKeyboard });
+  } catch (error) {
+    console.error({ scope: 'reminders', event: 'list_error', telegramId, error });
+    await ctx.editMessageText('❌ خطا در دریافت یادآوری‌ها.', { reply_markup: remindersMenuKeyboard });
+  }
+});
+
+bot.callbackQuery('reminders:new', async (ctx) => {
+  if (!ctx.from) {
+    await ctx.answerCallbackQuery();
+    return;
+  }
+
+  const telegramId = String(ctx.from.id);
+  reminderStates.set(telegramId, { stage: 'title' });
+
+  await ctx.editMessageText('✏️ لطفاً عنوان یادآوری را بنویس.\nمثال: دارو، تماس، تمرین و ...');
+});
+
+bot.on('message:text', async (ctx) => {
+  if (!ctx.from) {
+    return;
+  }
+
+  const telegramId = String(ctx.from.id);
+  const state = reminderStates.get(telegramId);
+
+  if (!state || state.stage !== 'title') {
+    return;
+  }
+
+  const title = ctx.message.text.trim();
+  if (!title) {
+    await ctx.reply('❗ عنوان معتبر نیست. دوباره امتحان کن.');
+    return;
+  }
+
+  reminderStates.set(telegramId, { stage: 'delay', title });
+
+  const delayKeyboard = new InlineKeyboard()
+    .text('۵ دقیقه دیگر', 'reminders:delay:5')
+    .row()
+    .text('۱۵ دقیقه دیگر', 'reminders:delay:15')
+    .row()
+    .text('۳۰ دقیقه دیگر', 'reminders:delay:30')
+    .row()
+    .text('۱ ساعت دیگر', 'reminders:delay:60');
+
+  await ctx.reply('⏰ چه زمانی بهت یادآوری کنم؟', {
+    reply_markup: delayKeyboard
+  });
+});
+
+bot.callbackQuery(/reminders:delay:(\d+)/, async (ctx) => {
+  if (!ctx.from) {
+    await ctx.answerCallbackQuery();
+    return;
+  }
+
+  const delayMatch = ctx.match?.[1];
+  const delayMinutes = delayMatch ? Number(delayMatch) : NaN;
+  const telegramId = String(ctx.from.id);
+  const username = ctx.from.username ?? null;
+  const state = reminderStates.get(telegramId);
+
+  if (!state || state.stage !== 'delay' || !state.title || Number.isNaN(delayMinutes)) {
+    await ctx.answerCallbackQuery({ text: 'درخواست نامعتبر است.', show_alert: true });
+    return;
+  }
+
+  try {
+    const nowUtc = new Date();
+    const nextRunUtc = new Date(nowUtc.getTime() + delayMinutes * 60 * 1000);
+
+    const user = await ensureUser({ telegramId, username });
+
+    const client = getSupabaseClient();
+
+    const { data, error } = await client
+      .from('reminders')
+      .insert({
+        user_id: user.id,
+        title: state.title,
+        detail: null,
+        next_run_at_utc: nextRunUtc.toISOString(),
+        last_sent_at_utc: null,
+        enabled: true
+      })
+      .select('id')
+      .single();
+
+    if (error) {
+      throw error;
+    }
+
+    console.log({
+      scope: 'reminders',
+      event: 'created',
+      userId: user.id,
+      telegramId,
+      reminderId: data?.id,
+      delayMinutes
+    });
+
+    await ctx.editMessageText(`✅ یادآوری ثبت شد.\nربات حدود ${delayMinutes} دقیقه دیگر بهت پیام می‌دهد.`, {
+      reply_markup: remindersMenuKeyboard
+    });
+  } catch (error) {
+    console.error({ scope: 'reminders', event: 'create_error', telegramId, error });
+    await ctx.editMessageText('❌ خطا در ثبت یادآوری. لطفاً بعداً دوباره امتحان کن.', {
+      reply_markup: remindersMenuKeyboard
+    });
+  } finally {
+    reminderStates.delete(telegramId);
+  }
 });
 
 bot.catch((err: BotError<Context>) => {

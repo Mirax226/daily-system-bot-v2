@@ -124,3 +124,24 @@ export async function processDueReminders(
 
   return { processed };
 }
+
+export async function listUpcomingRemindersForUser(
+  userId: string,
+  limit = 10,
+  client = getSupabaseClient()
+): Promise<ReminderRow[]> {
+  const { data, error } = await client
+    .from(REMINDERS_TABLE)
+    .select('*')
+    .eq('user_id', userId)
+    .eq('enabled', true)
+    .not('next_run_at_utc', 'is', null)
+    .order('next_run_at_utc', { ascending: true })
+    .limit(limit);
+
+  if (error) {
+    throw new Error(`Failed to list reminders: ${error.message}`);
+  }
+
+  return data ?? [];
+}
