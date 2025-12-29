@@ -17,10 +17,7 @@ export const bot = new Bot(config.telegram.botToken);
 
 // ===== Keyboards =====
 
-const homeKeyboard = new InlineKeyboard()
-  .text('🏠 خانه', 'home:menu')
-  .row()
-  .text('🔔 یادآوری‌ها', 'reminders:menu');
+const homeKeyboard = new InlineKeyboard().text('🔔 یادآوری‌ها', 'reminders:menu');
 
 const remindersMenuKeyboard = new InlineKeyboard()
   .text('➕ یادآوری جدید', 'reminders:new')
@@ -288,13 +285,6 @@ bot.command('start', async (ctx: Context) => {
 
 bot.command('home', async (ctx: Context) => {
   await sendHome(ctx);
-});
-
-// ===== Home callbacks =====
-
-bot.callbackQuery('home:menu', async (ctx) => {
-  await sendHome(ctx, true);
-  await ctx.answerCallbackQuery();
 });
 
 // ===== Reminders main menu =====
