@@ -145,3 +145,36 @@ export async function listUpcomingRemindersForUser(
 
   return data ?? [];
 }
+
+export async function getReminderById(reminderId: string, client = getSupabaseClient()): Promise<ReminderRow | null> {
+  const { data, error } = await client.from(REMINDERS_TABLE).select('*').eq('id', reminderId).maybeSingle();
+
+  if (error) {
+    throw new Error(`Failed to load reminder: ${error.message}`);
+  }
+
+  return data ?? null;
+}
+
+export async function updateReminderEnabled(
+  reminderId: string,
+  enabled: boolean,
+  client = getSupabaseClient()
+): Promise<void> {
+  const { error } = await client
+    .from(REMINDERS_TABLE)
+    .update({ enabled, updated_at: new Date().toISOString() })
+    .eq('id', reminderId);
+
+  if (error) {
+    throw new Error(`Failed to update reminder status: ${error.message}`);
+  }
+}
+
+export async function deleteReminder(reminderId: string, client = getSupabaseClient()): Promise<void> {
+  const { error } = await client.from(REMINDERS_TABLE).delete().eq('id', reminderId);
+
+  if (error) {
+    throw new Error(`Failed to delete reminder: ${error.message}`);
+  }
+}
