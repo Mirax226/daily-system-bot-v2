@@ -1,4 +1,4 @@
-import { Bot, InlineKeyboard } from 'grammy';
+import { Bot, InlineKeyboard, Keyboard } from 'grammy';
 import type { BotError, Context } from 'grammy';
 import { config } from './config';
 import { ensureUser } from './services/users';
@@ -8,14 +8,15 @@ import { formatLocalTime } from './utils/time';
 
 export const bot = new Bot(config.telegram.botToken);
 
-const homeKeyboard = new InlineKeyboard().text('🔔 یادآوری‌ها', 'reminders:menu');
+const replyKeyboard = new Keyboard().text('خانه 🏠').text('🔔 یادآوری‌ها').resized();
 
-const remindersMenuKeyboard = new InlineKeyboard()
-  .text('➕ یادآوری جدید', 'reminders:new')
+const remindersReplyKeyboard = new Keyboard()
+  .text('➕ یادآوری جدید')
   .row()
-  .text('📋 لیست یادآوری‌ها', 'reminders:list')
+  .text('📋 لیست یادآوری‌ها')
   .row()
-  .text('⬅️ بازگشت', 'reminders:back');
+  .text('⬅️ بازگشت')
+  .resized();
 
 type ReminderState = {
   stage: 'title' | 'delay';
@@ -44,7 +45,7 @@ const sendHome = async (ctx: Context) => {
     ].join('\n');
 
     await ctx.reply(homeMessage, {
-      reply_markup: homeKeyboard
+      reply_markup: replyKeyboard
     });
   } catch (error) {
     console.error({ scope: 'services/users', error });
@@ -71,7 +72,7 @@ bot.command('home', async (ctx: Context) => {
 
 const sendRemindersMenu = async (ctx: Context) => {
   await ctx.reply('🔔 مدیریت یادآوری‌ها\nیکی از گزینه‌های زیر را انتخاب کن.', {
-    reply_markup: remindersMenuKeyboard
+    reply_markup: remindersReplyKeyboard
   });
 };
 
@@ -79,19 +80,12 @@ bot.hears('🔔 یادآوری‌ها', async (ctx: Context) => {
   await sendRemindersMenu(ctx);
 });
 
-bot.callbackQuery('reminders:menu', async (ctx) => {
-  await ctx.editMessageText('🔔 مدیریت یادآوری‌ها\nیکی از گزینه‌های زیر را انتخاب کن.', {
-    reply_markup: remindersMenuKeyboard
-  });
+bot.hears('⬅️ بازگشت', async (ctx: Context) => {
+  await sendHome(ctx);
 });
 
-bot.callbackQuery('reminders:back', async (ctx) => {
-  await ctx.editMessageText('بازگشت به خانه', { reply_markup: homeKeyboard });
-});
-
-bot.callbackQuery('reminders:list', async (ctx) => {
+bot.hears('📋 لیست یادآوری‌ها', async (ctx: Context) => {
   if (!ctx.from) {
-    await ctx.answerCallbackQuery();
     return;
   }
 
@@ -105,30 +99,31 @@ bot.callbackQuery('reminders:list', async (ctx) => {
     console.log({ scope: 'reminders', event: 'list', userId: user.id, count: reminders.length });
 
     if (!reminders.length) {
-      await ctx.editMessageText('🔔 هیچ یادآوری فعالی نداری.', { reply_markup: remindersMenuKeyboard });
+      await ctx.reply('🔔 هیچ یادآوری فعالی نداری.', { reply_markup: remindersReplyKeyboard });
       return;
     }
 
     const lines = reminders.map((reminder) => `• ${reminder.title} — زمان ارسال: ${reminder.next_run_at_utc ?? 'نامشخص'}`);
     const text = ['📋 فهرست یادآوری‌های فعال:', ...lines].join('\n');
 
-    await ctx.editMessageText(text, { reply_markup: remindersMenuKeyboard });
+    await ctx.reply(text, { reply_markup: remindersReplyKeyboard });
   } catch (error) {
     console.error({ scope: 'reminders', event: 'list_error', telegramId, error });
-    await ctx.editMessageText('❌ خطا در دریافت یادآوری‌ها.', { reply_markup: remindersMenuKeyboard });
+    await ctx.reply('❌ خطا در دریافت یادآوری‌ها.', { reply_markup: remindersReplyKeyboard });
   }
 });
 
-bot.callbackQuery('reminders:new', async (ctx) => {
+bot.hears('➕ یادآوری جدید', async (ctx: Context) => {
   if (!ctx.from) {
-    await ctx.answerCallbackQuery();
     return;
   }
 
   const telegramId = String(ctx.from.id);
   reminderStates.set(telegramId, { stage: 'title' });
 
-  await ctx.editMessageText('✏️ لطفاً عنوان یادآوری را بنویس.\nمثال: دارو، تماس، تمرین و ...');
+  await ctx.reply('✏️ لطفاً عنوان یادآوری را بنویس.\nمثال: دارو، تماس، تمرین و ...', {
+    reply_markup: remindersReplyKeyboard
+  });
 });
 
 bot.on('message:text', async (ctx) => {
@@ -216,13 +211,15 @@ bot.callbackQuery(/reminders:delay:(\d+)/, async (ctx) => {
       delayMinutes
     });
 
-    await ctx.editMessageText(`✅ یادآوری ثبت شد.\nربات حدود ${delayMinutes} دقیقه دیگر بهت پیام می‌دهد.`, {
-      reply_markup: remindersMenuKeyboard
+    await ctx.editMessageText(`✅ یادآوری ثبت شد.\nربات حدود ${delayMinutes} دقیقه دیگر بهت پیام می‌دهد.`);
+    await ctx.reply('🔔 مدیریت یادآوری‌ها\nیکی از گزینه‌های زیر را انتخاب کن.', {
+      reply_markup: remindersReplyKeyboard
     });
   } catch (error) {
     console.error({ scope: 'reminders', event: 'create_error', telegramId, error });
-    await ctx.editMessageText('❌ خطا در ثبت یادآوری. لطفاً بعداً دوباره امتحان کن.', {
-      reply_markup: remindersMenuKeyboard
+    await ctx.editMessageText('❌ خطا در ثبت یادآوری. لطفاً بعداً دوباره امتحان کن.');
+    await ctx.reply('🔔 مدیریت یادآوری‌ها\nیکی از گزینه‌های زیر را انتخاب کن.', {
+      reply_markup: remindersReplyKeyboard
     });
   } finally {
     reminderStates.delete(telegramId);
