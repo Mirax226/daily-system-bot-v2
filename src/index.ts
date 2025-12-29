@@ -29,13 +29,13 @@ const start = async () => {
   getSupabaseClient();
 
   try {
-    if (config.telegram.devPolling) {
-      await bot.start();
-      await server.listen({ host: config.server.host, port: config.server.port });
-      server.log.info('Running in DEV_POLLING mode; webhook route is available but polling is active.');
-    } else {
-      await server.listen({ host: config.server.host, port: config.server.port });
+    await server.listen({ host: config.server.host, port: config.server.port });
+    server.log.info(`Server listening on ${config.server.host}:${config.server.port}`);
 
+    if (config.telegram.devPolling) {
+      server.log.info('Running in DEV_POLLING mode: starting bot via long polling.');
+      await bot.start();
+    } else {
       if (config.telegram.webhookUrl) {
         try {
           await bot.api.setWebhook(config.telegram.webhookUrl);
@@ -45,7 +45,7 @@ const start = async () => {
         }
       }
 
-      server.log.info('Running in WEBHOOK mode; /webhook endpoint is ready.');
+      server.log.info('Running in WEBHOOK mode: NOT calling bot.start(), updates come via /webhook.');
     }
   } catch (error) {
     server.log.error({ err: error }, 'Failed to start application.');
@@ -53,4 +53,4 @@ const start = async () => {
   }
 };
 
-start();
+void start();
