@@ -10,6 +10,7 @@ import {
   toggleReminderEnabled,
   updateReminder
 } from './services/reminders';
+import { listRecentLogs, upsertTodayLog } from './services/dailyLogs';
 import { formatInstantToLocal, formatLocalTime } from './utils/time';
 import type { ReminderRow } from './types/supabase';
 
@@ -17,7 +18,10 @@ export const bot = new Bot(config.telegram.botToken);
 
 // ===== Keyboards =====
 
-const homeKeyboard = new InlineKeyboard().text('🔔 یادآوری‌ها', 'reminders:menu');
+const homeKeyboard = new InlineKeyboard()
+  .text('🗒️ گزارش روزانه', 'logs:menu')
+  .row()
+  .text('🔔 یادآوری‌ها', 'reminders:menu');
 
 const remindersMenuKeyboard = new InlineKeyboard()
   .text('➕ یادآوری جدید', 'reminders:new')
@@ -85,6 +89,13 @@ const deletedKeyboard = new InlineKeyboard()
   .row()
   .text('➕ یادآوری جدید', 'reminders:new');
 
+const logsMenuKeyboard = new InlineKeyboard()
+  .text('✍️ ثبت گزارش امروز', 'logs:new_today')
+  .row()
+  .text('📋 گزارش‌های اخیر', 'logs:list')
+  .row()
+  .text('⬅️ بازگشت به خانه', 'logs:back_home');
+
 // ===== State =====
 
 type ReminderStage = 'create_title' | 'create_detail' | 'create_delay' | 'edit_title' | 'edit_detail';
@@ -97,6 +108,11 @@ type ReminderState = {
 };
 
 const reminderStates = new Map<string, ReminderState>();
+type DailyLogState = {
+  stage: 'new_summary';
+};
+
+const dailyLogStates = new Map<string, DailyLogState>();
 
 const clearState = (telegramId: string): void => {
   reminderStates.delete(telegramId);
@@ -307,6 +323,101 @@ bot.callbackQuery('reminders:back_home', async (ctx) => {
   await sendHome(ctx, true);
 });
 
+// ===== Logs main menu =====
+
+bot.callbackQuery('logs:menu', async (ctx) => {
+  await ctx.answerCallbackQuery();
+  const telegramId = String(ctx.from?.id ?? '');
+  const username = ctx.from?.username ?? null;
+
+  try {
+    await ensureUser({ telegramId, username });
+    const text = '🗒️ گزارش روزانه\nمی‌توانی گزارش امروز را ثبت کنی یا چند گزارش آخر را ببینی.';
+    try {
+      await ctx.editMessageText(text, { reply_markup: logsMenuKeyboard });
+      return;
+    } catch {
+      // fallback
+    }
+    await ctx.reply(text, { reply_markup: logsMenuKeyboard });
+  } catch (error) {
+    console.error({ scope: 'daily_logs', event: 'menu_error', telegramId, error });
+    await ctx.reply('❌ خطا در باز کردن منوی گزارش روزانه.', { reply_markup: homeKeyboard });
+  }
+});
+
+bot.callbackQuery('logs:back_home', async (ctx) => {
+  await ctx.answerCallbackQuery();
+  await sendHome(ctx, true);
+});
+
+bot.callbackQuery('logs:new_today', async (ctx) => {
+  await ctx.answerCallbackQuery();
+  if (!ctx.from) return;
+  const telegramId = String(ctx.from.id);
+  const username = ctx.from.username ?? null;
+
+  try {
+    await ensureUser({ telegramId, username });
+    dailyLogStates.set(telegramId, { stage: 'new_summary' });
+
+    const prompt = '✍️ لطفاً گزارش امروزت را به صورت یک پیام متنی بفرست.\nخلاصه‌ای از کارها، حس و نتیجه روز را بنویس.';
+    try {
+      await ctx.editMessageText(prompt);
+      return;
+    } catch {
+      // fallback
+    }
+    await ctx.reply(prompt);
+  } catch (error) {
+    console.error({ scope: 'daily_logs', event: 'new_today_error', telegramId, error });
+    await ctx.reply('❌ خطا در شروع ثبت گزارش امروز.', { reply_markup: logsMenuKeyboard });
+  }
+});
+
+bot.callbackQuery('logs:list', async (ctx) => {
+  await ctx.answerCallbackQuery();
+  if (!ctx.from) return;
+  const telegramId = String(ctx.from.id);
+  const username = ctx.from.username ?? null;
+
+  try {
+    const user = await ensureUser({ telegramId, username });
+    const logs = await listRecentLogs({ userId: user.id, limit: 5 });
+
+    console.log({ scope: 'daily_logs', event: 'list', userId: user.id, count: logs.length });
+
+    if (!logs.length) {
+      const text = '📋 هنوز گزارشی ثبت نکرده‌ای.';
+      try {
+        await ctx.editMessageText(text, { reply_markup: logsMenuKeyboard });
+        return;
+      } catch {
+        // fallback
+      }
+      await ctx.reply(text, { reply_markup: logsMenuKeyboard });
+      return;
+    }
+
+    const lines = ['📋 چند گزارش آخر:'];
+    logs.forEach((log) => {
+      lines.push(`- ${log.log_date}: ${log.summary}`);
+    });
+
+    const text = lines.join('\n');
+    try {
+      await ctx.editMessageText(text, { reply_markup: logsMenuKeyboard });
+      return;
+    } catch {
+      // fallback
+    }
+    await ctx.reply(text, { reply_markup: logsMenuKeyboard });
+  } catch (error) {
+    console.error({ scope: 'daily_logs', event: 'list_error', telegramId, error });
+    await ctx.reply('❌ خطا در دریافت گزارش‌ها.', { reply_markup: logsMenuKeyboard });
+  }
+});
+
 // ===== List / manage =====
 
 bot.callbackQuery('reminders:list', async (ctx) => {
@@ -363,56 +474,86 @@ bot.on('message:text', async (ctx: Context) => {
   const text = ctx.message.text.trim();
   const state = reminderStates.get(telegramId);
 
-  if (!state) return;
+  if (state) {
+    // Creation: title
+    if (state.stage === 'create_title') {
+      if (!text) {
+        await ctx.reply('❗ عنوان معتبر نیست. دوباره امتحان کن.');
+        return;
+      }
 
-  // Creation: title
-  if (state.stage === 'create_title') {
-    if (!text) {
-      await ctx.reply('❗ عنوان معتبر نیست. دوباره امتحان کن.');
+      reminderStates.set(telegramId, { stage: 'create_detail', title: text, detail: null });
+      await ctx.reply('📝 اگر توضیحی برای این یادآوری داری بنویس.\nاگر نمی‌خواهی توضیح اضافه کنی، روی «⏭ بدون توضیحات» بزن.', {
+        reply_markup: skipDetailKeyboard,
+      });
       return;
     }
 
-    reminderStates.set(telegramId, { stage: 'create_detail', title: text, detail: null });
-    await ctx.reply('📝 اگر توضیحی برای این یادآوری داری بنویس.\nاگر نمی‌خواهی توضیح اضافه کنی، روی «⏭ بدون توضیحات» بزن.', {
-      reply_markup: skipDetailKeyboard,
-    });
-    return;
-  }
-
-  // Creation: detail
-  if (state.stage === 'create_detail') {
-    reminderStates.set(telegramId, { ...state, detail: text, stage: 'create_delay' });
-    await ctx.reply('⏰ چه زمانی بهت یادآوری کنم؟', { reply_markup: buildCreateDelayKeyboard() });
-    return;
-  }
-
-  // Edit title
-  if (state.stage === 'edit_title' && state.reminderId) {
-    try {
-      const updated = await updateReminder(state.reminderId, { title: text });
-      console.log({ scope: 'reminders', event: 'manage_edit_title', reminderId: updated.id });
-      clearState(telegramId);
-      await renderManageView(ctx, updated.id);
-    } catch (error) {
-      console.error({ scope: 'reminders', event: 'manage_edit_title_error', reminderId: state.reminderId, error });
-      await ctx.reply('❌ خطا در ویرایش عنوان.', { reply_markup: remindersMenuKeyboard });
+    // Creation: detail
+    if (state.stage === 'create_detail') {
+      reminderStates.set(telegramId, { ...state, detail: text, stage: 'create_delay' });
+      await ctx.reply('⏰ چه زمانی بهت یادآوری کنم؟', { reply_markup: buildCreateDelayKeyboard() });
+      return;
     }
-    return;
+
+    // Edit title
+    if (state.stage === 'edit_title' && state.reminderId) {
+      try {
+        const updated = await updateReminder(state.reminderId, { title: text });
+        console.log({ scope: 'reminders', event: 'manage_edit_title', reminderId: updated.id });
+        clearState(telegramId);
+        await renderManageView(ctx, updated.id);
+      } catch (error) {
+        console.error({ scope: 'reminders', event: 'manage_edit_title_error', reminderId: state.reminderId, error });
+        await ctx.reply('❌ خطا در ویرایش عنوان.', { reply_markup: remindersMenuKeyboard });
+      }
+      return;
+    }
+
+    // Edit detail
+    if (state.stage === 'edit_detail' && state.reminderId) {
+      try {
+        const updated = await updateReminder(state.reminderId, { detail: text });
+        console.log({ scope: 'reminders', event: 'manage_edit_detail', reminderId: updated.id });
+        clearState(telegramId);
+        await renderManageView(ctx, updated.id);
+      } catch (error) {
+        console.error({ scope: 'reminders', event: 'manage_edit_detail_error', reminderId: state.reminderId, error });
+        await ctx.reply('❌ خطا در ویرایش توضیحات.', { reply_markup: remindersMenuKeyboard });
+      }
+      return;
+    }
   }
 
-  // Edit detail
-  if (state.stage === 'edit_detail' && state.reminderId) {
-    try {
-      const updated = await updateReminder(state.reminderId, { detail: text });
-      console.log({ scope: 'reminders', event: 'manage_edit_detail', reminderId: updated.id });
-      clearState(telegramId);
-      await renderManageView(ctx, updated.id);
-    } catch (error) {
-      console.error({ scope: 'reminders', event: 'manage_edit_detail_error', reminderId: state.reminderId, error });
-      await ctx.reply('❌ خطا در ویرایش توضیحات.', { reply_markup: remindersMenuKeyboard });
+  // Daily log flow
+  const logState = dailyLogStates.get(telegramId);
+  if (logState?.stage === 'new_summary') {
+    if (!text) {
+      await ctx.reply('❗ متن گزارش خالی است. دوباره امتحان کن.');
+      return;
     }
-    return;
+
+    try {
+      const username = ctx.from.username ?? null;
+      const user = await ensureUser({ telegramId, username });
+      const row = await upsertTodayLog({
+        userId: user.id,
+        timezone: user.timezone ?? config.defaultTimezone,
+        summary: text,
+      });
+
+      console.log({ scope: 'daily_logs', event: 'upsert_today', userId: user.id, logId: row.id });
+      await ctx.reply('✅ گزارش امروز ثبت شد.', { reply_markup: logsMenuKeyboard });
+    } catch (error) {
+      console.error({ scope: 'daily_logs', event: 'upsert_error', telegramId, error });
+      await ctx.reply('❌ خطا در ثبت گزارش امروز.', { reply_markup: logsMenuKeyboard });
+    } finally {
+      dailyLogStates.delete(telegramId);
+    }
   }
+
+  // If neither reminder nor daily log state, ignore
+  return;
 });
 
 // ===== Callbacks for creation detail skip / delay selection =====

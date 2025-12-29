@@ -73,6 +73,33 @@ export type Database = {
         };
         Relationships: [];
       };
+      daily_logs: {
+        Row: {
+          id: string;
+          user_id: string;
+          log_date: string;
+          summary: string;
+          created_at: string;
+          updated_at: string;
+        };
+        Insert: {
+          id?: string;
+          user_id: string;
+          log_date: string;
+          summary: string;
+          created_at?: string;
+          updated_at?: string;
+        };
+        Update: {
+          id?: string;
+          user_id?: string;
+          log_date?: string;
+          summary?: string;
+          created_at?: string;
+          updated_at?: string;
+        };
+        Relationships: [];
+      };
     };
     Views: {};
     Functions: {};
@@ -82,3 +109,4 @@ export type Database = {
 };
 
 export type ReminderRow = Database['public']['Tables']['reminders']['Row'];
+export type DailyLogRow = Database['public']['Tables']['daily_logs']['Row'];
