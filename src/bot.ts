@@ -1,4 +1,4 @@
-import { Bot, InlineKeyboard, Keyboard } from 'grammy';
+import { Bot, InlineKeyboard } from 'grammy';
 import type { BotError, Context } from 'grammy';
 import { config } from './config';
 import { ensureUser } from './services/users';
@@ -8,7 +8,7 @@ import { formatLocalTime } from './utils/time';
 
 export const bot = new Bot(config.telegram.botToken);
 
-const replyKeyboard = new Keyboard().text('خانه 🏠').text('🔔 یادآوری‌ها').resized();
+const homeKeyboard = new InlineKeyboard().text('🔔 یادآوری‌ها', 'reminders:menu');
 
 const remindersMenuKeyboard = new InlineKeyboard()
   .text('➕ یادآوری جدید', 'reminders:new')
@@ -44,7 +44,7 @@ const sendHome = async (ctx: Context) => {
     ].join('\n');
 
     await ctx.reply(homeMessage, {
-      reply_markup: replyKeyboard
+      reply_markup: homeKeyboard
     });
   } catch (error) {
     console.error({ scope: 'services/users', error });
@@ -69,14 +69,24 @@ bot.command('home', async (ctx: Context) => {
   await sendHome(ctx);
 });
 
-bot.hears('🔔 یادآوری‌ها', async (ctx: Context) => {
+const sendRemindersMenu = async (ctx: Context) => {
   await ctx.reply('🔔 مدیریت یادآوری‌ها\nیکی از گزینه‌های زیر را انتخاب کن.', {
+    reply_markup: remindersMenuKeyboard
+  });
+};
+
+bot.hears('🔔 یادآوری‌ها', async (ctx: Context) => {
+  await sendRemindersMenu(ctx);
+});
+
+bot.callbackQuery('reminders:menu', async (ctx) => {
+  await ctx.editMessageText('🔔 مدیریت یادآوری‌ها\nیکی از گزینه‌های زیر را انتخاب کن.', {
     reply_markup: remindersMenuKeyboard
   });
 });
 
 bot.callbackQuery('reminders:back', async (ctx) => {
-  await ctx.editMessageText('بازگشت به خانه');
+  await ctx.editMessageText('بازگشت به خانه', { reply_markup: homeKeyboard });
 });
 
 bot.callbackQuery('reminders:list', async (ctx) => {
