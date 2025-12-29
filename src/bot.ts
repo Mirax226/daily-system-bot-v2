@@ -1,6 +1,7 @@
 import { Bot, Keyboard } from 'grammy';
 import type { BotError, Context } from 'grammy';
 import { config } from './config';
+import { ensureUser } from './services/users';
 
 const welcomeMessage = 'سلام! به ربات روزانه خوش آمدی. از منو می‌توانی خانه را انتخاب کنی.';
 
@@ -9,6 +10,16 @@ export const bot = new Bot(config.telegram.botToken);
 const replyKeyboard = new Keyboard().text('🏠 خانه').resized();
 
 bot.command('start', async (ctx: Context) => {
+  if (!ctx.from) {
+    await ctx.reply('خطا: اطلاعات کاربری در دسترس نیست.');
+    return;
+  }
+
+  const telegramId = String(ctx.from.id);
+  const username = ctx.from.username ?? null;
+
+  await ensureUser({ telegramId, username });
+
   await ctx.reply(welcomeMessage, {
     reply_markup: replyKeyboard
   });

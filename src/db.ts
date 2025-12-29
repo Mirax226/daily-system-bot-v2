@@ -1,9 +1,10 @@
 import { createClient, SupabaseClient } from '@supabase/supabase-js';
 import { config } from './config';
+import { type Database } from './types/supabase';
 
-let supabaseClient: SupabaseClient | null = null;
+let supabaseClient: SupabaseClient<Database> | null = null;
 
-export function getSupabaseClient(): SupabaseClient {
+export function getSupabaseClient(): SupabaseClient<Database> {
   if (supabaseClient) {
     return supabaseClient;
   }
@@ -14,6 +15,6 @@ export function getSupabaseClient(): SupabaseClient {
     throw new Error('Supabase configuration is missing URL or service role key');
   }
 
-  supabaseClient = createClient(url, serviceRoleKey);
+  supabaseClient = createClient<Database>(url, serviceRoleKey);
   return supabaseClient;
 }
