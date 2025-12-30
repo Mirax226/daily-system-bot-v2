@@ -41,7 +41,6 @@ export async function seedDefaultRewardsIfEmpty(userId: string | null, client: C
   if (data && data.length > 0) return;
 
   const payload = defaultRewards.map((r) => ({ ...r, user_id: userId, is_active: true }));
-
   const { error: insertError } = await client.from(REWARDS_TABLE).insert(payload);
   if (insertError) {
     if (isMissingTableError(insertError)) {

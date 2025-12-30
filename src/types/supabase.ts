@@ -336,27 +336,34 @@ export type Database = {
       };
       user_settings: {
         Row: {
+          id: string;
           user_id: string;
-          timezone: string;
           onboarded: boolean;
           created_at: string;
           updated_at: string;
         };
         Insert: {
+          id?: string;
           user_id: string;
-          timezone?: string;
           onboarded?: boolean;
           created_at?: string;
           updated_at?: string;
         };
         Update: {
+          id?: string;
           user_id?: string;
-          timezone?: string;
           onboarded?: boolean;
           created_at?: string;
           updated_at?: string;
         };
-        Relationships: [];
+        Relationships: [
+          {
+            foreignKeyName: 'user_settings_user_id_fkey';
+            columns: ['user_id'];
+            referencedRelation: 'users';
+            referencedColumns: ['id'];
+          }
+        ];
       };
       report_templates: {
         Row: {
@@ -496,37 +503,6 @@ export type Database = {
     Enums: {};
     CompositeTypes: {};
   };
-};
-user_settings: {
-  Row: {
-    id: string;
-    user_id: string;
-    onboarded: boolean;
-    created_at: string;
-    updated_at: string;
-  };
-  Insert: {
-    id?: string;
-    user_id: string;
-    onboarded?: boolean;
-    created_at?: string;
-    updated_at?: string;
-  };
-  Update: {
-    id?: string;
-    user_id?: string;
-    onboarded?: boolean;
-    created_at?: string;
-    updated_at?: string;
-  };
-  Relationships: [
-    {
-      foreignKeyName: 'user_settings_user_id_fkey';
-      columns: ['user_id'];
-      referencedRelation: 'users';
-      referencedColumns: ['id'];
-    }
-  ];
 };
 
 export type ReminderRow = Database['public']['Tables']['reminders']['Row'];
