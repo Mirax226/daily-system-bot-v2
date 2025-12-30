@@ -131,3 +131,23 @@ alter table public.daily_reports
   add column if not exists notes text;
 alter table public.daily_reports
   add column if not exists status text;
+-- 0004_xp_ledger.sql
+create extension if not exists "pgcrypto";
+
+create table if not exists public.xp_ledger (
+  id uuid primary key default gen_random_uuid(),
+  user_id uuid not null references public.users(id) on delete cascade,
+  delta int not null,
+  reason text not null,
+  ref_type text,
+  ref_id uuid,
+  created_at_utc timestamptz not null default now()
+);
+
+create index if not exists idx_xp_ledger_user_time
+  on public.xp_ledger(user_id, created_at_utc);
+
+-- برای idempotency روی ref ها (اختیاری ولی بسیار مفید)
+create unique index if not exists ux_xp_ledger_ref
+  on public.xp_ledger(user_id, ref_type, ref_id)
+  where ref_type is not null and ref_id is not null;
