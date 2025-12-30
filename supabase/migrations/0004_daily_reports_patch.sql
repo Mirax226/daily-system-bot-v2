@@ -129,3 +129,5 @@ alter table public.daily_reports
 
 alter table public.daily_reports
   add column if not exists notes text;
+alter table public.daily_reports
+  add column if not exists status text;
