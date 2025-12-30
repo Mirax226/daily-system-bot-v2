@@ -121,3 +121,35 @@ export async function updateUserSettings(
 
   return (data as UserRecord | null) ?? null;
 }
+
+export type UserSettingsRecord = Database['public']['Tables']['user_settings']['Row'];
+
+export async function ensureUserSettings(
+  userId: string,
+  supabaseClient: SupabaseClient<Database> = getSupabaseClient()
+): Promise<UserSettingsRecord> {
+  const { data, error } = await supabaseClient.from('user_settings').upsert({ user_id: userId }, { onConflict: 'user_id' }).select('*').single();
+  if (error || !data) {
+    handleSupabaseError(error as PostgrestError, 'ensure user settings');
+  }
+  return data as UserSettingsRecord;
+}
+
+export async function updateUserSettingsJson(
+  userId: string,
+  settingsJson: Record<string, unknown>,
+  supabaseClient: SupabaseClient<Database> = getSupabaseClient()
+): Promise<UserSettingsRecord> {
+  const { data, error } = await supabaseClient
+    .from('user_settings')
+    .update({ settings_json: settingsJson, updated_at: new Date().toISOString() })
+    .eq('user_id', userId)
+    .select('*')
+    .single();
+
+  if (error || !data) {
+    handleSupabaseError(error as PostgrestError, 'update user settings json');
+  }
+
+  return data as UserSettingsRecord;
+}

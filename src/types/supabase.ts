@@ -331,6 +331,162 @@ export type Database = {
         };
         Relationships: [];
       };
+      user_settings: {
+        Row: {
+          id: string;
+          user_id: string;
+          settings_json: Record<string, unknown>;
+          created_at: string;
+          updated_at: string;
+        };
+        Insert: {
+          id?: string;
+          user_id: string;
+          settings_json?: Record<string, unknown>;
+          created_at?: string;
+          updated_at?: string;
+        };
+        Update: {
+          id?: string;
+          user_id?: string;
+          settings_json?: Record<string, unknown>;
+          created_at?: string;
+          updated_at?: string;
+        };
+        Relationships: [];
+      };
+      report_templates: {
+        Row: {
+          id: string;
+          user_id: string;
+          title: string;
+          created_at: string;
+          updated_at: string;
+        };
+        Insert: {
+          id?: string;
+          user_id: string;
+          title: string;
+          created_at?: string;
+          updated_at?: string;
+        };
+        Update: {
+          id?: string;
+          user_id?: string;
+          title?: string;
+          created_at?: string;
+          updated_at?: string;
+        };
+        Relationships: [];
+      };
+      report_items: {
+        Row: {
+          id: string;
+          template_id: string;
+          label: string;
+          item_key: string;
+          item_type: string;
+          category: string | null;
+          xp_mode: string | null;
+          xp_value: number | null;
+          options_json: Record<string, unknown>;
+          sort_order: number;
+          enabled: boolean;
+          created_at: string;
+          updated_at: string;
+        };
+        Insert: {
+          id?: string;
+          template_id: string;
+          label: string;
+          item_key: string;
+          item_type: string;
+          category?: string | null;
+          xp_mode?: string | null;
+          xp_value?: number | null;
+          options_json?: Record<string, unknown>;
+          sort_order?: number;
+          enabled?: boolean;
+          created_at?: string;
+          updated_at?: string;
+        };
+        Update: {
+          id?: string;
+          template_id?: string;
+          label?: string;
+          item_key?: string;
+          item_type?: string;
+          category?: string | null;
+          xp_mode?: string | null;
+          xp_value?: number | null;
+          options_json?: Record<string, unknown>;
+          sort_order?: number;
+          enabled?: boolean;
+          created_at?: string;
+          updated_at?: string;
+        };
+        Relationships: [];
+      };
+      report_days: {
+        Row: {
+          id: string;
+          user_id: string;
+          template_id: string;
+          local_date: string;
+          status: string | null;
+          created_at_utc: string;
+          updated_at_utc: string;
+        };
+        Insert: {
+          id?: string;
+          user_id: string;
+          template_id: string;
+          local_date: string;
+          status?: string | null;
+          created_at_utc?: string;
+          updated_at_utc?: string;
+        };
+        Update: {
+          id?: string;
+          user_id?: string;
+          template_id?: string;
+          local_date?: string;
+          status?: string | null;
+          created_at_utc?: string;
+          updated_at_utc?: string;
+        };
+        Relationships: [];
+      };
+      report_values: {
+        Row: {
+          id: string;
+          report_day_id: string;
+          item_id: string;
+          value_json: Record<string, unknown> | null;
+          xp_delta_applied: boolean;
+          created_at_utc: string;
+          updated_at_utc: string;
+        };
+        Insert: {
+          id?: string;
+          report_day_id: string;
+          item_id: string;
+          value_json?: Record<string, unknown> | null;
+          xp_delta_applied?: boolean;
+          created_at_utc?: string;
+          updated_at_utc?: string;
+        };
+        Update: {
+          id?: string;
+          report_day_id?: string;
+          item_id?: string;
+          value_json?: Record<string, unknown> | null;
+          xp_delta_applied?: boolean;
+          created_at_utc?: string;
+          updated_at_utc?: string;
+        };
+        Relationships: [];
+      };
     };
     Views: {};
     Functions: {};
@@ -346,3 +502,8 @@ export type DailyReportUpdate = Database['public']['Tables']['daily_reports']['U
 export type RewardRow = Database['public']['Tables']['rewards']['Row'];
 export type RewardPurchaseRow = Database['public']['Tables']['reward_purchases']['Row'];
 export type XpLedgerRow = Database['public']['Tables']['xp_ledger']['Row'];
+export type UserSettingsRow = Database['public']['Tables']['user_settings']['Row'];
+export type ReportTemplateRow = Database['public']['Tables']['report_templates']['Row'];
+export type ReportItemRow = Database['public']['Tables']['report_items']['Row'];
+export type ReportDayRow = Database['public']['Tables']['report_days']['Row'];
+export type ReportValueRow = Database['public']['Tables']['report_values']['Row'];
