@@ -102,3 +102,22 @@ export async function ensureUser(
   console.log({ scope: 'services/users', event: 'user_username_updated', telegramId, username: params.username ?? null });
   return data as UserRecord;
 }
+
+export async function updateUserSettings(
+  userId: string,
+  settings: Record<string, unknown>,
+  supabaseClient: SupabaseClient<Database> = getSupabaseClient()
+): Promise<UserRecord | null> {
+  const { data, error } = await supabaseClient
+    .from(USERS_TABLE)
+    .update({ settings_json: settings, updated_at: new Date().toISOString() })
+    .eq('id', userId)
+    .select(USERS_SELECT_FIELDS)
+    .maybeSingle();
+
+  if (error) {
+    handleSupabaseError(error, 'update user settings');
+  }
+
+  return (data as UserRecord | null) ?? null;
+}

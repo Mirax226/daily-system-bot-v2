@@ -146,7 +146,7 @@ export async function sendReminderMessage(params: { reminder: ReminderRow; user:
     return;
   }
 
-  const lines = [`⏰ یادآوری: ${reminder.title}`];
+  const lines = [`⏰ Reminder: ${reminder.title}`];
   if (reminder.detail) {
     lines.push('', reminder.detail);
   }

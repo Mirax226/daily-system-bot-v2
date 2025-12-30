@@ -244,6 +244,93 @@ export type Database = {
         };
         Relationships: [];
       };
+      rewards: {
+        Row: {
+          id: string;
+          title: string;
+          cost_xp: number;
+          enabled: boolean;
+          sort_order: number;
+          created_at: string;
+          updated_at: string;
+        };
+        Insert: {
+          id?: string;
+          title: string;
+          cost_xp: number;
+          enabled?: boolean;
+          sort_order?: number;
+          created_at?: string;
+          updated_at?: string;
+        };
+        Update: {
+          id?: string;
+          title?: string;
+          cost_xp?: number;
+          enabled?: boolean;
+          sort_order?: number;
+          created_at?: string;
+          updated_at?: string;
+        };
+        Relationships: [];
+      };
+      reward_purchases: {
+        Row: {
+          id: string;
+          user_id: string;
+          reward_id: string;
+          title_snapshot: string;
+          cost_xp_snapshot: number;
+          purchased_at_utc: string;
+        };
+        Insert: {
+          id?: string;
+          user_id: string;
+          reward_id: string;
+          title_snapshot: string;
+          cost_xp_snapshot: number;
+          purchased_at_utc?: string;
+        };
+        Update: {
+          id?: string;
+          user_id?: string;
+          reward_id?: string;
+          title_snapshot?: string;
+          cost_xp_snapshot?: number;
+          purchased_at_utc?: string;
+        };
+        Relationships: [];
+      };
+      xp_ledger: {
+        Row: {
+          id: string;
+          user_id: string;
+          delta: number;
+          reason: string;
+          ref_type: string | null;
+          ref_id: string | null;
+          created_at_utc: string;
+        };
+        Insert: {
+          id?: string;
+          user_id: string;
+          delta: number;
+          reason: string;
+          ref_type?: string | null;
+          ref_id?: string | null;
+          created_at_utc?: string;
+        };
+        Update: {
+          id?: string;
+          user_id?: string;
+          delta?: number;
+          reason?: string;
+          ref_type?: string | null;
+          ref_id?: string | null;
+          created_at_utc?: string;
+        };
+        Relationships: [];
+      };
     };
     Views: {};
     Functions: {};
@@ -256,3 +343,6 @@ export type ReminderRow = Database['public']['Tables']['reminders']['Row'];
 export type DailyReportRow = Database['public']['Tables']['daily_reports']['Row'];
 export type DailyReportInsert = Database['public']['Tables']['daily_reports']['Insert'];
 export type DailyReportUpdate = Database['public']['Tables']['daily_reports']['Update'];
+export type RewardRow = Database['public']['Tables']['rewards']['Row'];
+export type RewardPurchaseRow = Database['public']['Tables']['reward_purchases']['Row'];
+export type XpLedgerRow = Database['public']['Tables']['xp_ledger']['Row'];

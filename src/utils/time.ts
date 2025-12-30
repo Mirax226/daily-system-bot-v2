@@ -1,4 +1,6 @@
-const DEFAULT_TIMEZONE = 'Asia/Tehran';
+import { config } from '../config';
+
+const DEFAULT_TIMEZONE = config.defaultTimezone;
 
 export type LocalTime = {
   date: string;
@@ -6,17 +8,16 @@ export type LocalTime = {
   timezone: string;
 };
 
-const buildFormatter = (timezone: string): Intl.DateTimeFormat => {
-  return new Intl.DateTimeFormat('en-IR-u-ca-persian-nu-latn', {
+const buildFormatter = (timezone: string): Intl.DateTimeFormat =>
+  new Intl.DateTimeFormat('en-CA', {
     timeZone: timezone,
     year: 'numeric',
     month: '2-digit',
     day: '2-digit',
     hour: '2-digit',
     minute: '2-digit',
-    hourCycle: 'h23',
+    hourCycle: 'h23'
   });
-};
 
 const extractParts = (formatter: Intl.DateTimeFormat, date: Date): LocalTime => {
   const parts = formatter.formatToParts(date);
