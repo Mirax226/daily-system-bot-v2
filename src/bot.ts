@@ -1,4 +1,4 @@
-import { Bot, InlineKeyboard } from 'grammy';
+import { Bot, InlineKeyboard, GrammyError } from 'grammy';
 import type { BotError, Context } from 'grammy';
 import { config } from './config';
 import { ensureUser } from './services/users';
@@ -10,13 +10,7 @@ import {
   toggleReminderEnabled,
   updateReminder
 } from './services/reminders';
-import {
-  computeCompletionStatus,
-  getReportById,
-  listRecentReports,
-  updateReport,
-  upsertTodayReport
-} from './services/dailyReports';
+import { computeCompletionStatus, getReportById, isFieldCompleted, listRecentReports, updateReport, upsertTodayReport } from './services/dailyReports';
 import { formatInstantToLocal, formatLocalTime } from './utils/time';
 import type { DailyReportRow, DailyReportUpdate, ReminderRow } from './types/supabase';
 
@@ -119,6 +113,31 @@ const clearReminderState = (telegramId: string): void => {
   reminderStates.delete(telegramId);
 };
 
+const isTooOldCallbackError = (error: unknown): error is GrammyError => {
+  if (!(error instanceof GrammyError)) return false;
+  return error.error_code === 400 && error.description.toLowerCase().includes('query is too old');
+};
+
+const safeAnswerCallback = async (ctx: Context, params?: Parameters<Context['answerCallbackQuery']>[0]): Promise<void> => {
+  try {
+    await ctx.answerCallbackQuery(params);
+  } catch (error) {
+    if (isTooOldCallbackError(error)) {
+      console.warn({
+        scope: 'telegram',
+        event: 'callback_query_too_old',
+        callbackQueryId: ctx.callbackQuery?.id,
+        userId: ctx.from?.id
+      });
+      if (ctx.from?.id) {
+        await ctx.api.sendMessage(ctx.from.id, 'جلسه قبلی منقضی شده است.\nلطفاً دستور /start را ارسال کن تا از نو ادامه دهیم.');
+      }
+      return;
+    }
+    throw error;
+  }
+};
+
 // ===== Daily report wizard definitions =====
 
 type FieldType = 'boolean' | 'number' | 'integer' | 'time' | 'text';
@@ -191,16 +210,22 @@ const clearDailyState = (telegramId: string): void => {
   dailyWizardStates.delete(telegramId);
 };
 
-const nextStepIndex = (currentIndex: number): number | null => {
-  if (currentIndex < 0 || currentIndex >= dailyFields.length - 1) return null;
-  return currentIndex + 1;
+const findFirstIncompleteStepIndex = (report: DailyReportRow): number | null => {
+  for (let i = 0; i < dailyFields.length; i += 1) {
+    if (!isFieldCompleted(report, dailyFields[i].key)) {
+      return i;
+    }
+  }
+  return null;
 };
 
-const firstUnfilledStepIndex = (report: DailyReportRow): number => {
-  const statuses = computeCompletionStatus(report);
-  const firstEmptyKey = statuses.find((s) => !s.filled)?.key;
-  const idx = firstEmptyKey ? dailyFields.findIndex((f) => f.key === firstEmptyKey) : -1;
-  return idx >= 0 ? idx : 0;
+const findNextIncompleteStepIndex = (report: DailyReportRow, currentIndex: number): number | null => {
+  for (let i = currentIndex + 1; i < dailyFields.length; i += 1) {
+    if (!isFieldCompleted(report, dailyFields[i].key)) {
+      return i;
+    }
+  }
+  return null;
 };
 
 // ===== Helpers =====
@@ -352,7 +377,7 @@ const handleCreateDelay = async (ctx: Context, delayMinutes: number): Promise<vo
   const state = reminderStates.get(telegramId);
 
   if (!state || state.stage !== 'create_delay' || !state.title || Number.isNaN(delayMinutes)) {
-    await ctx.answerCallbackQuery?.({ text: 'درخواست نامعتبر است.', show_alert: true });
+    await safeAnswerCallback(ctx, { text: 'درخواست نامعتبر است.', show_alert: true });
     return;
   }
 
@@ -568,7 +593,7 @@ const advanceWizard = async (ctx: Context, reportId: string, currentIndex: numbe
     clearDailyState(String(ctx.from?.id ?? ''));
     return;
   }
-  const nextIndex = nextStepIndex(currentIndex);
+  const nextIndex = findNextIncompleteStepIndex(report, currentIndex);
   if (nextIndex === null) {
     clearDailyState(String(ctx.from?.id ?? ''));
     await renderDailyMenu(ctx, report, undefined);
@@ -578,7 +603,16 @@ const advanceWizard = async (ctx: Context, reportId: string, currentIndex: numbe
 };
 
 const startWizardFrom = async (ctx: Context, report: DailyReportRow, startIndex?: number): Promise<void> => {
-  const idx = typeof startIndex === 'number' ? startIndex : firstUnfilledStepIndex(report);
+  if (typeof startIndex === 'number') {
+    await goToStep(ctx, report, startIndex);
+    return;
+  }
+  const idx = findFirstIncompleteStepIndex(report);
+  if (idx === null) {
+    clearDailyState(String(ctx.from?.id ?? ''));
+    await renderDailyMenu(ctx, report, undefined);
+    return;
+  }
   await goToStep(ctx, report, idx);
 };
 
@@ -595,14 +629,14 @@ bot.command('home', async (ctx: Context) => {
 // ===== Home/back navigation =====
 
 bot.callbackQuery('home:back', async (ctx) => {
-  await ctx.answerCallbackQuery();
+  await safeAnswerCallback(ctx);
   await sendHome(ctx, true);
 });
 
 // ===== Reminders main menu =====
 
 bot.callbackQuery('r:menu', async (ctx) => {
-  await ctx.answerCallbackQuery();
+  await safeAnswerCallback(ctx);
   try {
     await ctx.editMessageText('🔔 مدیریت یادآوری‌ها\nیکی از گزینه‌های زیر را انتخاب کن.', {
       reply_markup: remindersMenuKeyboard
@@ -615,7 +649,7 @@ bot.callbackQuery('r:menu', async (ctx) => {
 // ===== Daily report menus =====
 
 bot.callbackQuery('dr:menu', async (ctx) => {
-  await ctx.answerCallbackQuery();
+  await safeAnswerCallback(ctx);
   try {
     await ctx.editMessageText('📒 گزارش روزانه', { reply_markup: dailyMenuKeyboard });
   } catch {
@@ -624,7 +658,7 @@ bot.callbackQuery('dr:menu', async (ctx) => {
 });
 
 bot.callbackQuery('dr:today', async (ctx) => {
-  await ctx.answerCallbackQuery();
+  await safeAnswerCallback(ctx);
   if (!ctx.from) return;
   const telegramId = String(ctx.from.id);
   const username = ctx.from.username ?? null;
@@ -641,7 +675,7 @@ bot.callbackQuery('dr:today', async (ctx) => {
 });
 
 bot.callbackQuery('dr:list', async (ctx) => {
-  await ctx.answerCallbackQuery();
+  await safeAnswerCallback(ctx);
   if (!ctx.from) return;
   const telegramId = String(ctx.from.id);
   const username = ctx.from.username ?? null;
@@ -677,7 +711,7 @@ bot.callbackQuery('dr:list', async (ctx) => {
 });
 
 bot.callbackQuery(/^dr:o:(.+)$/, async (ctx) => {
-  await ctx.answerCallbackQuery();
+  await safeAnswerCallback(ctx);
   const reportId = ctx.match?.[1];
   if (!reportId) return;
   const report = await getReportById(reportId);
@@ -698,7 +732,7 @@ bot.callbackQuery(/^dr:o:(.+)$/, async (ctx) => {
 });
 
 bot.callbackQuery(/^dr:s:(.+)$/, async (ctx) => {
-  await ctx.answerCallbackQuery();
+  await safeAnswerCallback(ctx);
   const reportId = ctx.match?.[1];
   if (!reportId) return;
   const report = await getReportById(reportId);
@@ -711,7 +745,7 @@ bot.callbackQuery(/^dr:s:(.+)$/, async (ctx) => {
 });
 
 bot.callbackQuery(/^dr:w:(.+)$/, async (ctx) => {
-  await ctx.answerCallbackQuery();
+  await safeAnswerCallback(ctx);
   const reportId = ctx.match?.[1];
   if (!reportId) return;
   const report = await getReportById(reportId);
@@ -723,7 +757,7 @@ bot.callbackQuery(/^dr:w:(.+)$/, async (ctx) => {
 });
 
 bot.callbackQuery(/^dr:f:(\d+):(.+)$/, async (ctx) => {
-  await ctx.answerCallbackQuery();
+  await safeAnswerCallback(ctx);
   const key = ctx.match?.[1];
   const reportId = ctx.match?.[2];
   if (!key || !reportId) return;
@@ -739,7 +773,7 @@ bot.callbackQuery(/^dr:f:(\d+):(.+)$/, async (ctx) => {
 
 // Boolean set
 bot.callbackQuery(/^dr:sb:([^:]+):(\d+):([01])$/, async (ctx) => {
-  await ctx.answerCallbackQuery();
+  await safeAnswerCallback(ctx);
   const reportId = ctx.match?.[1];
   const keyIdx = Number(ctx.match?.[2]);
   const val = ctx.match?.[3] === '1';
@@ -754,7 +788,7 @@ bot.callbackQuery(/^dr:sb:([^:]+):(\d+):([01])$/, async (ctx) => {
 
 // Number steppers
 bot.callbackQuery(/^dr:ns:([^:]+):(\d+):(.+)$/, async (ctx) => {
-  await ctx.answerCallbackQuery();
+  await safeAnswerCallback(ctx);
   const reportId = ctx.match?.[1];
   const keyIdx = Number(ctx.match?.[2]);
   const delta = Number(ctx.match?.[3]);
@@ -774,7 +808,7 @@ bot.callbackQuery(/^dr:ns:([^:]+):(\d+):(.+)$/, async (ctx) => {
 });
 
 bot.callbackQuery(/^dr:nr:([^:]+):(\d+)$/, async (ctx) => {
-  await ctx.answerCallbackQuery();
+  await safeAnswerCallback(ctx);
   const reportId = ctx.match?.[1];
   const keyIdx = Number(ctx.match?.[2]);
   if (!reportId || Number.isNaN(keyIdx)) return;
@@ -787,7 +821,7 @@ bot.callbackQuery(/^dr:nr:([^:]+):(\d+)$/, async (ctx) => {
 });
 
 bot.callbackQuery(/^dr:nc:([^:]+):(\d+)$/, async (ctx) => {
-  await ctx.answerCallbackQuery();
+  await safeAnswerCallback(ctx);
   const reportId = ctx.match?.[1];
   const keyIdx = Number(ctx.match?.[2]);
   if (!reportId || Number.isNaN(keyIdx)) return;
@@ -804,7 +838,7 @@ bot.callbackQuery(/^dr:nc:([^:]+):(\d+)$/, async (ctx) => {
 
 // Time picker
 bot.callbackQuery(/^dr:th:([^:]+):(\d+):(\d{1,2})$/, async (ctx) => {
-  await ctx.answerCallbackQuery();
+  await safeAnswerCallback(ctx);
   const reportId = ctx.match?.[1];
   const keyIdx = Number(ctx.match?.[2]);
   const hour = Number(ctx.match?.[3]);
@@ -818,7 +852,7 @@ bot.callbackQuery(/^dr:th:([^:]+):(\d+):(\d{1,2})$/, async (ctx) => {
 });
 
 bot.callbackQuery(/^dr:tm:([^:]+):(\d+):(\d{1,2}):(\d{2})$/, async (ctx) => {
-  await ctx.answerCallbackQuery();
+  await safeAnswerCallback(ctx);
   const reportId = ctx.match?.[1];
   const keyIdx = Number(ctx.match?.[2]);
   const hour = Number(ctx.match?.[3]);
@@ -836,7 +870,7 @@ bot.callbackQuery(/^dr:tm:([^:]+):(\d+):(\d{1,2}):(\d{2})$/, async (ctx) => {
 
 // Skip / cancel
 bot.callbackQuery(/^dr:sk:([^:]+):(\d+)$/, async (ctx) => {
-  await ctx.answerCallbackQuery();
+  await safeAnswerCallback(ctx);
   const reportId = ctx.match?.[1];
   const keyIdx = Number(ctx.match?.[2]);
   if (!reportId || Number.isNaN(keyIdx)) return;
@@ -850,7 +884,7 @@ bot.callbackQuery(/^dr:sk:([^:]+):(\d+)$/, async (ctx) => {
 });
 
 bot.callbackQuery(/^dr:cx:(.+)$/, async (ctx) => {
-  await ctx.answerCallbackQuery();
+  await safeAnswerCallback(ctx);
   const reportId = ctx.match?.[1];
   const report = reportId ? await getReportById(reportId) : null;
   clearDailyState(String(ctx.from?.id ?? ''));
@@ -939,7 +973,7 @@ bot.on('message:text', async (ctx: Context) => {
 // ===== Callbacks for reminder detail skip / delay selection =====
 
 bot.callbackQuery('r:skipdetail', async (ctx) => {
-  await ctx.answerCallbackQuery();
+  await safeAnswerCallback(ctx);
   if (!ctx.from) return;
   const telegramId = String(ctx.from.id);
   const state = reminderStates.get(telegramId);
@@ -950,13 +984,13 @@ bot.callbackQuery('r:skipdetail', async (ctx) => {
 });
 
 bot.callbackQuery(/^r:nd:(\d+)$/, async (ctx) => {
-  await ctx.answerCallbackQuery();
+  await safeAnswerCallback(ctx);
   const delayMinutes = Number(ctx.match?.[1] ?? 'NaN');
   await handleCreateDelay(ctx, delayMinutes);
 });
 
 bot.callbackQuery('r:new:cancel', async (ctx) => {
-  await ctx.answerCallbackQuery();
+  await safeAnswerCallback(ctx);
   if (!ctx.from) return;
   const telegramId = String(ctx.from.id);
   clearReminderState(telegramId);
@@ -970,7 +1004,7 @@ bot.callbackQuery('r:new:cancel', async (ctx) => {
 });
 
 bot.callbackQuery('r:new:back', async (ctx) => {
-  await ctx.answerCallbackQuery();
+  await safeAnswerCallback(ctx);
   if (!ctx.from) return;
   const telegramId = String(ctx.from.id);
   clearReminderState(telegramId);
@@ -986,7 +1020,7 @@ bot.callbackQuery('r:new:back', async (ctx) => {
 // ===== Reminder manage actions =====
 
 bot.callbackQuery(/^r:et:(.+)$/, async (ctx) => {
-  await ctx.answerCallbackQuery();
+  await safeAnswerCallback(ctx);
   const reminderId = ctx.match?.[1];
   if (!reminderId || !ctx.from) return;
   const telegramId = String(ctx.from.id);
@@ -995,7 +1029,7 @@ bot.callbackQuery(/^r:et:(.+)$/, async (ctx) => {
 });
 
 bot.callbackQuery(/^r:ed:(.+)$/, async (ctx) => {
-  await ctx.answerCallbackQuery();
+  await safeAnswerCallback(ctx);
   const reminderId = ctx.match?.[1];
   if (!reminderId || !ctx.from) return;
   const telegramId = String(ctx.from.id);
@@ -1004,7 +1038,7 @@ bot.callbackQuery(/^r:ed:(.+)$/, async (ctx) => {
 });
 
 bot.callbackQuery(/^r:cd:(.+)$/, async (ctx) => {
-  await ctx.answerCallbackQuery();
+  await safeAnswerCallback(ctx);
   const reminderId = ctx.match?.[1];
   if (!reminderId) return;
   try {
@@ -1017,7 +1051,7 @@ bot.callbackQuery(/^r:cd:(.+)$/, async (ctx) => {
 });
 
 bot.callbackQuery(/^r:t:(.+)$/, async (ctx) => {
-  await ctx.answerCallbackQuery();
+  await safeAnswerCallback(ctx);
   const reminderId = ctx.match?.[1];
   if (!reminderId) return;
   try {
@@ -1030,7 +1064,7 @@ bot.callbackQuery(/^r:t:(.+)$/, async (ctx) => {
 });
 
 bot.callbackQuery(/^r:time:(.+)$/, async (ctx) => {
-  await ctx.answerCallbackQuery();
+  await safeAnswerCallback(ctx);
   const reminderId = ctx.match?.[1];
   if (!reminderId) return;
   const keyboard = buildEditDelayKeyboard(reminderId);
@@ -1040,7 +1074,7 @@ bot.callbackQuery(/^r:time:(.+)$/, async (ctx) => {
 });
 
 bot.callbackQuery(/^r:ed:([^:]+):(\d+)$/, async (ctx) => {
-  await ctx.answerCallbackQuery();
+  await safeAnswerCallback(ctx);
   const reminderId = ctx.match?.[1];
   const delayMinutes = Number(ctx.match?.[2] ?? 'NaN');
   if (!reminderId || Number.isNaN(delayMinutes)) return;
@@ -1056,7 +1090,7 @@ bot.callbackQuery(/^r:ed:([^:]+):(\d+)$/, async (ctx) => {
 });
 
 bot.callbackQuery(/^r:d:(.+)$/, async (ctx) => {
-  await ctx.answerCallbackQuery();
+  await safeAnswerCallback(ctx);
   const reminderId = ctx.match?.[1];
   if (!reminderId) return;
   try {
@@ -1069,7 +1103,7 @@ bot.callbackQuery(/^r:d:(.+)$/, async (ctx) => {
 });
 
 bot.callbackQuery('r:list', async (ctx) => {
-  await ctx.answerCallbackQuery();
+  await safeAnswerCallback(ctx);
   if (!ctx.from) return;
   const telegramId = String(ctx.from.id);
   try {
@@ -1081,7 +1115,7 @@ bot.callbackQuery('r:list', async (ctx) => {
 });
 
 bot.callbackQuery(/^r:m:(.+)$/, async (ctx) => {
-  await ctx.answerCallbackQuery();
+  await safeAnswerCallback(ctx);
   const reminderId = ctx.match?.[1];
   if (!reminderId) return;
   try {
@@ -1093,7 +1127,7 @@ bot.callbackQuery(/^r:m:(.+)$/, async (ctx) => {
 });
 
 bot.callbackQuery('r:new', async (ctx) => {
-  await ctx.answerCallbackQuery();
+  await safeAnswerCallback(ctx);
   if (!ctx.from) return;
   const telegramId = String(ctx.from.id);
   reminderStates.set(telegramId, { stage: 'create_title' });

@@ -122,65 +122,66 @@ export async function listRecentReports(
   return (data as DailyReportRow[]) ?? [];
 }
 
+const completionKeys: (keyof DailyReportRow)[] = [
+  'wake_time',
+  'routine_morning',
+  'routine_school',
+  'routine_taxi',
+  'routine_evening',
+  'routine_night',
+  'review_today_hours',
+  'preview_tomorrow_hours',
+  'homework_done',
+  'workout_morning',
+  'workout_evening',
+  'pomodoro_3_count',
+  'pomodoro_2_count',
+  'pomodoro_1_count',
+  'library_study_hours',
+  'exam_school_questions',
+  'exam_maz_questions',
+  'exam_hesaban_questions',
+  'exam_physics_questions',
+  'exam_chemistry_questions',
+  'exam_geology_questions',
+  'exam_language_questions',
+  'exam_religion_questions',
+  'exam_arabic_questions',
+  'exam_persian_questions',
+  'read_book_minutes',
+  'read_article_minutes',
+  'watch_video_minutes',
+  'course_minutes',
+  'english_conversation_minutes',
+  'skill_learning_minutes',
+  'telegram_bot_minutes',
+  'trading_strategy_minutes',
+  'tidy_study_area',
+  'clean_room',
+  'plan_tomorrow',
+  'family_time_minutes',
+  'sleep_time',
+  'notes',
+  'time_planned_study_minutes',
+  'time_planned_skills_minutes',
+  'time_planned_misc_minutes',
+  'streak_done',
+  'streak_days',
+  'xp_s',
+  'xp_study',
+  'xp_misc',
+  'xp_total',
+  'status'
+];
+
+export function isFieldCompleted(report: DailyReportRow, key: keyof DailyReportRow): boolean {
+  const value = report[key];
+  if (typeof value === 'boolean') return true;
+  if (typeof value === 'number') return value !== null && !Number.isNaN(value);
+  if (typeof value === 'string') return value !== null && value.trim().length > 0;
+  return value !== null && typeof value !== 'undefined';
+}
+
 export function computeCompletionStatus(report: DailyReportRow): { key: keyof DailyReportRow; filled: boolean }[] {
-  const keys: (keyof DailyReportRow)[] = [
-    'wake_time',
-    'routine_morning',
-    'routine_school',
-    'routine_taxi',
-    'routine_evening',
-    'routine_night',
-    'review_today_hours',
-    'preview_tomorrow_hours',
-    'homework_done',
-    'workout_morning',
-    'workout_evening',
-    'pomodoro_3_count',
-    'pomodoro_2_count',
-    'pomodoro_1_count',
-    'library_study_hours',
-    'exam_school_questions',
-    'exam_maz_questions',
-    'exam_hesaban_questions',
-    'exam_physics_questions',
-    'exam_chemistry_questions',
-    'exam_geology_questions',
-    'exam_language_questions',
-    'exam_religion_questions',
-    'exam_arabic_questions',
-    'exam_persian_questions',
-    'read_book_minutes',
-    'read_article_minutes',
-    'watch_video_minutes',
-    'course_minutes',
-    'english_conversation_minutes',
-    'skill_learning_minutes',
-    'telegram_bot_minutes',
-    'trading_strategy_minutes',
-    'tidy_study_area',
-    'clean_room',
-    'plan_tomorrow',
-    'family_time_minutes',
-    'sleep_time',
-    'notes',
-    'time_planned_study_minutes',
-    'time_planned_skills_minutes',
-    'time_planned_misc_minutes',
-    'streak_done',
-    'streak_days',
-    'xp_s',
-    'xp_study',
-    'xp_misc',
-    'xp_total',
-    'status'
-  ];
-
-  const isFilled = (value: unknown): boolean => {
-    if (typeof value === 'boolean') return true;
-    if (typeof value === 'number') return !Number.isNaN(value);
-    if (typeof value === 'string') return value.trim().length > 0;
-    return value !== null && typeof value !== 'undefined';
-  };
-
-  return keys.map((key) => ({ key, filled: isFilled(report[key]) }));
+  return completionKeys.map((key) => ({ key, filled: isFieldCompleted(report, key) }));
 }
