@@ -126,7 +126,6 @@ type DailyField = { key: keyof DailyReportRow; label: string; type: FieldType };
 
 const dailyFields: DailyField[] = [
   { key: 'wake_time', label: 'زمان بیداری', type: 'time' },
-  { key: 'weekday', label: 'روز هفته', type: 'text' },
   { key: 'routine_morning', label: 'روتین صبح', type: 'boolean' },
   { key: 'routine_school', label: 'روتین مدرسه', type: 'boolean' },
   { key: 'routine_taxi', label: 'روتین تاکسی', type: 'boolean' },
@@ -136,11 +135,11 @@ const dailyFields: DailyField[] = [
   { key: 'preview_tomorrow_hours', label: 'پیش‌خوانی دروس فردا (ساعت)', type: 'number' },
   { key: 'homework_done', label: 'تکالیف', type: 'boolean' },
   { key: 'workout_morning', label: 'ورزش صبح', type: 'boolean' },
-  { key: 'workout_night', label: 'ورزش شب', type: 'boolean' },
+  { key: 'workout_evening', label: 'ورزش عصر/شب', type: 'boolean' },
   { key: 'pomodoro_3_count', label: 'چند 3 پارتی؟', type: 'integer' },
   { key: 'pomodoro_2_count', label: 'چند 2 پارتی؟', type: 'integer' },
   { key: 'pomodoro_1_count', label: 'چند 1 پارتی؟', type: 'integer' },
-  { key: 'city_library_hours', label: 'مطالعه در کتابخانه شهر (ساعت)', type: 'number' },
+  { key: 'library_study_hours', label: 'مطالعه در کتابخانه (ساعت)', type: 'number' },
   { key: 'exam_school_questions', label: 'آزمون مدرسه', type: 'integer' },
   { key: 'exam_maz_questions', label: 'آزمون ماز', type: 'integer' },
   { key: 'exam_hesaban_questions', label: 'آزمون حسابان', type: 'integer' },
@@ -150,35 +149,31 @@ const dailyFields: DailyField[] = [
   { key: 'exam_language_questions', label: 'آزمون زبان', type: 'integer' },
   { key: 'exam_religion_questions', label: 'آزمون دینی', type: 'integer' },
   { key: 'exam_arabic_questions', label: 'آزمون عربی', type: 'integer' },
-  { key: 'exam_farsi_questions', label: 'آزمون فارسی', type: 'integer' },
-  { key: 'exam_philosophy_questions', label: 'آزمون فلسفه و منطق', type: 'integer' },
-  { key: 'exam_sociology_questions', label: 'آزمون جامعه‌شناسی', type: 'integer' },
-  { key: 'exam_konkur_questions', label: 'آزمون کنکور', type: 'integer' },
-  { key: 'non_academic_book_hours', label: 'مطالعه غیر درسی - کتاب', type: 'number' },
-  { key: 'non_academic_article_hours', label: 'مطالعه غیر درسی - مقاله', type: 'number' },
-  { key: 'non_academic_video_hours', label: 'مطالعه غیر درسی - ویدیو', type: 'number' },
-  { key: 'non_academic_course_hours', label: 'مطالعه غیر درسی - دوره', type: 'number' },
-  { key: 'english_content_hours', label: 'English - تولید محتوا', type: 'number' },
-  { key: 'english_speaking_hours', label: 'English - تمرین مکالمه', type: 'number' },
-  { key: 'english_class_hours', label: 'English - کلاس زبان', type: 'number' },
-  { key: 'extra_skill_learning', label: 'یادگیری مهارت خاص', type: 'boolean' },
-  { key: 'extra_telegram_bot', label: 'ساخت ربات تلگرام', type: 'boolean' },
-  { key: 'extra_trading_strategy', label: 'استراتژی ترید', type: 'boolean' },
-  { key: 'organize_study_space', label: 'مرتب‌سازی محیط مطالعه', type: 'boolean' },
+  { key: 'exam_persian_questions', label: 'آزمون فارسی', type: 'integer' },
+  { key: 'read_book_minutes', label: 'مطالعه کتاب (دقیقه)', type: 'integer' },
+  { key: 'read_article_minutes', label: 'مطالعه مقاله (دقیقه)', type: 'integer' },
+  { key: 'watch_video_minutes', label: 'تماشای ویدیو (دقیقه)', type: 'integer' },
+  { key: 'course_minutes', label: 'دوره آموزشی (دقیقه)', type: 'integer' },
+  { key: 'english_conversation_minutes', label: 'انگلیسی - مکالمه (دقیقه)', type: 'integer' },
+  { key: 'skill_learning_minutes', label: 'یادگیری مهارت (دقیقه)', type: 'integer' },
+  { key: 'telegram_bot_minutes', label: 'ساخت ربات تلگرام (دقیقه)', type: 'integer' },
+  { key: 'trading_strategy_minutes', label: 'استراتژی ترید (دقیقه)', type: 'integer' },
+  { key: 'tidy_study_area', label: 'مرتب‌سازی محیط مطالعه', type: 'boolean' },
   { key: 'clean_room', label: 'جارو و گردگیری اتاق', type: 'boolean' },
   { key: 'plan_tomorrow', label: 'برنامه‌ریزی فردا', type: 'boolean' },
-  { key: 'family_time_hours', label: 'زمان با خانواده (ساعت)', type: 'number' },
-  { key: 'planned_study_hours', label: 'زمان تحت برنامه - مطالعه', type: 'number' },
-  { key: 'planned_skills_hours', label: 'زمان تحت برنامه - مهارت‌ها', type: 'number' },
-  { key: 'planned_misc_hours', label: 'زمان تحت برنامه - متفرقه', type: 'number' },
+  { key: 'family_time_minutes', label: 'زمان با خانواده (دقیقه)', type: 'integer' },
+  { key: 'sleep_time', label: 'زمان خواب', type: 'time' },
+  { key: 'notes', label: 'توضیحات', type: 'text' },
+  { key: 'time_planned_study_minutes', label: 'زمان تحت برنامه - مطالعه (دقیقه)', type: 'integer' },
+  { key: 'time_planned_skills_minutes', label: 'زمان تحت برنامه - مهارت‌ها (دقیقه)', type: 'integer' },
+  { key: 'time_planned_misc_minutes', label: 'زمان تحت برنامه - متفرقه (دقیقه)', type: 'integer' },
   { key: 'streak_done', label: 'Streak - Done', type: 'boolean' },
   { key: 'streak_days', label: 'Streak - Days', type: 'integer' },
   { key: 'xp_s', label: 'XP S', type: 'integer' },
   { key: 'xp_study', label: 'XP درسی', type: 'integer' },
   { key: 'xp_misc', label: 'XP متفرقه', type: 'integer' },
   { key: 'xp_total', label: 'XP کل روز', type: 'integer' },
-  { key: 'sleep_time', label: 'زمان خواب', type: 'time' },
-  { key: 'note', label: 'توضیحات', type: 'text' }
+  { key: 'status', label: 'وضعیت', type: 'text' }
 ];
 
 type DailyWizardState = {
@@ -866,7 +861,7 @@ bot.callbackQuery(/^dr:cx:(.+)$/, async (ctx) => {
   }
 });
 
-// Text input step (note, weekday)
+// Text input step (notes, status)
 bot.on('message:text', async (ctx: Context) => {
   if (!ctx.from || !ctx.message || typeof ctx.message.text !== 'string') return;
 

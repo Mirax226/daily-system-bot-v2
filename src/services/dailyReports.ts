@@ -9,13 +9,12 @@ const normalizeTimezone = (timezone?: string | null): string => {
   return tz && tz.length > 0 ? tz : config.defaultTimezone;
 };
 
-const formatDateParts = (date: Date, timezone: string): { date: string; weekday: string } => {
+const formatDateParts = (date: Date, timezone: string): { date: string } => {
   const formatter = new Intl.DateTimeFormat('en-CA', {
     timeZone: timezone,
     year: 'numeric',
     month: '2-digit',
-    day: '2-digit',
-    weekday: 'long'
+    day: '2-digit'
   });
 
   const parts = formatter.formatToParts(date);
@@ -27,25 +26,23 @@ const formatDateParts = (date: Date, timezone: string): { date: string; weekday:
   }
 
   return {
-    date: `${lookup.year}-${lookup.month}-${lookup.day}`,
-    weekday: lookup.weekday ?? ''
+    date: `${lookup.year}-${lookup.month}-${lookup.day}`
   };
 };
 
-export const getTodayDateString = (timezone?: string | null): { date: string; weekday: string } => {
+export const getTodayDateString = (timezone?: string | null): string => {
   const tz = normalizeTimezone(timezone);
-  return formatDateParts(new Date(), tz);
+  return formatDateParts(new Date(), tz).date;
 };
 
 export async function upsertTodayReport(
   params: { userId: string; timezone?: string | null },
   client = getSupabaseClient()
 ): Promise<DailyReportRow> {
-  const { date, weekday } = getTodayDateString(params.timezone);
+  const date = getTodayDateString(params.timezone);
   const payload = {
     user_id: params.userId,
     report_date: date,
-    weekday,
     updated_at: new Date().toISOString()
   };
 
@@ -128,7 +125,6 @@ export async function listRecentReports(
 export function computeCompletionStatus(report: DailyReportRow): { key: keyof DailyReportRow; filled: boolean }[] {
   const keys: (keyof DailyReportRow)[] = [
     'wake_time',
-    'weekday',
     'routine_morning',
     'routine_school',
     'routine_taxi',
@@ -138,11 +134,11 @@ export function computeCompletionStatus(report: DailyReportRow): { key: keyof Da
     'preview_tomorrow_hours',
     'homework_done',
     'workout_morning',
-    'workout_night',
+    'workout_evening',
     'pomodoro_3_count',
     'pomodoro_2_count',
     'pomodoro_1_count',
-    'city_library_hours',
+    'library_study_hours',
     'exam_school_questions',
     'exam_maz_questions',
     'exam_hesaban_questions',
@@ -152,35 +148,31 @@ export function computeCompletionStatus(report: DailyReportRow): { key: keyof Da
     'exam_language_questions',
     'exam_religion_questions',
     'exam_arabic_questions',
-    'exam_farsi_questions',
-    'exam_philosophy_questions',
-    'exam_sociology_questions',
-    'exam_konkur_questions',
-    'non_academic_book_hours',
-    'non_academic_article_hours',
-    'non_academic_video_hours',
-    'non_academic_course_hours',
-    'english_content_hours',
-    'english_speaking_hours',
-    'english_class_hours',
-    'extra_skill_learning',
-    'extra_telegram_bot',
-    'extra_trading_strategy',
-    'organize_study_space',
+    'exam_persian_questions',
+    'read_book_minutes',
+    'read_article_minutes',
+    'watch_video_minutes',
+    'course_minutes',
+    'english_conversation_minutes',
+    'skill_learning_minutes',
+    'telegram_bot_minutes',
+    'trading_strategy_minutes',
+    'tidy_study_area',
     'clean_room',
     'plan_tomorrow',
-    'family_time_hours',
-    'planned_study_hours',
-    'planned_skills_hours',
-    'planned_misc_hours',
+    'family_time_minutes',
+    'sleep_time',
+    'notes',
+    'time_planned_study_minutes',
+    'time_planned_skills_minutes',
+    'time_planned_misc_minutes',
     'streak_done',
     'streak_days',
     'xp_s',
     'xp_study',
     'xp_misc',
     'xp_total',
-    'sleep_time',
-    'note'
+    'status'
   ];
 
   const isFilled = (value: unknown): boolean => {

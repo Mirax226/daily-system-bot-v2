@@ -6,7 +6,6 @@ create table if not exists public.daily_reports (
 
   report_date date not null,              -- Excel: تاریخ (میلادی)
   wake_time time,                         -- Excel: زمان بیداری
-  weekday text,                           -- Excel: روز هفته
 
   routine_morning boolean,                -- روتین صبح
   routine_school boolean,                 -- روتین مدرسه
@@ -19,13 +18,13 @@ create table if not exists public.daily_reports (
   homework_done boolean,                  -- تکالیف
 
   workout_morning boolean,                -- ورزش صبح
-  workout_night boolean,                  -- ورزش شب
+  workout_evening boolean,                -- ورزش شب
 
   pomodoro_3_count int,                   -- چند 3 پارتی؟
   pomodoro_2_count int,                   -- چند 2 پارتی؟
   pomodoro_1_count int,                   -- چند 1 پارتی؟
 
-  city_library_hours numeric,             -- میزان مطالعه در کتابخانه شهر - چند ساعت؟
+  library_study_hours numeric,            -- میزان مطالعه در کتابخانه شهر - چند ساعت؟
 
   exam_school_questions int,              -- آزمون - مدرسه
   exam_maz_questions int,                 -- آزمون - ماز
@@ -36,33 +35,29 @@ create table if not exists public.daily_reports (
   exam_language_questions int,            -- آزمون - زبان
   exam_religion_questions int,            -- آزمون - دینی
   exam_arabic_questions int,              -- آزمون - عربی
-  exam_farsi_questions int,               -- آزمون - فارسی
-  exam_philosophy_questions int,          -- آزمون - فلسفه و منطق
-  exam_sociology_questions int,           -- آزمون - جامعه شناسی
-  exam_konkur_questions int,              -- آزمون - کنکور
+  exam_persian_questions int,             -- آزمون - فارسی
 
-  non_academic_book_hours numeric,        -- مطالعه غیر درسی - کتاب
-  non_academic_article_hours numeric,     -- مطالعه غیر درسی - مقاله
-  non_academic_video_hours numeric,       -- مطالعه غیر درسی - ویدیو
-  non_academic_course_hours numeric,      -- مطالعه غیر درسی - دوره
+  read_book_minutes int,                  -- مطالعه کتاب (دقیقه)
+  read_article_minutes int,               -- مطالعه مقاله (دقیقه)
+  watch_video_minutes int,                -- تماشای ویدیو (دقیقه)
+  course_minutes int,                     -- دوره آموزشی (دقیقه)
+  english_conversation_minutes int,       -- English - تمرین مکالمه (دقیقه)
+  skill_learning_minutes int,             -- یادگیری مهارت (دقیقه)
+  telegram_bot_minutes int,               -- ربات تلگرام (دقیقه)
+  trading_strategy_minutes int,           -- استراتژی ترید (دقیقه)
 
-  english_content_hours numeric,          -- English - تولید محتوا
-  english_speaking_hours numeric,         -- English - تمرین مکالمه
-  english_class_hours numeric,            -- English - کلاس زبان
-
-  extra_skill_learning boolean,           -- اعمال مهم اما غیر ضروری - یادگیری مهارت خاص
-  extra_telegram_bot boolean,             -- اعمال مهم اما غیر ضروری - ساخت ربات تلگرام
-  extra_trading_strategy boolean,         -- اعمال مهم اما غیر ضروری - استراتژی ترید
-
-  organize_study_space boolean,           -- سازماندهی / محیط - مرتب سازی محیط مطالعه
+  tidy_study_area boolean,                -- سازماندهی / محیط - مرتب سازی محیط مطالعه
   clean_room boolean,                     -- سازماندهی / محیط - جارو و گرد گیری اتاق
   plan_tomorrow boolean,                  -- سازماندهی / محیط - برنامه ریزی دقیق برای فردا
 
-  family_time_hours numeric,              -- خانواده - زمان سپری شده
+  family_time_minutes int,                -- خانواده - زمان سپری شده (دقیقه)
 
-  planned_study_hours numeric,            -- زمان تحت برنامه - مطالعه
-  planned_skills_hours numeric,           -- زمان تحت برنامه - مهارت ها
-  planned_misc_hours numeric,             -- زمان تحت برنامه - متفرقه
+  sleep_time time,                        -- زمان - ساعت خواب
+  notes text,                             -- توضیحات
+
+  time_planned_study_minutes int,         -- زمان تحت برنامه - مطالعه (دقیقه)
+  time_planned_skills_minutes int,        -- زمان تحت برنامه - مهارت ها (دقیقه)
+  time_planned_misc_minutes int,          -- زمان تحت برنامه - متفرقه (دقیقه)
 
   streak_done boolean,                    -- Streak - Done
   streak_days int,                        -- Streak - Days
@@ -72,8 +67,7 @@ create table if not exists public.daily_reports (
   xp_misc int,                            -- XP - XP متفرقه
   xp_total int,                           -- XP - XP کل روز
 
-  sleep_time time,                        -- زمان - ساعت خواب
-  note text,                              -- توضیحات - توضیحاتی کوتاه در مورد امروز
+  status text,                            -- وضعیت تکمیل/مرور
 
   created_at timestamptz not null default now(),
   updated_at timestamptz not null default now()

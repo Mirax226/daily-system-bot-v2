@@ -9,11 +9,10 @@ const buildFormatter = (timezone: string): Intl.DateTimeFormat =>
     timeZone: timezone,
     year: 'numeric',
     month: '2-digit',
-    day: '2-digit',
-    weekday: 'long'
+    day: '2-digit'
   });
 
-export function getTodayDateString(timezone?: string): { date: string; weekday: string } {
+export function getTodayDateString(timezone?: string): { date: string } {
   const tz = timezone && timezone.trim().length > 0 ? timezone : config.defaultTimezone;
   const formatter = buildFormatter(tz);
   const parts = formatter.formatToParts(new Date());
@@ -25,24 +24,22 @@ export function getTodayDateString(timezone?: string): { date: string; weekday: 
   }
 
   return {
-    date: `${lookup.year}-${lookup.month}-${lookup.day}`,
-    weekday: lookup.weekday ?? ''
+    date: `${lookup.year}-${lookup.month}-${lookup.day}`
   };
 }
 
-// Preserve prior interface but store in daily_reports.note and report_date
+// Preserve prior interface but store in daily_reports.notes and report_date
 export async function upsertTodayLog(
   params: { userId: string; timezone?: string | null; summary: string },
   client = getSupabaseClient()
 ): Promise<DailyReportRow> {
   const { userId, timezone, summary } = params;
-  const { date, weekday } = getTodayDateString(timezone ?? config.defaultTimezone);
+  const { date } = getTodayDateString(timezone ?? config.defaultTimezone);
 
   const payload = {
     user_id: userId,
     report_date: date,
-    weekday,
-    note: summary,
+    notes: summary,
     updated_at: new Date().toISOString()
   } as const;
 
