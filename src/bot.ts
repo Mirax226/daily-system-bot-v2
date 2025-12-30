@@ -1,13 +1,14 @@
 import { Bot, InlineKeyboard, Keyboard, GrammyError } from 'grammy';
 import type { BotError, Context } from 'grammy';
 import { config } from './config';
-import { ensureUser, ensureUserSettings, updateUserSettingsJson } from './services/users';
+import { ensureUser } from './services/users';
 import { seedDefaultRewardsIfEmpty, listRewards, getRewardById, purchaseReward } from './services/rewards';
 import { getXpBalance, getXpSummary } from './services/xpLedger';
 import { formatLocalTime } from './utils/time';
 import type { ReportItemRow, ReportDayRow } from './types/supabase';
 import { ensureDefaultItems, ensureDefaultTemplate, upsertItem } from './services/reportTemplates';
 import { getOrCreateReportDay, listCompletionStatus, saveValue } from './services/dailyReport';
+import { getOrCreateUserSettings, setUserOnboarded } from './services/userSettings';
 
 export const bot = new Bot(config.telegram.botToken);
 
@@ -95,7 +96,7 @@ const ensureUserAndSettings = async (ctx: Context) => {
   const telegramId = String(ctx.from.id);
   const username = ctx.from.username ?? null;
   const user = await ensureUser({ telegramId, username });
-  const settings = await ensureUserSettings(user.id);
+  const settings = await getOrCreateUserSettings(user.id);
   return { user, settings };
 };
 
@@ -121,9 +122,13 @@ const buildHomeText = (isNew: boolean, timezone?: string | null): string => {
 export const sendHome = async (ctx: Context): Promise<void> => {
   try {
     const { user, settings } = await ensureUserAndSettings(ctx);
-    const isNew = !(settings.settings_json as Record<string, unknown>).onboarded;
+    const isNew = !settings.onboarded;
     if (isNew) {
-      await updateUserSettingsJson(user.id, { ...(settings.settings_json as Record<string, unknown>), onboarded: true });
+      try {
+        await setUserOnboarded(user.id);
+      } catch {
+        // ignore onboarding update errors to keep UX running
+      }
     }
     const text = buildHomeText(isNew, user.timezone);
     await ctx.reply(text, { reply_markup: mainMenuKeyboard });
@@ -134,11 +139,16 @@ export const sendHome = async (ctx: Context): Promise<void> => {
 };
 
 const renderRewardCenter = async (ctx: Context): Promise<void> => {
-  const { user } = await ensureUserAndSettings(ctx);
-  await seedDefaultRewardsIfEmpty();
-  const balance = await getXpBalance(user.id);
-  const text = ['🎁 Reward Center', `XP Balance: ${balance}`, '', 'Choose an option:'].join('\n');
-  await ctx.reply(text, { reply_markup: rewardCenterKeyboard });
+  try {
+    const { user } = await ensureUserAndSettings(ctx);
+    await seedDefaultRewardsIfEmpty(user.id);
+    const balance = await getXpBalance(user.id);
+    const text = ['🎁 Reward Center', `XP Balance: ${balance}`, '', 'Choose an option:'].join('\n');
+    await ctx.reply(text, { reply_markup: rewardCenterKeyboard });
+  } catch (error) {
+    console.error({ scope: 'rewards', event: 'render_error', error });
+    await ctx.reply('Reward Center is temporarily unavailable. Please try again later.');
+  }
 };
 
 const renderReportsMenu = async (ctx: Context): Promise<void> => {
@@ -279,13 +289,14 @@ bot.callbackQuery('rw:menu', async (ctx) => {
 
 bot.callbackQuery('rw:buy', async (ctx) => {
   await safeAnswerCallback(ctx);
-  const rewards = await listRewards();
+  const { user } = await ensureUserAndSettings(ctx);
+  const rewards = await listRewards(user.id);
   if (!rewards.length) {
     await ctx.reply('No rewards available yet.', { reply_markup: rewardCenterKeyboard });
     return;
   }
   const kb = new InlineKeyboard();
-  rewards.forEach((r) => kb.text(`${r.title} (${r.cost_xp} XP)`, `rw:cfm:${r.id}`).row());
+  rewards.forEach((r) => kb.text(`${r.title} (${r.xp_cost} XP)`, `rw:cfm:${r.id}`).row());
   kb.text('⬅️ Back', 'rw:menu');
   await ctx.reply('Choose a reward to buy:', { reply_markup: kb });
 });
@@ -302,7 +313,7 @@ bot.callbackQuery(/^rw:cfm:([a-f0-9-]+)$/, async (ctx) => {
   }
   await purchaseReward({ userId: user.id, reward });
   const balance = await getXpBalance(user.id);
-  await ctx.reply(`Purchased "${reward.title}" for ${reward.cost_xp} XP.\nNew balance: ${balance} XP.`, { reply_markup: rewardCenterKeyboard });
+  await ctx.reply(`Purchased "${reward.title}" for ${reward.xp_cost} XP.\nNew balance: ${balance} XP.`, { reply_markup: rewardCenterKeyboard });
 });
 
 bot.callbackQuery('rw:edit', async (ctx) => {
@@ -327,9 +338,6 @@ bot.callbackQuery('set:form', async (ctx) => {
 bot.callbackQuery(/^set:study:(.+)$/, async (ctx) => {
   await safeAnswerCallback(ctx);
   const mode = ctx.match?.[1];
-  const { user, settings } = await ensureUserAndSettings(ctx);
-  const next = { ...(settings.settings_json as Record<string, unknown>), study_mode: mode };
-  await updateUserSettingsJson(user.id, next);
   await ctx.reply(`Study mode set to ${mode}.`, { reply_markup: settingsMenuKeyboard });
 });
 

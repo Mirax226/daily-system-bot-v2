@@ -247,28 +247,31 @@ export type Database = {
       rewards: {
         Row: {
           id: string;
+          user_id: string | null;
           title: string;
-          cost_xp: number;
-          enabled: boolean;
-          sort_order: number;
+          description: string | null;
+          xp_cost: number;
+          is_active: boolean;
           created_at: string;
           updated_at: string;
         };
         Insert: {
           id?: string;
+          user_id?: string | null;
           title: string;
-          cost_xp: number;
-          enabled?: boolean;
-          sort_order?: number;
+          description?: string | null;
+          xp_cost: number;
+          is_active?: boolean;
           created_at?: string;
           updated_at?: string;
         };
         Update: {
           id?: string;
+          user_id?: string | null;
           title?: string;
-          cost_xp?: number;
-          enabled?: boolean;
-          sort_order?: number;
+          description?: string | null;
+          xp_cost?: number;
+          is_active?: boolean;
           created_at?: string;
           updated_at?: string;
         };
@@ -333,23 +336,23 @@ export type Database = {
       };
       user_settings: {
         Row: {
-          id: string;
           user_id: string;
-          settings_json: Record<string, unknown>;
+          timezone: string;
+          onboarded: boolean;
           created_at: string;
           updated_at: string;
         };
         Insert: {
-          id?: string;
           user_id: string;
-          settings_json?: Record<string, unknown>;
+          timezone?: string;
+          onboarded?: boolean;
           created_at?: string;
           updated_at?: string;
         };
         Update: {
-          id?: string;
           user_id?: string;
-          settings_json?: Record<string, unknown>;
+          timezone?: string;
+          onboarded?: boolean;
           created_at?: string;
           updated_at?: string;
         };
