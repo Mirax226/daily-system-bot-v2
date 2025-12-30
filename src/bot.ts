@@ -1,0 +1,1148 @@
+import { Bot, InlineKeyboard, GrammyError } from 'grammy';
+import type { BotError, Context } from 'grammy';
+import { config } from './config';
+import { ensureUser } from './services/users';
+import {
+  createReminder,
+  deleteReminder,
+  getReminderById,
+  listRemindersForUser,
+  toggleReminderEnabled,
+  updateReminder
+} from './services/reminders';
+import { computeCompletionStatus, getReportById, isFieldCompleted, listRecentReports, updateReport, upsertTodayReport } from './services/dailyReports';
+import { formatInstantToLocal, formatLocalTime } from './utils/time';
+import type { DailyReportRow, DailyReportUpdate, ReminderRow } from './types/supabase';
+
+export const bot = new Bot(config.telegram.botToken);
+
+// ===== Inline keyboards (no ReplyKeyboard) =====
+
+const homeKeyboard = new InlineKeyboard().text('🗒️ گزارش روزانه', 'dr:menu').row().text('🔔 یادآوری‌ها', 'r:menu');
+
+const remindersMenuKeyboard = new InlineKeyboard()
+  .text('➕ یادآوری جدید', 'r:new')
+  .row()
+  .text('📋 لیست و مدیریت یادآوری‌ها', 'r:list')
+  .row()
+  .text('⬅️ خانه', 'home:back');
+
+const buildReminderListKeyboard = (reminders: ReminderRow[]): InlineKeyboard => {
+  const keyboard = new InlineKeyboard();
+  reminders.forEach((reminder, idx) => {
+    keyboard.text(`⚙ مدیریت #${idx + 1}`, `r:m:${reminder.id}`).row();
+  });
+  keyboard.text('➕ یادآوری جدید', 'r:new').row().text('⬅️ بازگشت', 'r:menu');
+  return keyboard;
+};
+
+const buildManageKeyboard = (reminder: ReminderRow): InlineKeyboard =>
+  new InlineKeyboard()
+    .text('✏️ ویرایش عنوان', `r:et:${reminder.id}`)
+    .row()
+    .text('📝 توضیحات', `r:ed:${reminder.id}`)
+    .row()
+    .text('⏭ حذف توضیحات', `r:cd:${reminder.id}`)
+    .row()
+    .text(reminder.enabled ? '🔕 غیرفعال کن' : '🔔 فعال کن', `r:t:${reminder.id}`)
+    .row()
+    .text('⏱ تغییر زمان', `r:time:${reminder.id}`)
+    .row()
+    .text('🗑 حذف', `r:d:${reminder.id}`)
+    .row()
+    .text('⬅️ بازگشت به لیست', 'r:list');
+
+const buildCreateDelayKeyboard = (): InlineKeyboard =>
+  new InlineKeyboard()
+    .text('۵ دقیقه دیگر', 'r:nd:5')
+    .row()
+    .text('۱۵ دقیقه دیگر', 'r:nd:15')
+    .row()
+    .text('۳۰ دقیقه دیگر', 'r:nd:30')
+    .row()
+    .text('۱ ساعت دیگر', 'r:nd:60')
+    .row()
+    .text('⬅️ لغو', 'r:new:cancel')
+    .row()
+    .text('⬅️ بازگشت', 'r:new:back');
+
+const newReminderStartKeyboard = new InlineKeyboard()
+  .text('❌ لغو ساخت یادآوری', 'r:new:cancel')
+  .row()
+  .text('⬅️ بازگشت', 'r:new:back');
+
+const buildEditDelayKeyboard = (reminderId: string): InlineKeyboard =>
+  new InlineKeyboard()
+    .text('۵ دقیقه دیگر', `r:ed:${reminderId}:5`)
+    .row()
+    .text('۱۵ دقیقه دیگر', `r:ed:${reminderId}:15`)
+    .row()
+    .text('۳۰ دقیقه دیگر', `r:ed:${reminderId}:30`)
+    .row()
+    .text('۱ ساعت دیگر', `r:ed:${reminderId}:60`)
+    .row()
+    .text('⬅️ بازگشت', `r:m:${reminderId}`);
+
+const skipDetailKeyboard = new InlineKeyboard().text('⏭ بدون توضیحات', 'r:skipdetail');
+
+const deletedReminderKeyboard = new InlineKeyboard()
+  .text('📋 بازگشت به لیست', 'r:list')
+  .row()
+  .text('➕ یادآوری جدید', 'r:new');
+
+const dailyMenuKeyboard = new InlineKeyboard()
+  .text('➕ ثبت/ویرایش گزارش امروز', 'dr:today')
+  .row()
+  .text('📋 لیست گزارش‌ها', 'dr:list')
+  .row()
+  .text('⬅️ خانه', 'home:back');
+
+// ===== Reminder state =====
+
+type ReminderStage = 'create_title' | 'create_detail' | 'create_delay' | 'edit_title' | 'edit_detail';
+type ReminderState = {
+  stage: ReminderStage;
+  reminderId?: string;
+  title?: string;
+  detail?: string | null;
+};
+
+const reminderStates = new Map<string, ReminderState>();
+
+const clearReminderState = (telegramId: string): void => {
+  reminderStates.delete(telegramId);
+};
+
+const isTooOldCallbackError = (error: unknown): error is GrammyError => {
+  if (!(error instanceof GrammyError)) return false;
+  return error.error_code === 400 && error.description.toLowerCase().includes('query is too old');
+};
+
+const safeAnswerCallback = async (ctx: Context, params?: Parameters<Context['answerCallbackQuery']>[0]): Promise<void> => {
+  try {
+    await ctx.answerCallbackQuery(params);
+  } catch (error) {
+    if (isTooOldCallbackError(error)) {
+      console.warn({
+        scope: 'telegram',
+        event: 'callback_query_too_old',
+        callbackQueryId: ctx.callbackQuery?.id,
+        userId: ctx.from?.id
+      });
+      if (ctx.from?.id) {
+        await ctx.api.sendMessage(ctx.from.id, 'جلسه قبلی منقضی شده است.\nلطفاً دستور /start را ارسال کن تا از نو ادامه دهیم.');
+      }
+      return;
+    }
+    throw error;
+  }
+};
+
+// ===== Daily report wizard definitions =====
+
+type FieldType = 'boolean' | 'number' | 'integer' | 'time' | 'text';
+type DailyField = { key: keyof DailyReportRow; label: string; type: FieldType };
+
+const dailyFields: DailyField[] = [
+  { key: 'wake_time', label: 'زمان بیداری', type: 'time' },
+  { key: 'routine_morning', label: 'روتین صبح', type: 'boolean' },
+  { key: 'routine_school', label: 'روتین مدرسه', type: 'boolean' },
+  { key: 'routine_taxi', label: 'روتین تاکسی', type: 'boolean' },
+  { key: 'routine_evening', label: 'روتین عصر', type: 'boolean' },
+  { key: 'routine_night', label: 'روتین شب', type: 'boolean' },
+  { key: 'review_today_hours', label: 'مرور دروس امروز (ساعت)', type: 'number' },
+  { key: 'preview_tomorrow_hours', label: 'پیش‌خوانی دروس فردا (ساعت)', type: 'number' },
+  { key: 'homework_done', label: 'تکالیف', type: 'boolean' },
+  { key: 'workout_morning', label: 'ورزش صبح', type: 'boolean' },
+  { key: 'workout_evening', label: 'ورزش عصر/شب', type: 'boolean' },
+  { key: 'pomodoro_3_count', label: 'چند 3 پارتی؟', type: 'integer' },
+  { key: 'pomodoro_2_count', label: 'چند 2 پارتی؟', type: 'integer' },
+  { key: 'pomodoro_1_count', label: 'چند 1 پارتی؟', type: 'integer' },
+  { key: 'library_study_hours', label: 'مطالعه در کتابخانه (ساعت)', type: 'number' },
+  { key: 'exam_school_questions', label: 'آزمون مدرسه', type: 'integer' },
+  { key: 'exam_maz_questions', label: 'آزمون ماز', type: 'integer' },
+  { key: 'exam_hesaban_questions', label: 'آزمون حسابان', type: 'integer' },
+  { key: 'exam_physics_questions', label: 'آزمون فیزیک', type: 'integer' },
+  { key: 'exam_chemistry_questions', label: 'آزمون شیمی', type: 'integer' },
+  { key: 'exam_geology_questions', label: 'آزمون زمین‌شناسی', type: 'integer' },
+  { key: 'exam_language_questions', label: 'آزمون زبان', type: 'integer' },
+  { key: 'exam_religion_questions', label: 'آزمون دینی', type: 'integer' },
+  { key: 'exam_arabic_questions', label: 'آزمون عربی', type: 'integer' },
+  { key: 'exam_persian_questions', label: 'آزمون فارسی', type: 'integer' },
+  { key: 'read_book_minutes', label: 'مطالعه کتاب (دقیقه)', type: 'integer' },
+  { key: 'read_article_minutes', label: 'مطالعه مقاله (دقیقه)', type: 'integer' },
+  { key: 'watch_video_minutes', label: 'تماشای ویدیو (دقیقه)', type: 'integer' },
+  { key: 'course_minutes', label: 'دوره آموزشی (دقیقه)', type: 'integer' },
+  { key: 'english_conversation_minutes', label: 'انگلیسی - مکالمه (دقیقه)', type: 'integer' },
+  { key: 'skill_learning_minutes', label: 'یادگیری مهارت (دقیقه)', type: 'integer' },
+  { key: 'telegram_bot_minutes', label: 'ساخت ربات تلگرام (دقیقه)', type: 'integer' },
+  { key: 'trading_strategy_minutes', label: 'استراتژی ترید (دقیقه)', type: 'integer' },
+  { key: 'tidy_study_area', label: 'مرتب‌سازی محیط مطالعه', type: 'boolean' },
+  { key: 'clean_room', label: 'جارو و گردگیری اتاق', type: 'boolean' },
+  { key: 'plan_tomorrow', label: 'برنامه‌ریزی فردا', type: 'boolean' },
+  { key: 'family_time_minutes', label: 'زمان با خانواده (دقیقه)', type: 'integer' },
+  { key: 'sleep_time', label: 'زمان خواب', type: 'time' },
+  { key: 'notes', label: 'توضیحات', type: 'text' },
+  { key: 'time_planned_study_minutes', label: 'زمان تحت برنامه - مطالعه (دقیقه)', type: 'integer' },
+  { key: 'time_planned_skills_minutes', label: 'زمان تحت برنامه - مهارت‌ها (دقیقه)', type: 'integer' },
+  { key: 'time_planned_misc_minutes', label: 'زمان تحت برنامه - متفرقه (دقیقه)', type: 'integer' },
+  { key: 'streak_done', label: 'Streak - Done', type: 'boolean' },
+  { key: 'streak_days', label: 'Streak - Days', type: 'integer' },
+  { key: 'xp_s', label: 'XP S', type: 'integer' },
+  { key: 'xp_study', label: 'XP درسی', type: 'integer' },
+  { key: 'xp_misc', label: 'XP متفرقه', type: 'integer' },
+  { key: 'xp_total', label: 'XP کل روز', type: 'integer' },
+  { key: 'status', label: 'وضعیت', type: 'text' }
+];
+
+type DailyWizardState = {
+  reportId: string;
+  userId: string;
+  stepIndex: number;
+  tempNumber?: number;
+  timeHour?: number;
+  awaitingText?: boolean;
+};
+
+const dailyWizardStates = new Map<string, DailyWizardState>();
+
+const clearDailyState = (telegramId: string): void => {
+  dailyWizardStates.delete(telegramId);
+};
+
+const findFirstIncompleteStepIndex = (report: DailyReportRow): number | null => {
+  for (let i = 0; i < dailyFields.length; i += 1) {
+    if (!isFieldCompleted(report, dailyFields[i].key)) {
+      return i;
+    }
+  }
+  return null;
+};
+
+const findNextIncompleteStepIndex = (report: DailyReportRow, currentIndex: number): number | null => {
+  for (let i = currentIndex + 1; i < dailyFields.length; i += 1) {
+    if (!isFieldCompleted(report, dailyFields[i].key)) {
+      return i;
+    }
+  }
+  return null;
+};
+
+// ===== Helpers =====
+
+const sendHome = async (ctx: Context, edit = false): Promise<void> => {
+  if (!ctx.from) {
+    await ctx.reply('خطا: اطلاعات کاربری در دسترس نیست.');
+    return;
+  }
+
+  const telegramId = String(ctx.from.id);
+  const username = ctx.from.username ?? null;
+
+  try {
+    const user = await ensureUser({ telegramId, username });
+    const localTime = formatLocalTime(user.timezone ?? config.defaultTimezone);
+
+    const homeMessage = [
+      'سلام! خوش آمدی به داشبورد خانه.',
+      'در اینجا وضعیت کلی روزانه‌ات را می‌بینی.',
+      `⏱ زمان فعلی: ${localTime.date} | ${localTime.time} (${localTime.timezone})`
+    ].join('\n');
+
+    if (!edit || !ctx.callbackQuery) {
+      await ctx
+        .reply('\u200c', {
+          reply_markup: { remove_keyboard: true },
+          disable_notification: true
+        })
+        .catch(() => undefined);
+    }
+
+    if (edit && ctx.callbackQuery) {
+      try {
+        await ctx.editMessageText(homeMessage, { reply_markup: homeKeyboard });
+        return;
+      } catch {
+        // fallback
+      }
+    }
+
+    await ctx.reply(homeMessage, { reply_markup: homeKeyboard });
+  } catch (error) {
+    console.error({ scope: 'services/users', error });
+    await ctx.reply('خطا در اتصال به بانک اطلاعاتی. لطفاً بعداً دوباره امتحان کن.');
+  }
+};
+
+const formatReminderLine = (reminder: ReminderRow, tz?: string | null): string => {
+  const statusLabel = reminder.enabled ? 'فعال' : 'غیرفعال';
+  const nextRun = reminder.next_run_at_utc
+    ? formatInstantToLocal(reminder.next_run_at_utc, tz ?? undefined)
+    : null;
+
+  const parts = [
+    `عنوان: ${reminder.title}`,
+    `وضعیت: ${statusLabel}`,
+    `ارسال بعدی: ${nextRun ? `${nextRun.date} | ${nextRun.time}` : '—'}`
+  ];
+
+  return parts.join('\n   ');
+};
+
+// ===== Reminders helpers =====
+
+const renderManageView = async (ctx: Context, reminderId: string): Promise<void> => {
+  if (!ctx.from) return;
+  const reminder = await getReminderById(reminderId);
+  if (!reminder) {
+    await ctx.reply('یادآوری پیدا نشد.');
+    return;
+  }
+
+  const local = reminder.next_run_at_utc ? formatInstantToLocal(reminder.next_run_at_utc, undefined) : null;
+  const detailText = reminder.detail && reminder.detail.trim().length > 0 ? reminder.detail : '—';
+
+  const lines = [
+    '⚙ مدیریت یادآوری',
+    `عنوان: ${reminder.title}`,
+    `توضیحات: ${detailText}`,
+    `وضعیت: ${reminder.enabled ? 'فعال' : 'غیرفعال'}`,
+    `ارسال بعدی (UTC): ${local ? `${local.date} | ${local.time}` : '—'}`
+  ];
+
+  const keyboard = buildManageKeyboard(reminder);
+
+  if (ctx.callbackQuery) {
+    try {
+      await ctx.editMessageText(lines.join('\n'), { reply_markup: keyboard });
+      return;
+    } catch {
+      // fallback
+    }
+  }
+
+  await ctx.reply(lines.join('\n'), { reply_markup: keyboard });
+};
+
+const renderRemindersList = async (ctx: Context, telegramId: string): Promise<void> => {
+  const username = ctx.from?.username ?? null;
+  const user = await ensureUser({ telegramId, username });
+  const reminders = await listRemindersForUser(user.id);
+
+  console.log({ scope: 'reminders', event: 'list', userId: user.id, count: reminders.length });
+
+  if (!reminders.length) {
+    const emptyText = '🔔 هیچ یادآوری‌ای ثبت نکرده‌ای.';
+    if (ctx.callbackQuery) {
+      try {
+        await ctx.editMessageText(emptyText, { reply_markup: remindersMenuKeyboard });
+        return;
+      } catch {
+        // fallback
+      }
+    }
+    await ctx.reply(emptyText, { reply_markup: remindersMenuKeyboard });
+    return;
+  }
+
+  const lines: string[] = ['📋 لیست یادآوری‌ها:'];
+  reminders.forEach((reminder, idx) => {
+    const statusLabel = reminder.enabled ? 'فعال' : 'غیرفعال';
+    const nextRun = reminder.next_run_at_utc
+      ? formatInstantToLocal(reminder.next_run_at_utc, user.timezone ?? undefined)
+      : null;
+    lines.push(
+      `${idx + 1}) عنوان: ${reminder.title}\n   وضعیت: ${statusLabel}\n   ارسال بعدی: ${nextRun ? `${nextRun.date} | ${nextRun.time}` : '—'}`
+    );
+  });
+
+  const keyboard = buildReminderListKeyboard(reminders);
+
+  if (ctx.callbackQuery) {
+    try {
+      await ctx.editMessageText(lines.join('\n'), { reply_markup: keyboard });
+      return;
+    } catch {
+      // fallback
+    }
+  }
+
+  await ctx.reply(lines.join('\n'), { reply_markup: keyboard });
+};
+
+const handleCreateDelay = async (ctx: Context, delayMinutes: number): Promise<void> => {
+  if (!ctx.from) return;
+  const telegramId = String(ctx.from.id);
+  const username = ctx.from.username ?? null;
+  const state = reminderStates.get(telegramId);
+
+  if (!state || state.stage !== 'create_delay' || !state.title || Number.isNaN(delayMinutes)) {
+    await safeAnswerCallback(ctx, { text: 'درخواست نامعتبر است.', show_alert: true });
+    return;
+  }
+
+  try {
+    const nowUtc = new Date();
+    const nextRunUtc = new Date(nowUtc.getTime() + delayMinutes * 60 * 1000);
+    const user = await ensureUser({ telegramId, username });
+    const reminder = await createReminder(user.id, state.title, state.detail ?? null, nextRunUtc);
+
+    console.log({ scope: 'reminders', event: 'created', userId: user.id, telegramId, reminderId: reminder.id, delayMinutes });
+
+    const confirmation = `✅ یادآوری ثبت شد.\nربات حدود ${delayMinutes} دقیقه دیگر بهت پیام می‌دهد.`;
+    if (ctx.callbackQuery) {
+      try {
+        await ctx.editMessageText(confirmation, { reply_markup: remindersMenuKeyboard });
+      } catch {
+        await ctx.reply(confirmation, { reply_markup: remindersMenuKeyboard });
+      }
+    } else {
+      await ctx.reply(confirmation, { reply_markup: remindersMenuKeyboard });
+    }
+  } catch (error) {
+    console.error({ scope: 'reminders', event: 'create_error', telegramId, error });
+    const errorText = '❌ خطا در ثبت یادآوری. لطفاً بعداً دوباره امتحان کن.';
+    if (ctx.callbackQuery) {
+      try {
+        await ctx.editMessageText(errorText, { reply_markup: remindersMenuKeyboard });
+        return;
+      } catch {
+        // fallback
+      }
+    }
+    await ctx.reply(errorText, { reply_markup: remindersMenuKeyboard });
+  } finally {
+    clearReminderState(telegramId);
+  }
+};
+
+// ===== Daily report helpers =====
+
+const formatReportValue = (report: DailyReportRow, key: keyof DailyReportRow): string => {
+  const value = report[key];
+  if (typeof value === 'boolean') return value ? 'بله' : 'خیر';
+  if (typeof value === 'number') return value.toString();
+  if (typeof value === 'string' && value.trim().length > 0) return value;
+  return '—';
+};
+
+const buildDailyMenuText = (report: DailyReportRow, timezone?: string | null): string => {
+  const local = formatLocalTime(timezone ?? config.defaultTimezone);
+  const status = computeCompletionStatus(report);
+  const lines = [
+    '🗒️ گزارش روزانه',
+    `تاریخ: ${report.report_date}`,
+    `زمان محلی: ${local.date} | ${local.time} (${local.timezone})`,
+    '',
+    'وضعیت تکمیل:'
+  ];
+  status.forEach((s) => {
+    const def = dailyFields.find((f) => f.key === s.key);
+    if (def) {
+      lines.push(`${s.filled ? '✅' : '⬜'} ${def.label}`);
+    }
+  });
+  return lines.join('\n');
+};
+
+const renderDailyMenu = async (ctx: Context, report: DailyReportRow, timezone?: string | null): Promise<void> => {
+  const text = buildDailyMenuText(report, timezone);
+  const statuses = computeCompletionStatus(report);
+  const keyboard = new InlineKeyboard();
+  statuses.forEach((s, idx) => {
+    const fieldIdx = dailyFields.findIndex((f) => f.key === s.key);
+    const label = `${s.filled ? '✅' : '⬜'} ${dailyFields[fieldIdx]?.label ?? s.key}`;
+    keyboard.text(label, `dr:f:${fieldIdx}:${report.id}`);
+    if (idx % 2 === 1) keyboard.row();
+  });
+  keyboard
+    .row()
+    .text('▶️ تکمیل / ویرایش موارد', `dr:w:${report.id}`)
+    .row()
+    .text('🧾 مشاهده خلاصه امروز', `dr:s:${report.id}`)
+    .row()
+    .text('⬅️ خانه', 'home:back');
+  if (ctx.callbackQuery) {
+    try {
+      await ctx.editMessageText(text, { reply_markup: keyboard });
+      return;
+    } catch {
+      // fallback
+    }
+  }
+  await ctx.reply(text, { reply_markup: keyboard });
+};
+
+const renderDailySummary = async (ctx: Context, report: DailyReportRow): Promise<void> => {
+  const lines: string[] = [`🧾 خلاصه گزارش (${report.report_date})`, ''];
+  dailyFields.forEach((f) => {
+    lines.push(`${f.label}: ${formatReportValue(report, f.key)}`);
+  });
+
+  const keyboard = new InlineKeyboard()
+    .text('✏️ ویرایش', `dr:w:${report.id}`)
+    .row()
+    .text('⬅️ بازگشت', 'dr:list')
+    .row()
+    .text('⬅️ خانه', 'home:back');
+
+  if (ctx.callbackQuery) {
+    try {
+      await ctx.editMessageText(lines.join('\n'), { reply_markup: keyboard });
+      return;
+    } catch {
+      // fallback
+    }
+  }
+  await ctx.reply(lines.join('\n'), { reply_markup: keyboard });
+};
+
+const renderWizardStep = async (ctx: Context, report: DailyReportRow, state: DailyWizardState): Promise<void> => {
+  const field = dailyFields[state.stepIndex];
+  const currentVal = report[field.key];
+  const textParts = [`${field.label}`, `مقدار فعلی: ${formatReportValue(report, field.key)}`];
+  const keyboard = new InlineKeyboard();
+
+  if (field.type === 'boolean') {
+    keyboard.text('✅ بله', `dr:sb:${report.id}:${state.stepIndex}:1`).row().text('❌ خیر', `dr:sb:${report.id}:${state.stepIndex}:0`);
+    keyboard.row().text('⏭️ رد کن', `dr:sk:${report.id}:${state.stepIndex}`).row().text('✖️ لغو', `dr:cx:${report.id}`).row().text('⬅️ خانه', 'home:back');
+    const prompt = textParts.join('\n');
+    await ctx.editMessageText(prompt, { reply_markup: keyboard }).catch(async () => {
+      await ctx.reply(prompt, { reply_markup: keyboard });
+    });
+    return;
+  }
+
+  if (field.type === 'number' || field.type === 'integer') {
+    const delta = field.type === 'integer' ? 1 : 0.25;
+    const value = typeof state.tempNumber === 'number' ? state.tempNumber : typeof currentVal === 'number' ? currentVal : 0;
+    keyboard
+      .text(`-${delta}`, `dr:ns:${report.id}:${state.stepIndex}:-${delta}`)
+      .text('0', `dr:nr:${report.id}:${state.stepIndex}`)
+      .text(`+${delta}`, `dr:ns:${report.id}:${state.stepIndex}:${delta}`)
+      .row()
+      .text('✅ تایید', `dr:nc:${report.id}:${state.stepIndex}`)
+      .row()
+      .text('⏭️ رد کن', `dr:sk:${report.id}:${state.stepIndex}`)
+      .row()
+      .text('✖️ لغو', `dr:cx:${report.id}`)
+      .row()
+      .text('⬅️ خانه', 'home:back');
+    const prompt = `${textParts.join('\n')}\nمقدار در حال تنظیم: ${value}`;
+    await ctx.editMessageText(prompt, { reply_markup: keyboard }).catch(async () => {
+      await ctx.reply(prompt, { reply_markup: keyboard });
+    });
+    return;
+  }
+
+  if (field.type === 'time') {
+    if (state.timeHour === undefined) {
+      const hours = [5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 0, 1, 2, 3, 4];
+      hours.forEach((hour, idx) => {
+        keyboard.text(hour.toString().padStart(2, '0'), `dr:th:${report.id}:${state.stepIndex}:${hour}`);
+        if (idx % 4 === 3) keyboard.row();
+      });
+      keyboard.row().text('⏭️ رد کن', `dr:sk:${report.id}:${state.stepIndex}`).row().text('✖️ لغو', `dr:cx:${report.id}`).row().text('⬅️ خانه', 'home:back');
+      const prompt = `${textParts.join('\n')}\nساعت خواب/بیداری را انتخاب کن.`;
+      await ctx.editMessageText(prompt, { reply_markup: keyboard }).catch(async () => {
+        await ctx.reply(prompt, { reply_markup: keyboard });
+      });
+    } else {
+      const minutes = ['00', '15', '30', '45'];
+      minutes.forEach((min, idx) => {
+        keyboard.text(min, `dr:tm:${report.id}:${state.stepIndex}:${state.timeHour}:${min}`);
+        if (idx % 4 === 3) keyboard.row();
+      });
+      keyboard.row().text('⏭️ رد کن', `dr:sk:${report.id}:${state.stepIndex}`).row().text('✖️ لغو', `dr:cx:${report.id}`).row().text('⬅️ خانه', 'home:back');
+      const prompt = `${textParts.join('\n')}\nدقیقه را انتخاب کن (ساعت ${state.timeHour.toString().padStart(2, '0')}).`;
+      await ctx.editMessageText(prompt, { reply_markup: keyboard }).catch(async () => {
+        await ctx.reply(prompt, { reply_markup: keyboard });
+      });
+    }
+    return;
+  }
+
+  if (field.type === 'text') {
+    dailyWizardStates.set(String(ctx.from?.id ?? ''), { ...state, awaitingText: true });
+    keyboard.text('⏭️ رد کن', `dr:sk:${report.id}:${state.stepIndex}`).row().text('✖️ لغو', `dr:cx:${report.id}`).row().text('⬅️ خانه', 'home:back');
+    const prompt = `${textParts.join('\n')}\n\nمتن جدید را ارسال کن.`;
+    await ctx.editMessageText(prompt, { reply_markup: keyboard }).catch(async () => {
+      await ctx.reply(prompt, { reply_markup: keyboard });
+    });
+  }
+};
+
+const goToStep = async (ctx: Context, report: DailyReportRow, stepIndex: number, extra?: Partial<DailyWizardState>): Promise<void> => {
+  const telegramId = String(ctx.from?.id ?? '');
+  const state: DailyWizardState = {
+    reportId: report.id,
+    userId: report.user_id,
+    stepIndex,
+    tempNumber: extra?.tempNumber,
+    timeHour: extra?.timeHour,
+    awaitingText: extra?.awaitingText
+  };
+  dailyWizardStates.set(telegramId, state);
+  await renderWizardStep(ctx, report, state);
+};
+
+const advanceWizard = async (ctx: Context, reportId: string, currentIndex: number): Promise<void> => {
+  const report = await getReportById(reportId);
+  if (!report) {
+    await ctx.reply('گزارش پیدا نشد.');
+    clearDailyState(String(ctx.from?.id ?? ''));
+    return;
+  }
+  const nextIndex = findNextIncompleteStepIndex(report, currentIndex);
+  if (nextIndex === null) {
+    clearDailyState(String(ctx.from?.id ?? ''));
+    await renderDailyMenu(ctx, report, undefined);
+    return;
+  }
+  await goToStep(ctx, report, nextIndex);
+};
+
+const startWizardFrom = async (ctx: Context, report: DailyReportRow, startIndex?: number): Promise<void> => {
+  if (typeof startIndex === 'number') {
+    await goToStep(ctx, report, startIndex);
+    return;
+  }
+  const idx = findFirstIncompleteStepIndex(report);
+  if (idx === null) {
+    clearDailyState(String(ctx.from?.id ?? ''));
+    await renderDailyMenu(ctx, report, undefined);
+    return;
+  }
+  await goToStep(ctx, report, idx);
+};
+
+// ===== Commands / main menus =====
+
+bot.command('start', async (ctx: Context) => {
+  await sendHome(ctx);
+});
+
+bot.command('home', async (ctx: Context) => {
+  await sendHome(ctx);
+});
+
+// ===== Home/back navigation =====
+
+bot.callbackQuery('home:back', async (ctx) => {
+  await safeAnswerCallback(ctx);
+  await sendHome(ctx, true);
+});
+
+// ===== Reminders main menu =====
+
+bot.callbackQuery('r:menu', async (ctx) => {
+  await safeAnswerCallback(ctx);
+  try {
+    await ctx.editMessageText('🔔 مدیریت یادآوری‌ها\nیکی از گزینه‌های زیر را انتخاب کن.', {
+      reply_markup: remindersMenuKeyboard
+    });
+  } catch {
+    await ctx.reply('🔔 مدیریت یادآوری‌ها\nیکی از گزینه‌های زیر را انتخاب کن.', { reply_markup: remindersMenuKeyboard });
+  }
+});
+
+// ===== Daily report menus =====
+
+bot.callbackQuery('dr:menu', async (ctx) => {
+  await safeAnswerCallback(ctx);
+  try {
+    await ctx.editMessageText('📒 گزارش روزانه', { reply_markup: dailyMenuKeyboard });
+  } catch {
+    await ctx.reply('📒 گزارش روزانه', { reply_markup: dailyMenuKeyboard });
+  }
+});
+
+bot.callbackQuery('dr:today', async (ctx) => {
+  await safeAnswerCallback(ctx);
+  if (!ctx.from) return;
+  const telegramId = String(ctx.from.id);
+  const username = ctx.from.username ?? null;
+
+  try {
+    const user = await ensureUser({ telegramId, username });
+    const report = await upsertTodayReport({ userId: user.id, timezone: user.timezone ?? config.defaultTimezone });
+    console.log({ scope: 'daily_reports', event: 'open', telegramId, userId: user.id, reportId: report.id });
+    await renderDailyMenu(ctx, report, user.timezone);
+  } catch (error) {
+    console.error({ scope: 'daily_reports', event: 'open_error', telegramId, error });
+    await ctx.reply('❌ خطا در باز کردن گزارش روزانه.', { reply_markup: homeKeyboard });
+  }
+});
+
+bot.callbackQuery('dr:list', async (ctx) => {
+  await safeAnswerCallback(ctx);
+  if (!ctx.from) return;
+  const telegramId = String(ctx.from.id);
+  const username = ctx.from.username ?? null;
+
+  try {
+    const user = await ensureUser({ telegramId, username });
+    const reports = await listRecentReports(user.id, 10);
+    console.log({ scope: 'daily_reports', event: 'list', userId: user.id, count: reports.length });
+
+    if (!reports.length) {
+      const text = '📋 هنوز گزارشی ثبت نکرده‌ای.';
+      await ctx.editMessageText(text, { reply_markup: dailyMenuKeyboard }).catch(async () => {
+        await ctx.reply(text, { reply_markup: dailyMenuKeyboard });
+      });
+      return;
+    }
+
+    const keyboard = new InlineKeyboard();
+    reports.forEach((report, idx) => {
+      keyboard.text(`📅 ${idx + 1}`, `dr:o:${report.id}`).row();
+    });
+    keyboard.text('⬅️ خانه', 'home:back');
+
+    const lines = ['📋 لیست گزارش‌ها:'];
+    reports.forEach((r, i) => lines.push(`${i + 1}) ${r.report_date}`));
+    await ctx.editMessageText(lines.join('\n'), { reply_markup: keyboard }).catch(async () => {
+      await ctx.reply(lines.join('\n'), { reply_markup: keyboard });
+    });
+  } catch (error) {
+    console.error({ scope: 'daily_reports', event: 'list_error', telegramId, error });
+    await ctx.reply('❌ خطا در دریافت گزارش‌ها.', { reply_markup: dailyMenuKeyboard });
+  }
+});
+
+bot.callbackQuery(/^dr:o:(.+)$/, async (ctx) => {
+  await safeAnswerCallback(ctx);
+  const reportId = ctx.match?.[1];
+  if (!reportId) return;
+  const report = await getReportById(reportId);
+  if (!report) {
+    await ctx.reply('گزارش پیدا نشد.');
+    return;
+  }
+  const keyboard = new InlineKeyboard()
+    .text('✏️ ویرایش', `dr:w:${report.id}`)
+    .row()
+    .text('⬅️ بازگشت', 'dr:list')
+    .row()
+    .text('⬅️ خانه', 'home:back');
+  const lines = [`📄 گزارش (${report.report_date})`, '', ...dailyFields.map((f) => `${f.label}: ${formatReportValue(report, f.key)}`)];
+  await ctx.editMessageText(lines.join('\n'), { reply_markup: keyboard }).catch(async () => {
+    await ctx.reply(lines.join('\n'), { reply_markup: keyboard });
+  });
+});
+
+bot.callbackQuery(/^dr:s:(.+)$/, async (ctx) => {
+  await safeAnswerCallback(ctx);
+  const reportId = ctx.match?.[1];
+  if (!reportId) return;
+  const report = await getReportById(reportId);
+  if (!report) {
+    await ctx.reply('گزارش پیدا نشد.');
+    return;
+  }
+  console.log({ scope: 'daily_reports', event: 'summary', reportId });
+  await renderDailySummary(ctx, report);
+});
+
+bot.callbackQuery(/^dr:w:(.+)$/, async (ctx) => {
+  await safeAnswerCallback(ctx);
+  const reportId = ctx.match?.[1];
+  if (!reportId) return;
+  const report = await getReportById(reportId);
+  if (!report) {
+    await ctx.reply('گزارش پیدا نشد.');
+    return;
+  }
+  await startWizardFrom(ctx, report);
+});
+
+bot.callbackQuery(/^dr:f:(\d+):(.+)$/, async (ctx) => {
+  await safeAnswerCallback(ctx);
+  const key = ctx.match?.[1];
+  const reportId = ctx.match?.[2];
+  if (!key || !reportId) return;
+  const report = await getReportById(reportId);
+  if (!report) {
+    await ctx.reply('گزارش پیدا نشد.');
+    return;
+  }
+  const idx = Number(key);
+  if (idx < 0) return;
+  await goToStep(ctx, report, idx);
+});
+
+// Boolean set
+bot.callbackQuery(/^dr:sb:([^:]+):(\d+):([01])$/, async (ctx) => {
+  await safeAnswerCallback(ctx);
+  const reportId = ctx.match?.[1];
+  const keyIdx = Number(ctx.match?.[2]);
+  const val = ctx.match?.[3] === '1';
+  if (!reportId || Number.isNaN(keyIdx)) return;
+  const key = dailyFields[keyIdx]?.key;
+  if (!key) return;
+  const state = dailyWizardStates.get(String(ctx.from?.id ?? ''));
+  const stepIndex = state?.stepIndex ?? keyIdx;
+  await updateReport(reportId, { [key]: val } as DailyReportUpdate);
+  await advanceWizard(ctx, reportId, stepIndex);
+});
+
+// Number steppers
+bot.callbackQuery(/^dr:ns:([^:]+):(\d+):(.+)$/, async (ctx) => {
+  await safeAnswerCallback(ctx);
+  const reportId = ctx.match?.[1];
+  const keyIdx = Number(ctx.match?.[2]);
+  const delta = Number(ctx.match?.[3]);
+  if (!reportId || Number.isNaN(keyIdx) || Number.isNaN(delta)) return;
+  const telegramId = String(ctx.from?.id ?? '');
+  const state = dailyWizardStates.get(telegramId);
+  if (!state) return;
+  const field = dailyFields[state.stepIndex];
+  if (!field || state.stepIndex !== keyIdx) return;
+  const report = await getReportById(reportId);
+  if (!report) return;
+  const key = dailyFields[keyIdx]?.key;
+  if (!key) return;
+  const current = typeof state.tempNumber === 'number' ? state.tempNumber : typeof report[key] === 'number' ? (report[key] as number) : 0;
+  const next = Math.round((current + delta) * 100) / 100;
+  await goToStep(ctx, report, state.stepIndex, { ...state, tempNumber: next });
+});
+
+bot.callbackQuery(/^dr:nr:([^:]+):(\d+)$/, async (ctx) => {
+  await safeAnswerCallback(ctx);
+  const reportId = ctx.match?.[1];
+  const keyIdx = Number(ctx.match?.[2]);
+  if (!reportId || Number.isNaN(keyIdx)) return;
+  const telegramId = String(ctx.from?.id ?? '');
+  const state = dailyWizardStates.get(telegramId);
+  if (!state) return;
+  const report = await getReportById(reportId);
+  if (!report) return;
+  await goToStep(ctx, report, state.stepIndex, { ...state, tempNumber: 0 });
+});
+
+bot.callbackQuery(/^dr:nc:([^:]+):(\d+)$/, async (ctx) => {
+  await safeAnswerCallback(ctx);
+  const reportId = ctx.match?.[1];
+  const keyIdx = Number(ctx.match?.[2]);
+  if (!reportId || Number.isNaN(keyIdx)) return;
+  const telegramId = String(ctx.from?.id ?? '');
+  const state = dailyWizardStates.get(telegramId);
+  if (!state) return;
+  const value = typeof state.tempNumber === 'number' ? state.tempNumber : 0;
+  const stepIndex = state.stepIndex;
+  const key = dailyFields[keyIdx]?.key;
+  if (!key) return;
+  await updateReport(reportId, { [key]: value } as DailyReportUpdate);
+  await advanceWizard(ctx, reportId, stepIndex);
+});
+
+// Time picker
+bot.callbackQuery(/^dr:th:([^:]+):(\d+):(\d{1,2})$/, async (ctx) => {
+  await safeAnswerCallback(ctx);
+  const reportId = ctx.match?.[1];
+  const keyIdx = Number(ctx.match?.[2]);
+  const hour = Number(ctx.match?.[3]);
+  if (!reportId || Number.isNaN(keyIdx) || Number.isNaN(hour)) return;
+  const telegramId = String(ctx.from?.id ?? '');
+  const state = dailyWizardStates.get(telegramId);
+  const stepIndex = state?.stepIndex ?? keyIdx;
+  const report = await getReportById(reportId);
+  if (!report) return;
+  await goToStep(ctx, report, stepIndex >= 0 ? stepIndex : 0, { timeHour: hour });
+});
+
+bot.callbackQuery(/^dr:tm:([^:]+):(\d+):(\d{1,2}):(\d{2})$/, async (ctx) => {
+  await safeAnswerCallback(ctx);
+  const reportId = ctx.match?.[1];
+  const keyIdx = Number(ctx.match?.[2]);
+  const hour = Number(ctx.match?.[3]);
+  const minute = ctx.match?.[4];
+  if (!reportId || Number.isNaN(keyIdx) || Number.isNaN(hour) || !minute) return;
+  const telegramId = String(ctx.from?.id ?? '');
+  const state = dailyWizardStates.get(telegramId);
+  const stepIndex = state?.stepIndex ?? keyIdx;
+  const timeValue = `${hour.toString().padStart(2, '0')}:${minute}`;
+  const key = dailyFields[keyIdx]?.key;
+  if (!key) return;
+  await updateReport(reportId, { [key]: timeValue } as DailyReportUpdate);
+  await advanceWizard(ctx, reportId, stepIndex >= 0 ? stepIndex : 0);
+});
+
+// Skip / cancel
+bot.callbackQuery(/^dr:sk:([^:]+):(\d+)$/, async (ctx) => {
+  await safeAnswerCallback(ctx);
+  const reportId = ctx.match?.[1];
+  const keyIdx = Number(ctx.match?.[2]);
+  if (!reportId || Number.isNaN(keyIdx)) return;
+  const telegramId = String(ctx.from?.id ?? '');
+  const state = dailyWizardStates.get(telegramId);
+  const stepIndex = state?.stepIndex ?? keyIdx;
+  const key = dailyFields[keyIdx]?.key;
+  if (!key) return;
+  await updateReport(reportId, { [key]: null } as DailyReportUpdate);
+  await advanceWizard(ctx, reportId, stepIndex >= 0 ? stepIndex : 0);
+});
+
+bot.callbackQuery(/^dr:cx:(.+)$/, async (ctx) => {
+  await safeAnswerCallback(ctx);
+  const reportId = ctx.match?.[1];
+  const report = reportId ? await getReportById(reportId) : null;
+  clearDailyState(String(ctx.from?.id ?? ''));
+  if (report) {
+    await renderDailyMenu(ctx, report, undefined);
+  } else {
+    await ctx.reply('فرآیند لغو شد.', { reply_markup: dailyMenuKeyboard });
+  }
+});
+
+// Text input step (notes, status)
+bot.on('message:text', async (ctx: Context) => {
+  if (!ctx.from || !ctx.message || typeof ctx.message.text !== 'string') return;
+
+  const telegramId = String(ctx.from.id);
+  const text = ctx.message.text.trim();
+
+  // Reminder flow
+  const reminderState = reminderStates.get(telegramId);
+  if (reminderState) {
+    if (reminderState.stage === 'create_title') {
+      if (!text) {
+        await ctx.reply('❗ عنوان معتبر نیست. دوباره امتحان کن.');
+        return;
+      }
+      reminderStates.set(telegramId, { stage: 'create_detail', title: text, detail: null });
+      await ctx.reply('📝 اگر توضیحی برای این یادآوری داری بنویس.\nاگر نمی‌خواهی توضیح اضافه کنی، روی «⏭ بدون توضیحات» بزن.', {
+        reply_markup: skipDetailKeyboard
+      });
+      return;
+    }
+
+    if (reminderState.stage === 'create_detail') {
+      reminderStates.set(telegramId, { ...reminderState, detail: text, stage: 'create_delay' });
+      await ctx.reply('⏰ چه زمانی بهت یادآوری کنم؟', { reply_markup: buildCreateDelayKeyboard() });
+      return;
+    }
+
+    if (reminderState.stage === 'edit_title' && reminderState.reminderId) {
+      try {
+        const updated = await updateReminder(reminderState.reminderId, { title: text });
+        clearReminderState(telegramId);
+        await renderManageView(ctx, updated.id);
+      } catch (error) {
+        console.error({ scope: 'reminders', event: 'manage_edit_title_error', reminderId: reminderState.reminderId, error });
+        await ctx.reply('❌ خطا در ویرایش عنوان.', { reply_markup: remindersMenuKeyboard });
+      }
+      return;
+    }
+
+    if (reminderState.stage === 'edit_detail' && reminderState.reminderId) {
+      try {
+        const updated = await updateReminder(reminderState.reminderId, { detail: text });
+        clearReminderState(telegramId);
+        await renderManageView(ctx, updated.id);
+      } catch (error) {
+        console.error({ scope: 'reminders', event: 'manage_edit_detail_error', reminderId: reminderState.reminderId, error });
+        await ctx.reply('❌ خطا در ویرایش توضیحات.', { reply_markup: remindersMenuKeyboard });
+      }
+      return;
+    }
+  }
+
+  // Daily report text fields
+  const drState = dailyWizardStates.get(telegramId);
+  if (drState && drState.awaitingText) {
+    const report = await getReportById(drState.reportId);
+    if (!report) {
+      clearDailyState(telegramId);
+      await ctx.reply('گزارش پیدا نشد.');
+      return;
+    }
+    const field = dailyFields[drState.stepIndex];
+    if (field && field.type === 'text') {
+      if (!text) {
+        await ctx.reply('❗ متن خالی است. دوباره امتحان کن.');
+        return;
+      }
+      await updateReport(report.id, { [field.key]: text } as DailyReportUpdate);
+      await advanceWizard(ctx, report.id, drState.stepIndex);
+      return;
+    }
+  }
+});
+
+// ===== Callbacks for reminder detail skip / delay selection =====
+
+bot.callbackQuery('r:skipdetail', async (ctx) => {
+  await safeAnswerCallback(ctx);
+  if (!ctx.from) return;
+  const telegramId = String(ctx.from.id);
+  const state = reminderStates.get(telegramId);
+  if (!state || state.stage !== 'create_detail') return;
+
+  reminderStates.set(telegramId, { ...state, detail: null, stage: 'create_delay' });
+  await ctx.editMessageText('⏰ چه زمانی بهت یادآوری کنم؟', { reply_markup: buildCreateDelayKeyboard() });
+});
+
+bot.callbackQuery(/^r:nd:(\d+)$/, async (ctx) => {
+  await safeAnswerCallback(ctx);
+  const delayMinutes = Number(ctx.match?.[1] ?? 'NaN');
+  await handleCreateDelay(ctx, delayMinutes);
+});
+
+bot.callbackQuery('r:new:cancel', async (ctx) => {
+  await safeAnswerCallback(ctx);
+  if (!ctx.from) return;
+  const telegramId = String(ctx.from.id);
+  clearReminderState(telegramId);
+  try {
+    await renderRemindersList(ctx, telegramId);
+  } catch {
+    await ctx.editMessageText('❌ ایجاد یادآوری لغو شد.', { reply_markup: remindersMenuKeyboard }).catch(async () => {
+      await ctx.reply('❌ ایجاد یادآوری لغو شد.', { reply_markup: remindersMenuKeyboard });
+    });
+  }
+});
+
+bot.callbackQuery('r:new:back', async (ctx) => {
+  await safeAnswerCallback(ctx);
+  if (!ctx.from) return;
+  const telegramId = String(ctx.from.id);
+  clearReminderState(telegramId);
+  try {
+    await renderRemindersList(ctx, telegramId);
+  } catch {
+    await ctx.editMessageText('🔔 مدیریت یادآوری‌ها', { reply_markup: remindersMenuKeyboard }).catch(async () => {
+      await ctx.reply('🔔 مدیریت یادآوری‌ها', { reply_markup: remindersMenuKeyboard });
+    });
+  }
+});
+
+// ===== Reminder manage actions =====
+
+bot.callbackQuery(/^r:et:(.+)$/, async (ctx) => {
+  await safeAnswerCallback(ctx);
+  const reminderId = ctx.match?.[1];
+  if (!reminderId || !ctx.from) return;
+  const telegramId = String(ctx.from.id);
+  reminderStates.set(telegramId, { stage: 'edit_title', reminderId });
+  await ctx.reply('✏️ عنوان جدید یادآوری را بنویس.');
+});
+
+bot.callbackQuery(/^r:ed:(.+)$/, async (ctx) => {
+  await safeAnswerCallback(ctx);
+  const reminderId = ctx.match?.[1];
+  if (!reminderId || !ctx.from) return;
+  const telegramId = String(ctx.from.id);
+  reminderStates.set(telegramId, { stage: 'edit_detail', reminderId });
+  await ctx.reply('📝 توضیحات جدید را بنویس.\nبرای حذف توضیح از «⏭ حذف توضیحات» استفاده کن.');
+});
+
+bot.callbackQuery(/^r:cd:(.+)$/, async (ctx) => {
+  await safeAnswerCallback(ctx);
+  const reminderId = ctx.match?.[1];
+  if (!reminderId) return;
+  try {
+    const updated = await updateReminder(reminderId, { detail: null });
+    await renderManageView(ctx, updated.id);
+  } catch (error) {
+    console.error({ scope: 'reminders', event: 'manage_clear_detail_error', reminderId, error });
+    await ctx.reply('❌ خطا در حذف توضیحات.', { reply_markup: remindersMenuKeyboard });
+  }
+});
+
+bot.callbackQuery(/^r:t:(.+)$/, async (ctx) => {
+  await safeAnswerCallback(ctx);
+  const reminderId = ctx.match?.[1];
+  if (!reminderId) return;
+  try {
+    const updated = await toggleReminderEnabled(reminderId);
+    await renderManageView(ctx, updated.id);
+  } catch (error) {
+    console.error({ scope: 'reminders', event: 'manage_toggle_error', reminderId, error });
+    await ctx.reply('❌ خطا در تغییر وضعیت یادآوری.', { reply_markup: remindersMenuKeyboard });
+  }
+});
+
+bot.callbackQuery(/^r:time:(.+)$/, async (ctx) => {
+  await safeAnswerCallback(ctx);
+  const reminderId = ctx.match?.[1];
+  if (!reminderId) return;
+  const keyboard = buildEditDelayKeyboard(reminderId);
+  await ctx.editMessageText('⏱ یک بازه زمانی انتخاب کن.', { reply_markup: keyboard }).catch(async () => {
+    await ctx.reply('⏱ یک بازه زمانی انتخاب کن.', { reply_markup: keyboard });
+  });
+});
+
+bot.callbackQuery(/^r:ed:([^:]+):(\d+)$/, async (ctx) => {
+  await safeAnswerCallback(ctx);
+  const reminderId = ctx.match?.[1];
+  const delayMinutes = Number(ctx.match?.[2] ?? 'NaN');
+  if (!reminderId || Number.isNaN(delayMinutes)) return;
+
+  try {
+    const nextRunUtc = new Date(Date.now() + delayMinutes * 60 * 1000);
+    const updated = await updateReminder(reminderId, { nextRunAtUtc: nextRunUtc, enabled: true });
+    await renderManageView(ctx, updated.id);
+  } catch (error) {
+    console.error({ scope: 'reminders', event: 'manage_edit_time_error', reminderId, error });
+    await ctx.reply('❌ خطا در تغییر زمان یادآوری.', { reply_markup: remindersMenuKeyboard });
+  }
+});
+
+bot.callbackQuery(/^r:d:(.+)$/, async (ctx) => {
+  await safeAnswerCallback(ctx);
+  const reminderId = ctx.match?.[1];
+  if (!reminderId) return;
+  try {
+    await deleteReminder(reminderId);
+    await ctx.editMessageText('🗑 یادآوری حذف شد.', { reply_markup: deletedReminderKeyboard });
+  } catch (error) {
+    console.error({ scope: 'reminders', event: 'manage_delete_error', reminderId, error });
+    await ctx.reply('❌ خطا در حذف یادآوری.', { reply_markup: remindersMenuKeyboard });
+  }
+});
+
+bot.callbackQuery('r:list', async (ctx) => {
+  await safeAnswerCallback(ctx);
+  if (!ctx.from) return;
+  const telegramId = String(ctx.from.id);
+  try {
+    await renderRemindersList(ctx, telegramId);
+  } catch (error) {
+    console.error({ scope: 'reminders', event: 'list_manage_error', telegramId, error });
+    await ctx.reply('❌ خطا در دریافت لیست یادآوری‌ها.', { reply_markup: remindersMenuKeyboard });
+  }
+});
+
+bot.callbackQuery(/^r:m:(.+)$/, async (ctx) => {
+  await safeAnswerCallback(ctx);
+  const reminderId = ctx.match?.[1];
+  if (!reminderId) return;
+  try {
+    await renderManageView(ctx, reminderId);
+  } catch (error) {
+    console.error({ scope: 'reminders', event: 'manage_error', reminderId, error });
+    await ctx.reply('❌ خطا در نمایش یادآوری.', { reply_markup: remindersMenuKeyboard });
+  }
+});
+
+bot.callbackQuery('r:new', async (ctx) => {
+  await safeAnswerCallback(ctx);
+  if (!ctx.from) return;
+  const telegramId = String(ctx.from.id);
+  reminderStates.set(telegramId, { stage: 'create_title' });
+  const prompt = '✏️ لطفاً عنوان یادآوری را بنویس.\nمثال: دارو، تماس، تمرین و ...';
+  await ctx.editMessageText(prompt, { reply_markup: newReminderStartKeyboard }).catch(async () => {
+    await ctx.reply(prompt, { reply_markup: newReminderStartKeyboard });
+  });
+});
+
+// ===== Global error handler =====
+
+bot.catch((err: BotError<Context>) => {
+  const { ctx, error } = err;
+  console.error('Bot error:', {
+    updateId: ctx.update?.update_id,
+    error
+  });
+});
