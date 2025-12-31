@@ -510,8 +510,21 @@ bot.command('debug_inline', async (ctx: Context) => {
   await ctx.reply('Inline debug screen', { reply_markup: keyboard });
 });
 
+bot.command('test_screen', async (ctx: Context) => {
+  const kb = new InlineKeyboard().text('Test via renderScreen', 'dbg:rs');
+  await renderScreen(ctx, {
+    titleKey: 'Test',
+    bodyLines: ['This is a test rendered via renderScreen.'],
+    inlineKeyboard: kb
+  });
+});
+
 bot.callbackQuery('dbg:test', async (ctx) => {
   await safeAnswerCallback(ctx, { text: 'Inline is working!' });
+});
+
+bot.callbackQuery('dbg:rs', async (ctx) => {
+  await safeAnswerCallback(ctx, { text: 'renderScreen inline works', show_alert: false });
 });
 
 bot.hears('🏠 Dashboard', renderDashboard);
