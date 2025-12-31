@@ -1,48 +1,20 @@
-import { Bot, InlineKeyboard, Keyboard, GrammyError } from 'grammy';
+import { Bot, InlineKeyboard, GrammyError } from 'grammy';
 import type { BotError, Context } from 'grammy';
 import { config } from './config';
-import { ensureUser } from './services/users';
 import { seedDefaultRewardsIfEmpty, listRewards, getRewardById, purchaseReward } from './services/rewards';
 import { getXpBalance, getXpSummary } from './services/xpLedger';
 import { formatLocalTime } from './utils/time';
 import type { ReportItemRow, ReportDayRow } from './types/supabase';
 import { ensureDefaultItems, ensureDefaultTemplate, upsertItem } from './services/reportTemplates';
 import { getOrCreateReportDay, listCompletionStatus, saveValue } from './services/dailyReport';
-import { getOrCreateUserSettings, setUserOnboarded } from './services/userSettings';
+import { setUserOnboarded } from './services/userSettings';
 import { consumeCallbackToken } from './services/callbackTokens';
-import { getSupabaseClient } from './db';
 import { getRecentTelemetryEvents, isTelemetryEnabled, logTelemetryEvent } from './services/telemetry';
 import { getErrorReportByCode, logErrorReport } from './services/errorReports';
-import { makeActionButton, makeRow } from './ui/inlineButtons';
+import { makeActionButton } from './ui/inlineButtons';
+import { renderScreen, ensureUserAndSettings } from './ui/renderScreen';
 
 export const bot = new Bot(config.telegram.botToken);
-
-const buildMainMenuKeyboard = (aiEnabled: boolean): Keyboard => {
-  const kb = new Keyboard()
-    .text('🏠 Dashboard')
-    .text('🧾 Daily Report')
-    .row()
-    .text('📘 Reportcar')
-    .text('✅ Tasks / Routines')
-    .row()
-    .text('📋 To-Do List')
-    .text('🗓 Planning')
-    .row()
-    .text('🧭 My Day')
-    .text('📝 Free Text')
-    .row()
-    .text('⏰ Reminders')
-    .text('🎁 Reward Center')
-    .row()
-    .text('📊 Reports')
-    .text('📅 Calendar & Events')
-    .row()
-    .text('⚙️ Settings');
-  if (aiEnabled) {
-    kb.row().text('🤖 AI');
-  }
-  return kb.resized();
-};
 
 const settingsMenuKeyboard = new InlineKeyboard()
   .text('📄 Daily Report Form', 'set:form')
@@ -99,19 +71,7 @@ const safeAnswerCallback = async (ctx: Context, params?: Parameters<Context['ans
   }
 };
 
-const ensureUserAndSettings = async (ctx: Context) => {
-  if (!ctx.from) throw new Error('User not found in context');
-  const telegramId = String(ctx.from.id);
-  const username = ctx.from.username ?? null;
-  const user = await ensureUser({ telegramId, username });
-  const settings = await getOrCreateUserSettings(user.id);
-  return { user, settings };
-};
-
 const telemetryEnabledForUser = (userSettingsJson?: Record<string, unknown>) => isTelemetryEnabled(userSettingsJson);
-
-const aiEnabledForUser = (userSettingsJson?: Record<string, unknown>) =>
-  Boolean((userSettingsJson as { ai?: { enabled?: boolean } } | undefined)?.ai?.enabled);
 
 const logForUser = async (params: {
   userId: string;
@@ -173,77 +133,6 @@ bot.use(async (ctx, next) => {
     await handleBotError(ctx, error, traceId);
   }
 });
-
-type RenderScreenParams = {
-  titleKey: string;
-  bodyLines: string[];
-  inlineKeyboard?: InlineKeyboard;
-};
-
-const renderScreen = async (ctx: Context, params: RenderScreenParams): Promise<void> => {
-  const { user } = await ensureUserAndSettings(ctx);
-  const chatId = ctx.chat?.id ?? (user.home_chat_id ? Number(user.home_chat_id) : undefined) ?? ctx.from?.id;
-  if (!chatId) throw new Error('Chat id missing for renderScreen');
-
-  const text = [params.titleKey, '', ...params.bodyLines].join('\n');
-  const inlineMarkup = params.inlineKeyboard ? { reply_markup: params.inlineKeyboard } : {};
-  const canEdit = Boolean(user.home_chat_id && user.home_message_id);
-  const mainMenu = buildMainMenuKeyboard(aiEnabledForUser(user.settings_json as Record<string, unknown>));
-
-  if (canEdit) {
-    try {
-      await ctx.api.editMessageText(Number(user.home_chat_id), Number(user.home_message_id), text, inlineMarkup);
-      if (params.inlineKeyboard) {
-        await ctx.api.editMessageReplyMarkup(Number(user.home_chat_id), Number(user.home_message_id), {
-          reply_markup: params.inlineKeyboard
-        });
-      }
-      return;
-    } catch (error) {
-      console.warn({
-        scope: 'render_screen',
-        event: 'edit_failed',
-        userId: user.id,
-        homeChatId: user.home_chat_id,
-        homeMessageId: user.home_message_id,
-        error
-      });
-    }
-  }
-
-  const message = await ctx.api.sendMessage(chatId, text, {
-    reply_markup: params.inlineKeyboard ?? mainMenu
-  });
-
-  const client = getSupabaseClient();
-  const { error } = await client
-    .from('users')
-    .update({
-      home_chat_id: String(message.chat.id),
-      home_message_id: String(message.message_id),
-      updated_at: new Date().toISOString()
-    })
-    .eq('id', user.id);
-
-  if (error) {
-    console.error({
-      scope: 'render_screen',
-      event: 'persist_home_message_failed',
-      userId: user.id,
-      messageId: message.message_id,
-      error
-    });
-  }
-
-  await logTelemetryEvent({
-    userId: user.id,
-    traceId: getTraceId(ctx),
-    eventName: 'screen_render',
-    screen: params.titleKey,
-    payload: { chat_id: chatId, message_id: message.message_id },
-    enabled: telemetryEnabledForUser(user.settings_json as Record<string, unknown>)
-  });
-};
 
 const buildRewardCenterKeyboard = async (ctx: Context): Promise<InlineKeyboard> => {
   const buyBtn = await makeActionButton(ctx, { label: '🛒 Buy', action: 'rewards.buy' });
