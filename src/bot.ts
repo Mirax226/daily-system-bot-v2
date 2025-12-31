@@ -9,15 +9,10 @@ import type { ReportItemRow, ReportDayRow } from './types/supabase';
 import { ensureDefaultItems, ensureDefaultTemplate, upsertItem } from './services/reportTemplates';
 import { getOrCreateReportDay, listCompletionStatus, saveValue } from './services/dailyReport';
 import { getOrCreateUserSettings, setUserOnboarded } from './services/userSettings';
-import { consumeCallbackToken } from './services/callbackTokens';
+import { consumeCallbackToken, createCallbackToken } from './services/callbackTokens';
 import { getSupabaseClient } from './db';
-import {
-  createErrorReport,
-  getErrorReportByCode,
-  getRecentTelemetryEvents,
-  isTelemetryEnabled,
-  logTelemetryEvent
-} from './services/telemetry';
+import { getRecentTelemetryEvents, isTelemetryEnabled, logTelemetryEvent } from './services/telemetry';
+import { getErrorReportByCode, logErrorReport } from './services/errorReports';
 
 export const bot = new Bot(config.telegram.botToken);
 
@@ -139,7 +134,9 @@ const logForUser = async (params: {
   });
 
 const sendErrorNotice = async (ctx: Context, errorCode: string) => {
-  const kb = new InlineKeyboard().text('Send report', `err:send:${errorCode}`);
+  const payload = { action: 'error.send_report', errorCode };
+  const token = await createCallbackToken({ payload });
+  const kb = new InlineKeyboard().text('Send report', token);
   await renderScreen(ctx, {
     titleKey: 'Error',
     bodyLines: [`An error occurred. Tracking code: ${errorCode}`],
@@ -153,13 +150,7 @@ const handleBotError = async (ctx: Context, error: unknown, traceId: string): Pr
     const enabled = telemetryEnabledForUser(user.settings_json as Record<string, unknown>);
     const errorCode = `ERR-${Math.random().toString(36).slice(2, 8)}`.toUpperCase();
     const recentEvents = await getRecentTelemetryEvents(user.id, 20);
-    await createErrorReport({
-      userId: user.id,
-      traceId,
-      errorCode,
-      error,
-      recentEvents
-    });
+    await logErrorReport({ userId: user.id, traceId, errorCode, error, recentEvents });
     await sendErrorNotice(ctx, errorCode);
     await logTelemetryEvent({
       userId: user.id,
@@ -463,6 +454,48 @@ bot.callbackQuery(/^[A-Za-z0-9_-]{8,12}$/, async (ctx) => {
       case 'home.back':
         await sendHome(ctx);
         break;
+      case 'error.send_report': {
+        const errorCode = (payload as { errorCode?: string }).errorCode;
+        if (!errorCode) {
+          await ctx.answerCallbackQuery({ text: 'Report not found or expired.', show_alert: true });
+          return;
+        }
+        const report = await getErrorReportByCode(errorCode);
+        if (!report) {
+          await ctx.answerCallbackQuery({ text: 'Report not found or expired.', show_alert: true });
+          return;
+        }
+        const targetId = config.telegram.adminId ? Number(config.telegram.adminId) : ctx.from?.id;
+        if (targetId) {
+          const events =
+            Array.isArray(report.recent_events) && report.recent_events.length > 0
+              ? report.recent_events
+                  .slice(0, 5)
+                  .map((ev: any) => `• ${ev.event_name ?? 'event'}${ev.screen ? ` @ ${ev.screen}` : ''}`)
+                  .join('\n')
+              : 'No events captured.';
+          const message = [
+            '*Error report*',
+            `Code: ${report.error_code}`,
+            `Trace: ${report.trace_id}`,
+            `Created: ${report.created_at}`,
+            `User: ${report.user_id}`,
+            '',
+            'Recent events:',
+            events
+          ].join('\n');
+          await ctx.api.sendMessage(targetId, message, { parse_mode: 'Markdown' });
+        }
+        await ctx.answerCallbackQuery({ text: 'Error report sent. Thank you.', show_alert: true });
+        await logTelemetryEvent({
+          userId: report.user_id,
+          traceId,
+          eventName: 'error_report_sent',
+          payload: { error_code: errorCode, target: config.telegram.adminId ?? ctx.from?.id },
+          enabled
+        });
+        break;
+      }
       default:
         await ctx.answerCallbackQuery({ text: 'Expired or invalid action. Please refresh.', show_alert: true });
     }
