@@ -6,6 +6,7 @@ const envSchema = z.object({
   PORT: z.coerce.number().int().positive().default(3000),
   DEV_POLLING: z.coerce.boolean().default(false),
   TELEGRAM_BOT_TOKEN: z.string().min(1, 'TELEGRAM_BOT_TOKEN is required'),
+  TELEGRAM_ADMIN_ID: z.string().optional(),
   TELEGRAM_WEBHOOK_URL: z
     .preprocess((value: unknown) => {
       if (typeof value !== 'string') return undefined;
@@ -27,6 +28,7 @@ export const config = {
   },
   telegram: {
     botToken: env.TELEGRAM_BOT_TOKEN,
+    adminId: env.TELEGRAM_ADMIN_ID,
     webhookUrl: env.TELEGRAM_WEBHOOK_URL,
     devPolling: env.DEV_POLLING
   },
