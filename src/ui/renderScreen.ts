@@ -1,46 +1,17 @@
-import { InlineKeyboard, Keyboard, GrammyError } from 'grammy';
+import { InlineKeyboard, GrammyError } from 'grammy';
 import type { Context } from 'grammy';
 import { getSupabaseClient } from '../db';
 import { config } from '../config';
+import { isTelemetryEnabled, logTelemetryEvent } from '../services/telemetry';
 import { ensureUser } from '../services/users';
 import { getOrCreateUserSettings } from '../services/userSettings';
-import { isTelemetryEnabled, logTelemetryEvent } from '../services/telemetry';
+import { aiEnabledForUser, buildMainMenuKeyboard } from './mainMenu';
 
 export type RenderScreenParams = {
   titleKey: string;
   bodyLines: string[];
   inlineKeyboard?: InlineKeyboard;
 };
-
-const buildMainMenuKeyboard = (aiEnabled: boolean): Keyboard => {
-  const kb = new Keyboard()
-    .text('🏠 Dashboard')
-    .text('🧾 Daily Report')
-    .row()
-    .text('📘 Reportcar')
-    .text('✅ Tasks / Routines')
-    .row()
-    .text('📋 To-Do List')
-    .text('🗓 Planning')
-    .row()
-    .text('🧭 My Day')
-    .text('📝 Free Text')
-    .row()
-    .text('⏰ Reminders')
-    .text('🎁 Reward Center')
-    .row()
-    .text('📊 Reports')
-    .text('📅 Calendar & Events')
-    .row()
-    .text('⚙️ Settings');
-  if (aiEnabled) {
-    kb.row().text('🤖 AI');
-  }
-  return kb.resized();
-};
-
-const aiEnabledForUser = (userSettingsJson?: Record<string, unknown>) =>
-  Boolean((userSettingsJson as { ai?: { enabled?: boolean } } | undefined)?.ai?.enabled);
 
 const telemetryEnabledForUser = (userSettingsJson?: Record<string, unknown>) => isTelemetryEnabled(userSettingsJson);
 

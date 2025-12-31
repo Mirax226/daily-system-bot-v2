@@ -13,6 +13,7 @@ import { getRecentTelemetryEvents, isTelemetryEnabled, logTelemetryEvent } from 
 import { getErrorReportByCode, logErrorReport } from './services/errorReports';
 import { makeActionButton } from './ui/inlineButtons';
 import { renderScreen, ensureUserAndSettings } from './ui/renderScreen';
+import { aiEnabledForUser, sendMainMenu } from './ui/mainMenu';
 
 export const bot = new Bot(config.telegram.botToken);
 
@@ -181,7 +182,7 @@ const buildReportsMenuKeyboard = async (ctx: Context): Promise<InlineKeyboard> =
 
 const buildDashboardLines = (isNew: boolean, timezone?: string | null): string[] => {
   const local = formatLocalTime(timezone ?? config.defaultTimezone);
-  const lines = [chooseGreeting(), `⏱ Current time: ${local.date} | ${local.time} (${local.timezone})`];
+  const lines = [chooseGreeting(), `⏱ Current time: ${local.date} | ${local.time}`];
   if (isNew) {
     lines.push(
       '',
@@ -208,6 +209,7 @@ const renderDashboard = async (ctx: Context): Promise<void> => {
       } catch {
         // ignore onboarding update errors to keep UX running
       }
+      await sendMainMenu(ctx, aiEnabledForUser(user.settings_json as Record<string, unknown>));
     }
     const { reportDay, items } = await ensureReportContext(ctx);
     const statuses = await listCompletionStatus(reportDay.id, items);
@@ -469,6 +471,8 @@ const handleSaveValue = async (ctx: Context, text: string): Promise<void> => {
 // ===== Handlers =====
 
 bot.command('start', async (ctx: Context) => {
+  const { user } = await ensureUserAndSettings(ctx);
+  await sendMainMenu(ctx, aiEnabledForUser(user.settings_json as Record<string, unknown>));
   await renderDashboard(ctx);
 });
 
