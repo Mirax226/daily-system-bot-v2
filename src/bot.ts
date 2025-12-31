@@ -1,4 +1,4 @@
-import { Bot, InlineKeyboard, GrammyError } from 'grammy';
+import { Bot, InlineKeyboard, Keyboard, GrammyError } from 'grammy';
 import type { BotError, Context } from 'grammy';
 import { config } from './config';
 import { seedDefaultRewardsIfEmpty, listRewards, getRewardById, purchaseReward } from './services/rewards';
