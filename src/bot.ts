@@ -11,6 +11,13 @@ import { getOrCreateReportDay, listCompletionStatus, saveValue } from './service
 import { getOrCreateUserSettings, setUserOnboarded } from './services/userSettings';
 import { consumeCallbackToken } from './services/callbackTokens';
 import { getSupabaseClient } from './db';
+import {
+  createErrorReport,
+  getErrorReportByCode,
+  getRecentTelemetryEvents,
+  isTelemetryEnabled,
+  logTelemetryEvent
+} from './services/telemetry';
 
 export const bot = new Bot(config.telegram.botToken);
 
@@ -72,6 +79,16 @@ const isTooOldCallbackError = (error: unknown): error is GrammyError =>
   error.error_code === 400 &&
   error.description.toLowerCase().includes('query is too old');
 
+const generateTraceId = (): string => `tr-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`;
+
+const getTraceId = (ctx: Context): string => {
+  const existing = (ctx as unknown as { traceId?: string }).traceId;
+  if (existing) return existing;
+  const fresh = generateTraceId();
+  (ctx as unknown as { traceId?: string }).traceId = fresh;
+  return fresh;
+};
+
 const safeAnswerCallback = async (ctx: Context, params?: Parameters<Context['answerCallbackQuery']>[0]): Promise<void> => {
   try {
     await ctx.answerCallbackQuery(params);
@@ -101,6 +118,74 @@ const ensureUserAndSettings = async (ctx: Context) => {
   const settings = await getOrCreateUserSettings(user.id);
   return { user, settings };
 };
+
+const telemetryEnabledForUser = (userSettingsJson?: Record<string, unknown>) => isTelemetryEnabled(userSettingsJson);
+
+const logForUser = async (params: {
+  userId: string;
+  ctx: Context;
+  eventName: string;
+  screen?: string | null;
+  payload?: Record<string, unknown> | null;
+  enabled: boolean;
+}) =>
+  logTelemetryEvent({
+    userId: params.userId,
+    traceId: getTraceId(params.ctx),
+    eventName: params.eventName,
+    screen: params.screen,
+    payload: params.payload,
+    enabled: params.enabled
+  });
+
+const sendErrorNotice = async (ctx: Context, errorCode: string) => {
+  const kb = new InlineKeyboard().text('Send report', `err:send:${errorCode}`);
+  await renderScreen(ctx, {
+    titleKey: 'Error',
+    bodyLines: [`An error occurred. Tracking code: ${errorCode}`],
+    inlineKeyboard: kb
+  });
+};
+
+const handleBotError = async (ctx: Context, error: unknown, traceId: string): Promise<void> => {
+  try {
+    const { user } = await ensureUserAndSettings(ctx);
+    const enabled = telemetryEnabledForUser(user.settings_json as Record<string, unknown>);
+    const errorCode = `ERR-${Math.random().toString(36).slice(2, 8)}`.toUpperCase();
+    const recentEvents = await getRecentTelemetryEvents(user.id, 20);
+    await createErrorReport({
+      userId: user.id,
+      traceId,
+      errorCode,
+      error,
+      recentEvents
+    });
+    await sendErrorNotice(ctx, errorCode);
+    await logTelemetryEvent({
+      userId: user.id,
+      traceId,
+      eventName: 'error_reported',
+      payload: { error_code: errorCode },
+      enabled
+    });
+  } catch (err) {
+    console.error({ scope: 'bot', event: 'error_handler_failed', err, originalError: error, traceId });
+    try {
+      await ctx.reply('An unexpected error occurred and could not be reported.');
+    } catch {
+      // ignore
+    }
+  }
+};
+
+bot.use(async (ctx, next) => {
+  const traceId = getTraceId(ctx);
+  try {
+    await next();
+  } catch (error) {
+    await handleBotError(ctx, error, traceId);
+  }
+});
 
 type RenderScreenParams = {
   titleKey: string;
@@ -161,6 +246,15 @@ const renderScreen = async (ctx: Context, params: RenderScreenParams): Promise<v
       error
     });
   }
+
+  await logTelemetryEvent({
+    userId: user.id,
+    traceId: getTraceId(ctx),
+    eventName: 'screen_render',
+    screen: params.titleKey,
+    payload: { chat_id: chatId, message_id: message.message_id },
+    enabled: telemetryEnabledForUser(user.settings_json as Record<string, unknown>)
+  });
 };
 
 const buildHomeLines = (isNew: boolean, timezone?: string | null): string[] => {
@@ -294,6 +388,14 @@ const handleSaveValue = async (ctx: Context, text: string): Promise<void> => {
       : { value: text };
 
   await saveValue({ reportDayId, item, valueJson, userId: reportDay.user_id });
+  const userSettings = (await ensureUserAndSettings(ctx)).user.settings_json as Record<string, unknown>;
+  await logForUser({
+    userId: reportDay.user_id,
+    ctx,
+    eventName: 'db_write',
+    payload: { action: 'save_value', item_id: item.id },
+    enabled: telemetryEnabledForUser(userSettings)
+  });
   userStates.delete(String(ctx.from.id));
   await renderScreen(ctx, { titleKey: 'Daily Report', bodyLines: ['Saved.'], inlineKeyboard: dailyReportKeyboard(reportDayId) });
   await renderDailyStatus(ctx);
@@ -329,8 +431,25 @@ bot.hears('⚙️ Settings', async (ctx: Context) => {
 bot.callbackQuery(/^[A-Za-z0-9_-]{8,12}$/, async (ctx) => {
   await safeAnswerCallback(ctx);
   try {
+    const traceId = getTraceId(ctx);
+    const { user } = await ensureUserAndSettings(ctx);
+    const enabled = telemetryEnabledForUser(user.settings_json as Record<string, unknown>);
+    await logTelemetryEvent({
+      userId: user.id,
+      traceId,
+      eventName: 'callback_token_pressed',
+      payload: { data: ctx.callbackQuery.data },
+      enabled
+    });
     const token = ctx.callbackQuery.data;
     const payload = await consumeCallbackToken(token);
+    await logTelemetryEvent({
+      userId: user.id,
+      traceId,
+      eventName: 'callback_token_consumed',
+      payload: { token, valid: Boolean(payload) },
+      enabled
+    });
     const action = typeof payload === 'object' && payload ? (payload as { action?: string }).action : null;
 
     if (!action) {
@@ -353,31 +472,32 @@ bot.callbackQuery(/^[A-Za-z0-9_-]{8,12}$/, async (ctx) => {
   }
 });
 
-// Generic token-based callbacks
-bot.callbackQuery(/^[A-Za-z0-9_-]{8,12}$/, async (ctx) => {
+bot.callbackQuery(/^err:send:(.+)$/, async (ctx) => {
   await safeAnswerCallback(ctx);
+  const code = ctx.match?.[1];
+  if (!code) return;
+  const traceId = getTraceId(ctx);
   try {
-    const token = ctx.callbackQuery.data;
-    const payload = await consumeCallbackToken(token);
-    const action = typeof payload === 'object' && payload ? (payload as { action?: string }).action : null;
-
-    if (!action) {
-      await ctx.answerCallbackQuery({ text: 'Expired or invalid action. Please refresh.', show_alert: true });
+    const report = await getErrorReportByCode(code);
+    if (!report) {
+      await ctx.answerCallbackQuery({ text: 'Report not found.', show_alert: true });
       return;
     }
-
-    switch (action) {
-      case 'noop':
-        break;
-      case 'home.back':
-        await sendHome(ctx);
-        break;
-      default:
-        await ctx.answerCallbackQuery({ text: 'Expired or invalid action. Please refresh.', show_alert: true });
+    const targetId = config.telegram.adminId ? Number(config.telegram.adminId) : ctx.from?.id;
+    const message = ['Error report', `Code: ${report.error_code}`, `Trace: ${report.trace_id}`, '', 'Details:', '```', JSON.stringify(report.error_json, null, 2), '```'].join('\n');
+    if (targetId) {
+      await ctx.api.sendMessage(targetId, message, { parse_mode: 'Markdown' });
     }
+    await logTelemetryEvent({
+      userId: report.user_id,
+      traceId,
+      eventName: 'error_report_sent',
+      payload: { error_code: code, target: targetId },
+      enabled: true
+    });
   } catch (error) {
-    console.error({ scope: 'callback_tokens', event: 'consume_failure', error });
-    await ctx.answerCallbackQuery({ text: 'Unexpected error. Please try again.', show_alert: true });
+    console.error({ scope: 'error_report', event: 'send_failed', error, code });
+    await ctx.answerCallbackQuery({ text: 'Failed to send report.', show_alert: true });
   }
 });
 
@@ -432,6 +552,7 @@ bot.callbackQuery(/^rw:cfm:([a-f0-9-]+)$/, async (ctx) => {
   if (!ctx.from) return;
   const rewardId = ctx.match?.[1];
   const { user } = await ensureUserAndSettings(ctx);
+  const enabled = telemetryEnabledForUser(user.settings_json as Record<string, unknown>);
   const reward = rewardId ? await getRewardById(rewardId) : null;
   if (!reward) {
     await renderScreen(ctx, { titleKey: '🎁 Reward Center', bodyLines: ['Reward not found.'], inlineKeyboard: rewardCenterKeyboard });
@@ -439,6 +560,13 @@ bot.callbackQuery(/^rw:cfm:([a-f0-9-]+)$/, async (ctx) => {
   }
   await purchaseReward({ userId: user.id, reward });
   const balance = await getXpBalance(user.id);
+  await logForUser({
+    userId: user.id,
+    ctx,
+    eventName: 'db_write',
+    payload: { action: 'purchase_reward', reward_id: reward.id, cost: reward.xp_cost },
+    enabled
+  });
   await renderScreen(ctx, {
     titleKey: '🎁 Reward Center',
     bodyLines: [`Purchased "${reward.title}" for ${reward.xp_cost} XP.`, `New balance: ${balance} XP.`],

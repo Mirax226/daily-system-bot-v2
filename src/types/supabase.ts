@@ -531,6 +531,80 @@ export type Database = {
         };
         Relationships: [];
       };
+      telemetry_events: {
+        Row: {
+          id: string;
+          user_id: string;
+          trace_id: string;
+          event_name: string;
+          screen: string | null;
+          payload: Record<string, unknown> | null;
+          created_at: string;
+        };
+        Insert: {
+          id?: string;
+          user_id: string;
+          trace_id: string;
+          event_name: string;
+          screen?: string | null;
+          payload?: Record<string, unknown> | null;
+          created_at?: string;
+        };
+        Update: {
+          id?: string;
+          user_id?: string;
+          trace_id?: string;
+          event_name?: string;
+          screen?: string | null;
+          payload?: Record<string, unknown> | null;
+          created_at?: string;
+        };
+        Relationships: [
+          {
+            foreignKeyName: 'telemetry_events_user_id_fkey';
+            columns: ['user_id'];
+            referencedRelation: 'users';
+            referencedColumns: ['id'];
+          }
+        ];
+      };
+      error_reports: {
+        Row: {
+          id: string;
+          user_id: string;
+          trace_id: string;
+          error_code: string;
+          error_json: Record<string, unknown>;
+          recent_events: Record<string, unknown>;
+          created_at: string;
+        };
+        Insert: {
+          id: string;
+          user_id: string;
+          trace_id: string;
+          error_code: string;
+          error_json: Record<string, unknown>;
+          recent_events: Record<string, unknown>;
+          created_at?: string;
+        };
+        Update: {
+          id?: string;
+          user_id?: string;
+          trace_id?: string;
+          error_code?: string;
+          error_json?: Record<string, unknown>;
+          recent_events?: Record<string, unknown>;
+          created_at?: string;
+        };
+        Relationships: [
+          {
+            foreignKeyName: 'error_reports_user_id_fkey';
+            columns: ['user_id'];
+            referencedRelation: 'users';
+            referencedColumns: ['id'];
+          }
+        ];
+      };
     };
     Views: {};
     Functions: {};
@@ -552,3 +626,5 @@ export type ReportTemplateRow = Database['public']['Tables']['report_templates']
 export type ReportItemRow = Database['public']['Tables']['report_items']['Row'];
 export type ReportDayRow = Database['public']['Tables']['report_days']['Row'];
 export type ReportValueRow = Database['public']['Tables']['report_values']['Row'];
+export type TelemetryEventRow = Database['public']['Tables']['telemetry_events']['Row'];
+export type ErrorReportRow = Database['public']['Tables']['error_reports']['Row'];
