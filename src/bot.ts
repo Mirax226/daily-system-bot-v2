@@ -180,7 +180,7 @@ const renderDailyStatus = async (ctx: Context): Promise<void> => {
 
   const kb = new InlineKeyboard();
   statuses.forEach((s) => {
-    kb.text(`${s.filled ? '✅' : '⬜️'} ${s.item.label}`, `dr:item:${reportDay.id}:${s.item.id}`).row();
+    kb.text(`${s.filled ? '✅' : '⬜️'} ${s.item.label}`, `dr:item:${s.item.id}`).row();
   });
   kb.text('⬅️ Back to Home', 'home:back');
   await ctx.reply(lines.join('\n'), { reply_markup: kb });
@@ -363,22 +363,25 @@ bot.callbackQuery(/^dr:next:(.+)$/, async (ctx) => {
   await renderNextItem(ctx);
 });
 
-bot.callbackQuery(/^dr:item:([a-f0-9-]+):([a-f0-9-]+)$/, async (ctx) => {
+bot.callbackQuery(/^dr:item:([a-f0-9-]+)$/, async (ctx) => {
   await safeAnswerCallback(ctx);
-  const reportDayId = ctx.match?.[1];
-  const itemId = ctx.match?.[2];
-  const { reportDay, items } = await ensureReportContext(ctx);
-  if (reportDay.id !== reportDayId) {
-    await ctx.reply('Report session is outdated. Opening current day instead.');
-    await renderDailyStatus(ctx);
+  const itemId = ctx.match?.[1];
+  if (!itemId) {
+    await ctx.answerCallbackQuery({ text: 'Item not found', show_alert: true });
     return;
   }
-  const item = items.find((i) => i.id === itemId);
-  if (!item) {
-    await ctx.reply('Item not found.');
-    return;
+  try {
+    const { reportDay, items } = await ensureReportContext(ctx);
+    const item = items.find((i) => i.id === itemId);
+    if (!item) {
+      await ctx.answerCallbackQuery({ text: 'Item not found', show_alert: true });
+      return;
+    }
+    await promptForItem(ctx, reportDay.id, item);
+  } catch (error) {
+    console.error({ scope: 'daily_report', event: 'item_callback_error', error });
+    await ctx.reply('Unable to open that item right now.');
   }
-  await promptForItem(ctx, reportDayId, item);
 });
 
 bot.callbackQuery(/^dr:skip:([a-f0-9-]+):([a-f0-9-]+)$/, async (ctx) => {
