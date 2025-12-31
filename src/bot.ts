@@ -273,6 +273,27 @@ const renderRewardCenter = async (ctx: Context): Promise<void> => {
     const kb = await buildRewardCenterKeyboard(ctx);
     await renderScreen(ctx, { titleKey: '🎁 Reward Center', bodyLines: ['Reward Center is temporarily unavailable. Please try again later.'], inlineKeyboard: kb });
   }
+  const backBtn = await makeActionButton(ctx, { label: '⬅️ Back', action: 'nav.rewards' });
+  kb.text(backBtn.text, backBtn.callback_data);
+  await renderScreen(ctx, { titleKey: '🎁 Reward Center', bodyLines: ['Choose a reward to buy:'], inlineKeyboard: kb });
+};
+
+const renderRewardBuyList = async (ctx: Context): Promise<void> => {
+  const { user } = await ensureUserAndSettings(ctx);
+  const rewards = await listRewards(user.id);
+  if (!rewards.length) {
+    const kb = await buildRewardCenterKeyboard(ctx);
+    await renderScreen(ctx, { titleKey: '🎁 Reward Center', bodyLines: ['No rewards available yet.'], inlineKeyboard: kb });
+    return;
+  }
+  const kb = new InlineKeyboard();
+  for (const r of rewards) {
+    const btn = await makeActionButton(ctx, { label: `${r.title} (${r.xp_cost} XP)`, action: 'rewards.confirm', data: { rewardId: r.id } });
+    kb.text(btn.text, btn.callback_data).row();
+  }
+  const backBtn = await makeActionButton(ctx, { label: '⬅️ Back', action: 'nav.rewards' });
+  kb.text(backBtn.text, backBtn.callback_data);
+  await renderScreen(ctx, { titleKey: '🎁 Reward Center', bodyLines: ['Choose a reward to buy:'], inlineKeyboard: kb });
 };
 
 const renderRewardBuyList = async (ctx: Context): Promise<void> => {
