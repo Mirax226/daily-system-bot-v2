@@ -16,13 +16,32 @@ import { getErrorReportByCode, logErrorReport } from './services/errorReports';
 
 export const bot = new Bot(config.telegram.botToken);
 
-const mainMenuKeyboard = new Keyboard()
-  .text('📊 Reports')
-  .text('🎁 Reward Center')
-  .row()
-  .text('🧾 Daily Report')
-  .text('⚙️ Settings')
-  .resized();
+const buildMainMenuKeyboard = (aiEnabled: boolean): Keyboard => {
+  const kb = new Keyboard()
+    .text('🏠 Dashboard')
+    .text('🧾 Daily Report')
+    .row()
+    .text('📘 Reportcar')
+    .text('✅ Tasks / Routines')
+    .row()
+    .text('📋 To-Do List')
+    .text('🗓 Planning')
+    .row()
+    .text('🧭 My Day')
+    .text('📝 Free Text')
+    .row()
+    .text('⏰ Reminders')
+    .text('🎁 Reward Center')
+    .row()
+    .text('📊 Reports')
+    .text('📅 Calendar & Events')
+    .row()
+    .text('⚙️ Settings');
+  if (aiEnabled) {
+    kb.row().text('🤖 AI');
+  }
+  return kb.resized();
+};
 
 const reportsMenuKeyboard = new InlineKeyboard()
   .text('⭐ XP Summary', 'rep:xp')
@@ -98,7 +117,7 @@ const safeAnswerCallback = async (ctx: Context, params?: Parameters<Context['ans
       if (ctx.from?.id) {
         await ctx.api.sendMessage(ctx.from.id, 'Session expired. Please /start the bot again to refresh the menu.');
       }
-      await sendHome(ctx);
+      await renderDashboard(ctx);
       return;
     }
     throw error;
@@ -115,6 +134,9 @@ const ensureUserAndSettings = async (ctx: Context) => {
 };
 
 const telemetryEnabledForUser = (userSettingsJson?: Record<string, unknown>) => isTelemetryEnabled(userSettingsJson);
+
+const aiEnabledForUser = (userSettingsJson?: Record<string, unknown>) =>
+  Boolean((userSettingsJson as { ai?: { enabled?: boolean } } | undefined)?.ai?.enabled);
 
 const logForUser = async (params: {
   userId: string;
@@ -192,6 +214,7 @@ const renderScreen = async (ctx: Context, params: RenderScreenParams): Promise<v
   const text = [params.titleKey, '', ...params.bodyLines].join('\n');
   const inlineMarkup = params.inlineKeyboard ? { reply_markup: params.inlineKeyboard } : {};
   const canEdit = Boolean(user.home_chat_id && user.home_message_id);
+  const mainMenu = buildMainMenuKeyboard(aiEnabledForUser(user.settings_json as Record<string, unknown>));
 
   if (canEdit) {
     try {
@@ -215,7 +238,7 @@ const renderScreen = async (ctx: Context, params: RenderScreenParams): Promise<v
   }
 
   const message = await ctx.api.sendMessage(chatId, text, {
-    reply_markup: params.inlineKeyboard ?? mainMenuKeyboard
+    reply_markup: params.inlineKeyboard ?? mainMenu
   });
 
   const client = getSupabaseClient();
@@ -248,7 +271,7 @@ const renderScreen = async (ctx: Context, params: RenderScreenParams): Promise<v
   });
 };
 
-const buildHomeLines = (isNew: boolean, timezone?: string | null): string[] => {
+const buildDashboardLines = (isNew: boolean, timezone?: string | null): string[] => {
   const local = formatLocalTime(timezone ?? config.defaultTimezone);
   const lines = [chooseGreeting(), `⏱ Current time: ${local.date} | ${local.time} (${local.timezone})`];
   if (isNew) {
@@ -267,7 +290,7 @@ const buildHomeLines = (isNew: boolean, timezone?: string | null): string[] => {
   return lines;
 };
 
-export const sendHome = async (ctx: Context): Promise<void> => {
+const renderDashboard = async (ctx: Context): Promise<void> => {
   try {
     const { user, settings } = await ensureUserAndSettings(ctx);
     const isNew = !settings.onboarded;
@@ -278,11 +301,15 @@ export const sendHome = async (ctx: Context): Promise<void> => {
         // ignore onboarding update errors to keep UX running
       }
     }
-    const bodyLines = buildHomeLines(isNew, user.timezone);
-    await renderScreen(ctx, { titleKey: 'Home', bodyLines });
+    const bodyLines = buildDashboardLines(isNew, user.timezone);
+    await renderScreen(ctx, { titleKey: 'Dashboard', bodyLines });
   } catch (error) {
     console.error({ scope: 'home', event: 'render_error', error });
-    await renderScreen(ctx, { titleKey: 'Home', bodyLines: ['Unable to load home right now.'], inlineKeyboard: new InlineKeyboard().text('Reload', 'home:back') });
+    await renderScreen(ctx, {
+      titleKey: 'Dashboard',
+      bodyLines: ['Unable to load dashboard right now.'],
+      inlineKeyboard: new InlineKeyboard().text('Reload', 'home:back')
+    });
   }
 };
 
@@ -308,6 +335,42 @@ const renderXpSummary = async (ctx: Context): Promise<void> => {
   const summary = await getXpSummary(user.id);
   const lines = [`Earned: ${summary.earned}`, `Spent: ${summary.spent}`, `Net: ${summary.net}`];
   await renderScreen(ctx, { titleKey: 'XP Summary', bodyLines: lines, inlineKeyboard: reportsMenuKeyboard });
+};
+
+const renderReportcar = async (ctx: Context): Promise<void> => {
+  await renderScreen(ctx, { titleKey: 'Reportcar', bodyLines: ['Reportcar will be available soon.'], inlineKeyboard: new InlineKeyboard().text('⬅️ Back', 'home:back') });
+};
+
+const renderTasks = async (ctx: Context): Promise<void> => {
+  await renderScreen(ctx, { titleKey: 'Tasks / Routines', bodyLines: ['Tasks and routines will be available soon.'], inlineKeyboard: new InlineKeyboard().text('⬅️ Back', 'home:back') });
+};
+
+const renderTodo = async (ctx: Context): Promise<void> => {
+  await renderScreen(ctx, { titleKey: 'To-Do List', bodyLines: ['To-Do List will be available soon.'], inlineKeyboard: new InlineKeyboard().text('⬅️ Back', 'home:back') });
+};
+
+const renderPlanning = async (ctx: Context): Promise<void> => {
+  await renderScreen(ctx, { titleKey: 'Planning', bodyLines: ['Planning will be available soon.'], inlineKeyboard: new InlineKeyboard().text('⬅️ Back', 'home:back') });
+};
+
+const renderMyDay = async (ctx: Context): Promise<void> => {
+  await renderScreen(ctx, { titleKey: 'My Day', bodyLines: ['My Day will be available soon.'], inlineKeyboard: new InlineKeyboard().text('⬅️ Back', 'home:back') });
+};
+
+const renderFreeText = async (ctx: Context): Promise<void> => {
+  await renderScreen(ctx, { titleKey: 'Free Text', bodyLines: ['Free Text capture will be available soon.'], inlineKeyboard: new InlineKeyboard().text('⬅️ Back', 'home:back') });
+};
+
+const renderReminders = async (ctx: Context): Promise<void> => {
+  await renderScreen(ctx, { titleKey: 'Reminders', bodyLines: ['Reminders will be available soon.'], inlineKeyboard: new InlineKeyboard().text('⬅️ Back', 'home:back') });
+};
+
+const renderCalendarEvents = async (ctx: Context): Promise<void> => {
+  await renderScreen(ctx, { titleKey: 'Calendar & Events', bodyLines: ['Calendar & Events will be available soon.'], inlineKeyboard: new InlineKeyboard().text('⬅️ Back', 'home:back') });
+};
+
+const renderAI = async (ctx: Context): Promise<void> => {
+  await renderScreen(ctx, { titleKey: 'AI', bodyLines: ['AI features will be available soon.'], inlineKeyboard: new InlineKeyboard().text('⬅️ Back', 'home:back') });
 };
 
 const ensureReportContext = async (ctx: Context): Promise<{ userId: string; reportDay: ReportDayRow; items: ReportItemRow[] }> => {
@@ -395,28 +458,35 @@ const handleSaveValue = async (ctx: Context, text: string): Promise<void> => {
 // ===== Handlers =====
 
 bot.command('start', async (ctx: Context) => {
-  await sendHome(ctx);
+  await renderDashboard(ctx);
 });
 
 bot.command('home', async (ctx: Context) => {
-  await sendHome(ctx);
+  await renderDashboard(ctx);
 });
 
-bot.hears('📊 Reports', async (ctx: Context) => {
-  await renderReportsMenu(ctx);
-});
-
-bot.hears('🎁 Reward Center', async (ctx: Context) => {
-  await renderRewardCenter(ctx);
-});
-
+bot.hears('🏠 Dashboard', renderDashboard);
 bot.hears('🧾 Daily Report', async (ctx: Context) => {
   await renderDailyStatus(ctx);
 });
-
+bot.hears('📘 Reportcar', renderReportcar);
+bot.hears('✅ Tasks / Routines', renderTasks);
+bot.hears('📋 To-Do List', renderTodo);
+bot.hears('🗓 Planning', renderPlanning);
+bot.hears('🧭 My Day', renderMyDay);
+bot.hears('📝 Free Text', renderFreeText);
+bot.hears('⏰ Reminders', renderReminders);
+bot.hears('🎁 Reward Center', async (ctx: Context) => {
+  await renderRewardCenter(ctx);
+});
+bot.hears('📊 Reports', async (ctx: Context) => {
+  await renderReportsMenu(ctx);
+});
+bot.hears('📅 Calendar & Events', renderCalendarEvents);
 bot.hears('⚙️ Settings', async (ctx: Context) => {
   await renderScreen(ctx, { titleKey: 'Settings', bodyLines: ['Choose an option:'], inlineKeyboard: settingsMenuKeyboard });
 });
+bot.hears('🤖 AI', renderAI);
 
 // Generic token-based callbacks
 bot.callbackQuery(/^[A-Za-z0-9_-]{8,12}$/, async (ctx) => {
@@ -452,7 +522,7 @@ bot.callbackQuery(/^[A-Za-z0-9_-]{8,12}$/, async (ctx) => {
       case 'noop':
         break;
       case 'home.back':
-        await sendHome(ctx);
+        await renderDashboard(ctx);
         break;
       case 'error.send_report': {
         const errorCode = (payload as { errorCode?: string }).errorCode;
@@ -537,7 +607,7 @@ bot.callbackQuery(/^err:send:(.+)$/, async (ctx) => {
 // Home/back
 bot.callbackQuery('home:back', async (ctx) => {
   await safeAnswerCallback(ctx);
-  await sendHome(ctx);
+  await renderDashboard(ctx);
 });
 
 // Reports
