@@ -273,6 +273,9 @@ const renderRewardCenter = async (ctx: Context): Promise<void> => {
     const kb = await buildRewardCenterKeyboard(ctx);
     await renderScreen(ctx, { titleKey: '🎁 Reward Center', bodyLines: ['Reward Center is temporarily unavailable. Please try again later.'], inlineKeyboard: kb });
   }
+  const backBtn = await makeActionButton(ctx, { label: '⬅️ Back', action: 'nav.rewards' });
+  kb.text(backBtn.text, backBtn.callback_data);
+  await renderScreen(ctx, { titleKey: '🎁 Reward Center', bodyLines: ['Choose a reward to buy:'], inlineKeyboard: kb });
 };
 
 const renderRewardBuyList = async (ctx: Context): Promise<void> => {
@@ -476,8 +479,27 @@ bot.command('start', async (ctx: Context) => {
   await renderDashboard(ctx);
 });
 
+bot.command('debug_inline', async (ctx: Context) => {
+  const keyboard = new InlineKeyboard().text('Test button', 'dbg:test');
+  await ctx.reply('Inline debug screen', { reply_markup: keyboard });
+});
+
+bot.callbackQuery('dbg:test', async (ctx) => {
+  await safeAnswerCallback(ctx, { text: 'Inline is working!' });
+});
+
+bot.command('debug_inline', async (ctx: Context) => {
+  const keyboard = new InlineKeyboard().text('Test button', 'dbg:test');
+  await ctx.reply('Inline debug screen', { reply_markup: keyboard });
+});
+
 bot.command('home', async (ctx: Context) => {
   await renderDashboard(ctx);
+});
+
+bot.command('debug_inline', async (ctx: Context) => {
+  const keyboard = new InlineKeyboard().text('Test button', 'dbg:test');
+  await ctx.reply('Inline debug screen', { reply_markup: keyboard });
 });
 
 bot.hears('🏠 Dashboard', renderDashboard);
