@@ -1,73 +1,20 @@
-import { Bot, InlineKeyboard, Keyboard, GrammyError } from 'grammy';
+import { Bot, InlineKeyboard, GrammyError } from 'grammy';
 import type { BotError, Context } from 'grammy';
 import { config } from './config';
-import { ensureUser } from './services/users';
 import { seedDefaultRewardsIfEmpty, listRewards, getRewardById, purchaseReward } from './services/rewards';
 import { getXpBalance, getXpSummary } from './services/xpLedger';
 import { formatLocalTime } from './utils/time';
 import type { ReportItemRow, ReportDayRow } from './types/supabase';
 import { ensureDefaultItems, ensureDefaultTemplate, upsertItem } from './services/reportTemplates';
 import { getOrCreateReportDay, listCompletionStatus, saveValue } from './services/dailyReport';
-import { getOrCreateUserSettings, setUserOnboarded } from './services/userSettings';
-import { consumeCallbackToken, createCallbackToken } from './services/callbackTokens';
-import { getSupabaseClient } from './db';
+import { setUserOnboarded } from './services/userSettings';
+import { consumeCallbackToken } from './services/callbackTokens';
 import { getRecentTelemetryEvents, isTelemetryEnabled, logTelemetryEvent } from './services/telemetry';
 import { getErrorReportByCode, logErrorReport } from './services/errorReports';
+import { makeActionButton } from './ui/inlineButtons';
+import { renderScreen, ensureUserAndSettings } from './ui/renderScreen';
 
 export const bot = new Bot(config.telegram.botToken);
-
-const buildMainMenuKeyboard = (aiEnabled: boolean): Keyboard => {
-  const kb = new Keyboard()
-    .text('🏠 Dashboard')
-    .text('🧾 Daily Report')
-    .row()
-    .text('📘 Reportcar')
-    .text('✅ Tasks / Routines')
-    .row()
-    .text('📋 To-Do List')
-    .text('🗓 Planning')
-    .row()
-    .text('🧭 My Day')
-    .text('📝 Free Text')
-    .row()
-    .text('⏰ Reminders')
-    .text('🎁 Reward Center')
-    .row()
-    .text('📊 Reports')
-    .text('📅 Calendar & Events')
-    .row()
-    .text('⚙️ Settings');
-  if (aiEnabled) {
-    kb.row().text('🤖 AI');
-  }
-  return kb.resized();
-};
-
-const reportsMenuKeyboard = new InlineKeyboard()
-  .text('⭐ XP Summary', 'rep:xp')
-  .row()
-  .text('😴 Sleep', 'rep:sleep')
-  .row()
-  .text('📚 Study', 'rep:study')
-  .row()
-  .text('🧩 Non-Study Tasks', 'rep:tasks')
-  .row()
-  .text('📈 Study Chart', 'rep:chart')
-  .row()
-  .text('⬅️ Back to Home', 'home:back');
-
-const rewardCenterKeyboard = new InlineKeyboard()
-  .text('🛒 Buy', 'rw:buy')
-  .row()
-  .text('🛠 Edit Store', 'rw:edit')
-  .row()
-  .text('⬅️ Back to Home', 'home:back');
-
-const dailyReportKeyboard = (reportDayId: string | null): InlineKeyboard => {
-  const kb = new InlineKeyboard().text('📋 Completion Status', `dr:status:${reportDayId ?? 'na'}`).row();
-  kb.text('✏️ Fill Next Item', `dr:next:${reportDayId ?? 'na'}`).row().text('⬅️ Back to Home', 'home:back');
-  return kb;
-};
 
 const settingsMenuKeyboard = new InlineKeyboard()
   .text('📄 Daily Report Form', 'set:form')
@@ -124,19 +71,7 @@ const safeAnswerCallback = async (ctx: Context, params?: Parameters<Context['ans
   }
 };
 
-const ensureUserAndSettings = async (ctx: Context) => {
-  if (!ctx.from) throw new Error('User not found in context');
-  const telegramId = String(ctx.from.id);
-  const username = ctx.from.username ?? null;
-  const user = await ensureUser({ telegramId, username });
-  const settings = await getOrCreateUserSettings(user.id);
-  return { user, settings };
-};
-
 const telemetryEnabledForUser = (userSettingsJson?: Record<string, unknown>) => isTelemetryEnabled(userSettingsJson);
-
-const aiEnabledForUser = (userSettingsJson?: Record<string, unknown>) =>
-  Boolean((userSettingsJson as { ai?: { enabled?: boolean } } | undefined)?.ai?.enabled);
 
 const logForUser = async (params: {
   userId: string;
@@ -156,9 +91,8 @@ const logForUser = async (params: {
   });
 
 const sendErrorNotice = async (ctx: Context, errorCode: string) => {
-  const payload = { action: 'error.send_report', errorCode };
-  const token = await createCallbackToken({ payload });
-  const kb = new InlineKeyboard().text('Send report', token);
+  const btn = await makeActionButton(ctx, { label: 'Send report', action: 'error.send_report', data: { errorCode } });
+  const kb = new InlineKeyboard().text(btn.text, btn.callback_data);
   await renderScreen(ctx, {
     titleKey: 'Error',
     bodyLines: [`An error occurred. Tracking code: ${errorCode}`],
@@ -200,75 +134,49 @@ bot.use(async (ctx, next) => {
   }
 });
 
-type RenderScreenParams = {
-  titleKey: string;
-  bodyLines: string[];
-  inlineKeyboard?: InlineKeyboard;
+const buildRewardCenterKeyboard = async (ctx: Context): Promise<InlineKeyboard> => {
+  const buyBtn = await makeActionButton(ctx, { label: '🛒 Buy', action: 'rewards.buy' });
+  const editBtn = await makeActionButton(ctx, { label: '🛠 Edit Store', action: 'rewards.edit' });
+  const backBtn = await makeActionButton(ctx, { label: '⬅️ Back', action: 'nav.dashboard' });
+  return new InlineKeyboard()
+    .text(buyBtn.text, buyBtn.callback_data)
+    .row()
+    .text(editBtn.text, editBtn.callback_data)
+    .row()
+    .text(backBtn.text, backBtn.callback_data);
 };
 
-const renderScreen = async (ctx: Context, params: RenderScreenParams): Promise<void> => {
-  const { user } = await ensureUserAndSettings(ctx);
-  const chatId = ctx.chat?.id ?? (user.home_chat_id ? Number(user.home_chat_id) : undefined) ?? ctx.from?.id;
-  if (!chatId) throw new Error('Chat id missing for renderScreen');
+const buildDailyReportKeyboard = async (ctx: Context, reportDayId: string | null): Promise<InlineKeyboard> => {
+  const statusBtn = await makeActionButton(ctx, { label: '📋 Completion Status', action: 'dr.status', data: { reportDayId } });
+  const nextBtn = await makeActionButton(ctx, { label: '✏️ Fill Next Item', action: 'dr.next', data: { reportDayId } });
+  const backBtn = await makeActionButton(ctx, { label: '⬅️ Back', action: 'dr.back' });
+  return new InlineKeyboard()
+    .text(statusBtn.text, statusBtn.callback_data)
+    .row()
+    .text(nextBtn.text, nextBtn.callback_data)
+    .row()
+    .text(backBtn.text, backBtn.callback_data);
+};
 
-  const text = [params.titleKey, '', ...params.bodyLines].join('\n');
-  const inlineMarkup = params.inlineKeyboard ? { reply_markup: params.inlineKeyboard } : {};
-  const canEdit = Boolean(user.home_chat_id && user.home_message_id);
-  const mainMenu = buildMainMenuKeyboard(aiEnabledForUser(user.settings_json as Record<string, unknown>));
-
-  if (canEdit) {
-    try {
-      await ctx.api.editMessageText(Number(user.home_chat_id), Number(user.home_message_id), text, inlineMarkup);
-      if (params.inlineKeyboard) {
-        await ctx.api.editMessageReplyMarkup(Number(user.home_chat_id), Number(user.home_message_id), {
-          reply_markup: params.inlineKeyboard
-        });
-      }
-      return;
-    } catch (error) {
-      console.warn({
-        scope: 'render_screen',
-        event: 'edit_failed',
-        userId: user.id,
-        homeChatId: user.home_chat_id,
-        homeMessageId: user.home_message_id,
-        error
-      });
-    }
-  }
-
-  const message = await ctx.api.sendMessage(chatId, text, {
-    reply_markup: params.inlineKeyboard ?? mainMenu
-  });
-
-  const client = getSupabaseClient();
-  const { error } = await client
-    .from('users')
-    .update({
-      home_chat_id: String(message.chat.id),
-      home_message_id: String(message.message_id),
-      updated_at: new Date().toISOString()
-    })
-    .eq('id', user.id);
-
-  if (error) {
-    console.error({
-      scope: 'render_screen',
-      event: 'persist_home_message_failed',
-      userId: user.id,
-      messageId: message.message_id,
-      error
-    });
-  }
-
-  await logTelemetryEvent({
-    userId: user.id,
-    traceId: getTraceId(ctx),
-    eventName: 'screen_render',
-    screen: params.titleKey,
-    payload: { chat_id: chatId, message_id: message.message_id },
-    enabled: telemetryEnabledForUser(user.settings_json as Record<string, unknown>)
-  });
+const buildReportsMenuKeyboard = async (ctx: Context): Promise<InlineKeyboard> => {
+  const xpBtn = await makeActionButton(ctx, { label: '⭐ XP Summary', action: 'reports.xp' });
+  const sleepBtn = await makeActionButton(ctx, { label: '😴 Sleep', action: 'reports.sleep' });
+  const studyBtn = await makeActionButton(ctx, { label: '📚 Study', action: 'reports.study' });
+  const tasksBtn = await makeActionButton(ctx, { label: '🧩 Non-Study Tasks', action: 'reports.tasks' });
+  const chartBtn = await makeActionButton(ctx, { label: '📈 Study Chart', action: 'reports.chart' });
+  const backBtn = await makeActionButton(ctx, { label: '⬅️ Back', action: 'nav.dashboard' });
+  return new InlineKeyboard()
+    .text(xpBtn.text, xpBtn.callback_data)
+    .row()
+    .text(sleepBtn.text, sleepBtn.callback_data)
+    .row()
+    .text(studyBtn.text, studyBtn.callback_data)
+    .row()
+    .text(tasksBtn.text, tasksBtn.callback_data)
+    .row()
+    .text(chartBtn.text, chartBtn.callback_data)
+    .row()
+    .text(backBtn.text, backBtn.callback_data);
 };
 
 const buildDashboardLines = (isNew: boolean, timezone?: string | null): string[] => {
@@ -316,39 +224,28 @@ const renderDashboard = async (ctx: Context): Promise<void> => {
       `Current streak: ${streak} days`
     ];
 
-    const makeToken = (action: string) => createCallbackToken({ payload: { action } });
-    const [
-      dailyReportToken,
-      reportcarToken,
-      tasksToken,
-      remindersToken,
-      rewardsToken,
-      reportsToken,
-      settingsToken
-    ] = await Promise.all([
-      makeToken('nav.daily_report'),
-      makeToken('nav.reportcar'),
-      makeToken('nav.tasks'),
-      makeToken('nav.reminders'),
-      makeToken('nav.rewards'),
-      makeToken('nav.reports'),
-      makeToken('nav.settings')
-    ]);
+    const dailyReportBtn = await makeActionButton(ctx, { label: '🧾 Daily Report', action: 'nav.daily_report' });
+    const reportcarBtn = await makeActionButton(ctx, { label: '📘 Reportcar', action: 'nav.reportcar' });
+    const tasksBtn = await makeActionButton(ctx, { label: '✅ Tasks / Routines', action: 'nav.tasks' });
+    const remindersBtn = await makeActionButton(ctx, { label: '⏰ Reminders', action: 'nav.reminders' });
+    const rewardsBtn = await makeActionButton(ctx, { label: '🎁 Reward Center', action: 'nav.rewards' });
+    const reportsBtn = await makeActionButton(ctx, { label: '📊 Reports', action: 'nav.reports' });
+    const settingsBtn = await makeActionButton(ctx, { label: '⚙️ Settings', action: 'nav.settings' });
 
     const kb = new InlineKeyboard()
-      .text('🧾 Daily Report', dailyReportToken)
+      .text(dailyReportBtn.text, dailyReportBtn.callback_data)
       .row()
-      .text('📘 Reportcar', reportcarToken)
+      .text(reportcarBtn.text, reportcarBtn.callback_data)
       .row()
-      .text('✅ Tasks / Routines', tasksToken)
+      .text(tasksBtn.text, tasksBtn.callback_data)
       .row()
-      .text('⏰ Reminders', remindersToken)
+      .text(remindersBtn.text, remindersBtn.callback_data)
       .row()
-      .text('🎁 Reward Center', rewardsToken)
+      .text(rewardsBtn.text, rewardsBtn.callback_data)
       .row()
-      .text('📊 Reports', reportsToken)
+      .text(reportsBtn.text, reportsBtn.callback_data)
       .row()
-      .text('⚙️ Settings', settingsToken);
+      .text(settingsBtn.text, settingsBtn.callback_data);
 
     await renderScreen(ctx, { titleKey: 'Dashboard', bodyLines, inlineKeyboard: kb });
   } catch (error) {
@@ -367,22 +264,44 @@ const renderRewardCenter = async (ctx: Context): Promise<void> => {
     await seedDefaultRewardsIfEmpty(user.id);
     const balance = await getXpBalance(user.id);
     const bodyLines = [`XP Balance: ${balance}`, '', 'Choose an option:'];
-    await renderScreen(ctx, { titleKey: '🎁 Reward Center', bodyLines, inlineKeyboard: rewardCenterKeyboard });
+    const kb = await buildRewardCenterKeyboard(ctx);
+    await renderScreen(ctx, { titleKey: '🎁 Reward Center', bodyLines, inlineKeyboard: kb });
   } catch (error) {
     console.error({ scope: 'rewards', event: 'render_error', error });
-    await renderScreen(ctx, { titleKey: '🎁 Reward Center', bodyLines: ['Reward Center is temporarily unavailable. Please try again later.'], inlineKeyboard: rewardCenterKeyboard });
+    const kb = await buildRewardCenterKeyboard(ctx);
+    await renderScreen(ctx, { titleKey: '🎁 Reward Center', bodyLines: ['Reward Center is temporarily unavailable. Please try again later.'], inlineKeyboard: kb });
   }
 };
 
+const renderRewardBuyList = async (ctx: Context): Promise<void> => {
+  const { user } = await ensureUserAndSettings(ctx);
+  const rewards = await listRewards(user.id);
+  if (!rewards.length) {
+    const kb = await buildRewardCenterKeyboard(ctx);
+    await renderScreen(ctx, { titleKey: '🎁 Reward Center', bodyLines: ['No rewards available yet.'], inlineKeyboard: kb });
+    return;
+  }
+  const kb = new InlineKeyboard();
+  for (const r of rewards) {
+    const btn = await makeActionButton(ctx, { label: `${r.title} (${r.xp_cost} XP)`, action: 'rewards.confirm', data: { rewardId: r.id } });
+    kb.text(btn.text, btn.callback_data).row();
+  }
+  const backBtn = await makeActionButton(ctx, { label: '⬅️ Back', action: 'nav.rewards' });
+  kb.text(backBtn.text, backBtn.callback_data);
+  await renderScreen(ctx, { titleKey: '🎁 Reward Center', bodyLines: ['Choose a reward to buy:'], inlineKeyboard: kb });
+};
+
 const renderReportsMenu = async (ctx: Context): Promise<void> => {
-  await renderScreen(ctx, { titleKey: 'Reports', bodyLines: ['Choose a category:'], inlineKeyboard: reportsMenuKeyboard });
+  const kb = await buildReportsMenuKeyboard(ctx);
+  await renderScreen(ctx, { titleKey: 'Reports', bodyLines: ['Choose a category:'], inlineKeyboard: kb });
 };
 
 const renderXpSummary = async (ctx: Context): Promise<void> => {
   const { user } = await ensureUserAndSettings(ctx);
   const summary = await getXpSummary(user.id);
   const lines = [`Earned: ${summary.earned}`, `Spent: ${summary.spent}`, `Net: ${summary.net}`];
-  await renderScreen(ctx, { titleKey: 'XP Summary', bodyLines: lines, inlineKeyboard: reportsMenuKeyboard });
+  const kb = await buildReportsMenuKeyboard(ctx);
+  await renderScreen(ctx, { titleKey: 'XP Summary', bodyLines: lines, inlineKeyboard: kb });
 };
 
 const renderReportcar = async (ctx: Context): Promise<void> => {
@@ -437,10 +356,12 @@ const renderDailyStatus = async (ctx: Context): Promise<void> => {
   statuses.forEach((s, idx) => lines.push(`${s.filled ? '✅' : '⬜️'} ${idx + 1}) ${s.item.label}`));
 
   const kb = new InlineKeyboard();
-  statuses.forEach((s) => {
-    kb.text(`${s.filled ? '✅' : '⬜️'} ${s.item.label}`, `dr:item:${s.item.id}`).row();
-  });
-  kb.text('⬅️ Back to Home', 'home:back');
+  for (const s of statuses) {
+    const btn = await makeActionButton(ctx, { label: `${s.filled ? '✅' : '⬜️'} ${s.item.label}`, action: 'dr.item', data: { itemId: s.item.id } });
+    kb.text(btn.text, btn.callback_data).row();
+  }
+  const backBtn = await makeActionButton(ctx, { label: '⬅️ Back', action: 'dr.back' });
+  kb.text(backBtn.text, backBtn.callback_data);
   await renderScreen(ctx, { titleKey: 'Daily Report', bodyLines: lines, inlineKeyboard: kb });
 };
 
@@ -449,7 +370,8 @@ const renderNextItem = async (ctx: Context): Promise<void> => {
   const statuses = await listCompletionStatus(reportDay.id, items);
   const next = statuses.find((s) => !s.filled);
   if (!next) {
-    await renderScreen(ctx, { titleKey: 'Daily Report', bodyLines: ['All items are completed for today!'], inlineKeyboard: dailyReportKeyboard(reportDay.id) });
+    const kb = await buildDailyReportKeyboard(ctx, reportDay.id);
+    await renderScreen(ctx, { titleKey: 'Daily Report', bodyLines: ['All items are completed for today!'], inlineKeyboard: kb });
     return;
   }
   await promptForItem(ctx, reportDay.id, next.item);
@@ -468,31 +390,28 @@ const renderDailyReportRoot = async (ctx: Context): Promise<void> => {
     ''
   ];
 
-  const makeToken = (action: string) => createCallbackToken({ payload: { action } });
-  const [statusToken, nextToken, pickToken, templatesToken, historyToken, lockToken, backToken] = await Promise.all([
-    makeToken('dr.status'),
-    makeToken('dr.next'),
-    makeToken('dr.pick_item'),
-    makeToken('dr.templates'),
-    makeToken('dr.history'),
-    makeToken('dr.lock'),
-    makeToken('dr.back')
-  ]);
+  const statusBtn = await makeActionButton(ctx, { label: '📋 Today Status', action: 'dr.status' });
+  const nextBtn = await makeActionButton(ctx, { label: '✏️ Fill Next', action: 'dr.next' });
+  const pickBtn = await makeActionButton(ctx, { label: '🧩 Fill Specific Item', action: 'dr.pick_item' });
+  const templatesBtn = await makeActionButton(ctx, { label: '🗂 Templates', action: 'dr.templates' });
+  const historyBtn = await makeActionButton(ctx, { label: '🕘 History', action: 'dr.history' });
+  const lockBtn = await makeActionButton(ctx, { label: '✅ Submit / Lock', action: 'dr.lock' });
+  const backBtn = await makeActionButton(ctx, { label: '⬅️ Back', action: 'dr.back' });
 
   const kb = new InlineKeyboard()
-    .text('📋 Today Status', statusToken)
+    .text(statusBtn.text, statusBtn.callback_data)
     .row()
-    .text('✏️ Fill Next', nextToken)
+    .text(nextBtn.text, nextBtn.callback_data)
     .row()
-    .text('🧩 Fill Specific Item', pickToken)
+    .text(pickBtn.text, pickBtn.callback_data)
     .row()
-    .text('🗂 Templates', templatesToken)
+    .text(templatesBtn.text, templatesBtn.callback_data)
     .row()
-    .text('🕘 History', historyToken)
+    .text(historyBtn.text, historyBtn.callback_data)
     .row()
-    .text('✅ Submit / Lock', lockToken)
+    .text(lockBtn.text, lockBtn.callback_data)
     .row()
-    .text('⬅️ Back', backToken);
+    .text(backBtn.text, backBtn.callback_data);
 
   await renderScreen(ctx, { titleKey: 'Daily Report', bodyLines, inlineKeyboard: kb });
 };
@@ -500,10 +419,9 @@ const renderDailyReportRoot = async (ctx: Context): Promise<void> => {
 const promptForItem = async (ctx: Context, reportDayId: string, item: ReportItemRow) => {
   const telegramId = String(ctx.from?.id ?? '');
   userStates.set(telegramId, { awaitingValue: { reportDayId, itemId: item.id } });
-  const kb = new InlineKeyboard()
-    .text('⏭ Skip', `dr:skip:${reportDayId}:${item.id}`)
-    .row()
-    .text('⬅️ Cancel', 'dr:menu');
+  const skipBtn = await makeActionButton(ctx, { label: '⏭ Skip', action: 'dr.skip', data: { reportDayId, itemId: item.id } });
+  const cancelBtn = await makeActionButton(ctx, { label: '⬅️ Cancel', action: 'dr.menu' });
+  const kb = new InlineKeyboard().text(skipBtn.text, skipBtn.callback_data).row().text(cancelBtn.text, cancelBtn.callback_data);
   await renderScreen(ctx, { titleKey: 'Daily Report', bodyLines: [`Set value for: ${item.label}`, 'Send the value as text.'], inlineKeyboard: kb });
 };
 
@@ -515,13 +433,15 @@ const handleSaveValue = async (ctx: Context, text: string): Promise<void> => {
   const { reportDay, items } = await ensureReportContext(ctx);
   if (reportDay.id !== reportDayId) {
     userStates.delete(String(ctx.from.id));
-    await renderScreen(ctx, { titleKey: 'Daily Report', bodyLines: ['Session expired for that item. Please pick it again.'], inlineKeyboard: dailyReportKeyboard(reportDay.id) });
+    const kb = await buildDailyReportKeyboard(ctx, reportDay.id);
+    await renderScreen(ctx, { titleKey: 'Daily Report', bodyLines: ['Session expired for that item. Please pick it again.'], inlineKeyboard: kb });
     return;
   }
   const item = items.find((i) => i.id === itemId);
   if (!item) {
     userStates.delete(String(ctx.from.id));
-    await renderScreen(ctx, { titleKey: 'Daily Report', bodyLines: ['Item not found.'], inlineKeyboard: dailyReportKeyboard(reportDay.id) });
+    const kb = await buildDailyReportKeyboard(ctx, reportDay.id);
+    await renderScreen(ctx, { titleKey: 'Daily Report', bodyLines: ['Item not found.'], inlineKeyboard: kb });
     return;
   }
 
@@ -541,7 +461,8 @@ const handleSaveValue = async (ctx: Context, text: string): Promise<void> => {
     enabled: telemetryEnabledForUser(userSettings)
   });
   userStates.delete(String(ctx.from.id));
-  await renderScreen(ctx, { titleKey: 'Daily Report', bodyLines: ['Saved.'], inlineKeyboard: dailyReportKeyboard(reportDayId) });
+  const kb = await buildDailyReportKeyboard(ctx, reportDayId);
+  await renderScreen(ctx, { titleKey: 'Daily Report', bodyLines: ['Saved.'], inlineKeyboard: kb });
   await renderDailyStatus(ctx);
 };
 
@@ -614,6 +535,9 @@ bot.callbackQuery(/^[A-Za-z0-9_-]{8,12}$/, async (ctx) => {
       case 'home.back':
         await renderDashboard(ctx);
         break;
+      case 'nav.dashboard':
+        await renderDashboard(ctx);
+        break;
       case 'nav.daily_report':
         await renderDailyReportRoot(ctx);
         break;
@@ -629,11 +553,27 @@ bot.callbackQuery(/^[A-Za-z0-9_-]{8,12}$/, async (ctx) => {
       case 'nav.rewards':
         await renderRewardCenter(ctx);
         break;
+      case 'rewards.buy':
+        await renderRewardBuyList(ctx);
+        break;
       case 'nav.reports':
         await renderReportsMenu(ctx);
         break;
       case 'nav.settings':
         await renderScreen(ctx, { titleKey: 'Settings', bodyLines: ['Choose an option:'], inlineKeyboard: settingsMenuKeyboard });
+        break;
+      case 'reports.xp':
+        await renderXpSummary(ctx);
+        break;
+      case 'reports.sleep':
+      case 'reports.study':
+      case 'reports.tasks':
+      case 'reports.chart':
+        await renderScreen(ctx, {
+          titleKey: 'Reports',
+          bodyLines: [`${action.split('.')[1]} report: Coming soon.`],
+          inlineKeyboard: await buildReportsMenuKeyboard(ctx)
+        });
         break;
       case 'dr.status':
         await renderDailyStatus(ctx);
@@ -644,20 +584,125 @@ bot.callbackQuery(/^[A-Za-z0-9_-]{8,12}$/, async (ctx) => {
       case 'dr.pick_item':
         await renderDailyStatus(ctx);
         break;
+      case 'dr.item': {
+        const itemId = (payload as { data?: { itemId?: string } }).data?.itemId;
+        if (!itemId) {
+          await ctx.answerCallbackQuery({ text: 'Item not found', show_alert: true });
+          return;
+        }
+        try {
+          const { reportDay, items } = await ensureReportContext(ctx);
+          const item = items.find((i) => i.id === itemId);
+          if (!item) {
+            await ctx.answerCallbackQuery({ text: 'Item not found', show_alert: true });
+            return;
+          }
+          await promptForItem(ctx, reportDay.id, item);
+        } catch (err) {
+          console.error({ scope: 'daily_report', event: 'item_callback_error', error: err });
+          const kb = await buildDailyReportKeyboard(ctx, null);
+          await renderScreen(ctx, {
+            titleKey: 'Daily Report',
+            bodyLines: ['Unable to open that item right now.'],
+            inlineKeyboard: kb
+          });
+        }
+        break;
+      }
       case 'dr.templates':
-        await renderScreen(ctx, { titleKey: 'Daily Report', bodyLines: ['Templates coming soon.'], inlineKeyboard: new InlineKeyboard().text('⬅️ Back', await createCallbackToken({ payload: { action: 'dr.back' } })) });
+        const templatesBack = await makeActionButton(ctx, { label: '⬅️ Back', action: 'dr.back' });
+        await renderScreen(ctx, {
+          titleKey: 'Daily Report',
+          bodyLines: ['Templates coming soon.'],
+          inlineKeyboard: new InlineKeyboard().text(templatesBack.text, templatesBack.callback_data)
+        });
         break;
       case 'dr.history':
-        await renderScreen(ctx, { titleKey: 'Daily Report', bodyLines: ['History coming soon.'], inlineKeyboard: new InlineKeyboard().text('⬅️ Back', await createCallbackToken({ payload: { action: 'dr.back' } })) });
+        const historyBack = await makeActionButton(ctx, { label: '⬅️ Back', action: 'dr.back' });
+        await renderScreen(ctx, {
+          titleKey: 'Daily Report',
+          bodyLines: ['History coming soon.'],
+          inlineKeyboard: new InlineKeyboard().text(historyBack.text, historyBack.callback_data)
+        });
         break;
       case 'dr.lock':
-        await renderScreen(ctx, { titleKey: 'Daily Report', bodyLines: ['Submit/Lock coming soon.'], inlineKeyboard: new InlineKeyboard().text('⬅️ Back', await createCallbackToken({ payload: { action: 'dr.back' } })) });
+        const lockBack = await makeActionButton(ctx, { label: '⬅️ Back', action: 'dr.back' });
+        await renderScreen(ctx, {
+          titleKey: 'Daily Report',
+          bodyLines: ['Submit/Lock coming soon.'],
+          inlineKeyboard: new InlineKeyboard().text(lockBack.text, lockBack.callback_data)
+        });
+        break;
+      case 'dr.skip': {
+        const reportDayId = (payload as { data?: { reportDayId?: string } }).data?.reportDayId;
+        const itemId = (payload as { data?: { itemId?: string } }).data?.itemId;
+        if (!reportDayId || !itemId) {
+          await renderDailyStatus(ctx);
+          return;
+        }
+        const { reportDay, items } = await ensureReportContext(ctx);
+        if (reportDay.id !== reportDayId) {
+          await renderDailyStatus(ctx);
+          return;
+        }
+        const item = items.find((i) => i.id === itemId);
+        if (!item) {
+          const kb = await buildDailyReportKeyboard(ctx, reportDay.id);
+          await renderScreen(ctx, { titleKey: 'Daily Report', bodyLines: ['Item not found.'], inlineKeyboard: kb });
+          return;
+        }
+        await saveValue({ reportDayId, item, valueJson: { skipped: true }, userId: reportDay.user_id });
+        await renderDailyStatus(ctx);
+        break;
+      }
+      case 'dr.menu':
+        await renderDailyStatus(ctx);
         break;
       case 'dr.back':
         await renderDashboard(ctx);
         break;
+      case 'rewards.buy':
+        await renderRewardCenter(ctx);
+        break;
+      case 'rewards.confirm': {
+        const rewardId = (payload as { data?: { rewardId?: string } }).data?.rewardId;
+        if (!rewardId) return;
+        const { user } = await ensureUserAndSettings(ctx);
+        const enabled = telemetryEnabledForUser(user.settings_json as Record<string, unknown>);
+        const reward = await getRewardById(rewardId);
+        if (!reward) {
+          const kb = await buildRewardCenterKeyboard(ctx);
+          await renderScreen(ctx, { titleKey: '🎁 Reward Center', bodyLines: ['Reward not found.'], inlineKeyboard: kb });
+          return;
+        }
+        await purchaseReward({ userId: user.id, reward });
+        const balance = await getXpBalance(user.id);
+        await logForUser({
+          userId: user.id,
+          ctx,
+          eventName: 'db_write',
+          payload: { action: 'purchase_reward', reward_id: reward.id, cost: reward.xp_cost },
+          enabled
+        });
+        const kb = await buildRewardCenterKeyboard(ctx);
+        await renderScreen(ctx, {
+          titleKey: '🎁 Reward Center',
+          bodyLines: [`Purchased "${reward.title}" for ${reward.xp_cost} XP.`, `New balance: ${balance} XP.`],
+          inlineKeyboard: kb
+        });
+        break;
+      }
+      case 'rewards.edit': {
+        const kb = await buildRewardCenterKeyboard(ctx);
+        await renderScreen(ctx, {
+          titleKey: '🎁 Reward Center',
+          bodyLines: ['Store editing will be implemented in the next stage.'],
+          inlineKeyboard: kb
+        });
+        break;
+      }
       case 'error.send_report': {
-        const errorCode = (payload as { errorCode?: string }).errorCode;
+        const errorCode = (payload as { errorCode?: string; data?: { errorCode?: string } }).errorCode ?? (payload as { data?: { errorCode?: string } }).data?.errorCode;
         if (!errorCode) {
           await ctx.answerCallbackQuery({ text: 'Report not found or expired.', show_alert: true });
           return;
@@ -743,81 +788,6 @@ bot.callbackQuery('home:back', async (ctx) => {
 });
 
 // Reports
-bot.callbackQuery('rep:xp', async (ctx) => {
-  await safeAnswerCallback(ctx);
-  await renderXpSummary(ctx);
-});
-
-bot.callbackQuery(/rep:(sleep|study|tasks|chart)/, async (ctx) => {
-  await safeAnswerCallback(ctx);
-  const target = ctx.match?.[1] ?? '';
-  await renderScreen(ctx, {
-    titleKey: 'Reports',
-    bodyLines: [`${target} report: Coming soon.`],
-    inlineKeyboard: reportsMenuKeyboard
-  });
-});
-
-// Reward center
-bot.callbackQuery('rw:menu', async (ctx) => {
-  await safeAnswerCallback(ctx);
-  await renderRewardCenter(ctx);
-});
-
-bot.callbackQuery('rw:buy', async (ctx) => {
-  await safeAnswerCallback(ctx);
-  const { user } = await ensureUserAndSettings(ctx);
-  const rewards = await listRewards(user.id);
-  if (!rewards.length) {
-    await renderScreen(ctx, {
-      titleKey: '🎁 Reward Center',
-      bodyLines: ['No rewards available yet.'],
-      inlineKeyboard: rewardCenterKeyboard
-    });
-    return;
-  }
-  const kb = new InlineKeyboard();
-  rewards.forEach((r) => kb.text(`${r.title} (${r.xp_cost} XP)`, `rw:cfm:${r.id}`).row());
-  kb.text('⬅️ Back', 'rw:menu');
-  await renderScreen(ctx, { titleKey: '🎁 Reward Center', bodyLines: ['Choose a reward to buy:'], inlineKeyboard: kb });
-});
-
-bot.callbackQuery(/^rw:cfm:([a-f0-9-]+)$/, async (ctx) => {
-  await safeAnswerCallback(ctx);
-  if (!ctx.from) return;
-  const rewardId = ctx.match?.[1];
-  const { user } = await ensureUserAndSettings(ctx);
-  const enabled = telemetryEnabledForUser(user.settings_json as Record<string, unknown>);
-  const reward = rewardId ? await getRewardById(rewardId) : null;
-  if (!reward) {
-    await renderScreen(ctx, { titleKey: '🎁 Reward Center', bodyLines: ['Reward not found.'], inlineKeyboard: rewardCenterKeyboard });
-    return;
-  }
-  await purchaseReward({ userId: user.id, reward });
-  const balance = await getXpBalance(user.id);
-  await logForUser({
-    userId: user.id,
-    ctx,
-    eventName: 'db_write',
-    payload: { action: 'purchase_reward', reward_id: reward.id, cost: reward.xp_cost },
-    enabled
-  });
-  await renderScreen(ctx, {
-    titleKey: '🎁 Reward Center',
-    bodyLines: [`Purchased "${reward.title}" for ${reward.xp_cost} XP.`, `New balance: ${balance} XP.`],
-    inlineKeyboard: rewardCenterKeyboard
-  });
-});
-
-bot.callbackQuery('rw:edit', async (ctx) => {
-  await safeAnswerCallback(ctx);
-  await renderScreen(ctx, {
-    titleKey: '🎁 Reward Center',
-    bodyLines: ['Store editing will be implemented in the next stage.'],
-    inlineKeyboard: rewardCenterKeyboard
-  });
-});
-
 // Settings
 bot.callbackQuery('set:form', async (ctx) => {
   await safeAnswerCallback(ctx);
@@ -877,10 +847,11 @@ bot.callbackQuery(/^dr:item:([a-f0-9-]+)$/, async (ctx) => {
     await promptForItem(ctx, reportDay.id, item);
   } catch (error) {
     console.error({ scope: 'daily_report', event: 'item_callback_error', error });
+    const kb = await buildDailyReportKeyboard(ctx, null);
     await renderScreen(ctx, {
       titleKey: 'Daily Report',
       bodyLines: ['Unable to open that item right now.'],
-      inlineKeyboard: dailyReportKeyboard(null)
+      inlineKeyboard: kb
     });
   }
 });
@@ -896,7 +867,8 @@ bot.callbackQuery(/^dr:skip:([a-f0-9-]+):([a-f0-9-]+)$/, async (ctx) => {
   }
   const item = items.find((i) => i.id === itemId);
   if (!item) {
-    await renderScreen(ctx, { titleKey: 'Daily Report', bodyLines: ['Item not found.'], inlineKeyboard: dailyReportKeyboard(reportDay.id) });
+    const kb = await buildDailyReportKeyboard(ctx, reportDay.id);
+    await renderScreen(ctx, { titleKey: 'Daily Report', bodyLines: ['Item not found.'], inlineKeyboard: kb });
     return;
   }
   await saveValue({ reportDayId, item, valueJson: { skipped: true }, userId: reportDay.user_id });
