@@ -10,6 +10,7 @@ import { ensureDefaultItems, ensureDefaultTemplate, upsertItem } from './service
 import { getOrCreateReportDay, listCompletionStatus, saveValue } from './services/dailyReport';
 import { getOrCreateUserSettings, setUserOnboarded } from './services/userSettings';
 import { consumeCallbackToken } from './services/callbackTokens';
+import { getSupabaseClient } from './db';
 
 export const bot = new Bot(config.telegram.botToken);
 
@@ -101,7 +102,68 @@ const ensureUserAndSettings = async (ctx: Context) => {
   return { user, settings };
 };
 
-const buildHomeText = (isNew: boolean, timezone?: string | null): string => {
+type RenderScreenParams = {
+  titleKey: string;
+  bodyLines: string[];
+  inlineKeyboard?: InlineKeyboard;
+};
+
+const renderScreen = async (ctx: Context, params: RenderScreenParams): Promise<void> => {
+  const { user } = await ensureUserAndSettings(ctx);
+  const chatId = ctx.chat?.id ?? (user.home_chat_id ? Number(user.home_chat_id) : undefined) ?? ctx.from?.id;
+  if (!chatId) throw new Error('Chat id missing for renderScreen');
+
+  const text = [params.titleKey, '', ...params.bodyLines].join('\n');
+  const inlineMarkup = params.inlineKeyboard ? { reply_markup: params.inlineKeyboard } : {};
+  const canEdit = Boolean(user.home_chat_id && user.home_message_id);
+
+  if (canEdit) {
+    try {
+      await ctx.api.editMessageText(Number(user.home_chat_id), Number(user.home_message_id), text, inlineMarkup);
+      if (params.inlineKeyboard) {
+        await ctx.api.editMessageReplyMarkup(Number(user.home_chat_id), Number(user.home_message_id), {
+          reply_markup: params.inlineKeyboard
+        });
+      }
+      return;
+    } catch (error) {
+      console.warn({
+        scope: 'render_screen',
+        event: 'edit_failed',
+        userId: user.id,
+        homeChatId: user.home_chat_id,
+        homeMessageId: user.home_message_id,
+        error
+      });
+    }
+  }
+
+  const message = await ctx.api.sendMessage(chatId, text, {
+    reply_markup: params.inlineKeyboard ?? mainMenuKeyboard
+  });
+
+  const client = getSupabaseClient();
+  const { error } = await client
+    .from('users')
+    .update({
+      home_chat_id: String(message.chat.id),
+      home_message_id: String(message.message_id),
+      updated_at: new Date().toISOString()
+    })
+    .eq('id', user.id);
+
+  if (error) {
+    console.error({
+      scope: 'render_screen',
+      event: 'persist_home_message_failed',
+      userId: user.id,
+      messageId: message.message_id,
+      error
+    });
+  }
+};
+
+const buildHomeLines = (isNew: boolean, timezone?: string | null): string[] => {
   const local = formatLocalTime(timezone ?? config.defaultTimezone);
   const lines = [chooseGreeting(), `⏱ Current time: ${local.date} | ${local.time} (${local.timezone})`];
   if (isNew) {
@@ -117,7 +179,7 @@ const buildHomeText = (isNew: boolean, timezone?: string | null): string => {
   } else {
     lines.push('', 'Welcome back! Use the menu below to continue.');
   }
-  return lines.join('\n');
+  return lines;
 };
 
 export const sendHome = async (ctx: Context): Promise<void> => {
@@ -131,11 +193,11 @@ export const sendHome = async (ctx: Context): Promise<void> => {
         // ignore onboarding update errors to keep UX running
       }
     }
-    const text = buildHomeText(isNew, user.timezone);
-    await ctx.reply(text, { reply_markup: mainMenuKeyboard });
+    const bodyLines = buildHomeLines(isNew, user.timezone);
+    await renderScreen(ctx, { titleKey: 'Home', bodyLines });
   } catch (error) {
     console.error({ scope: 'home', event: 'render_error', error });
-    await ctx.reply('Unable to load home right now.');
+    await renderScreen(ctx, { titleKey: 'Home', bodyLines: ['Unable to load home right now.'], inlineKeyboard: new InlineKeyboard().text('Reload', 'home:back') });
   }
 };
 
@@ -144,24 +206,23 @@ const renderRewardCenter = async (ctx: Context): Promise<void> => {
     const { user } = await ensureUserAndSettings(ctx);
     await seedDefaultRewardsIfEmpty(user.id);
     const balance = await getXpBalance(user.id);
-    const text = ['🎁 Reward Center', `XP Balance: ${balance}`, '', 'Choose an option:'].join('\n');
-    await ctx.reply(text, { reply_markup: rewardCenterKeyboard });
+    const bodyLines = [`XP Balance: ${balance}`, '', 'Choose an option:'];
+    await renderScreen(ctx, { titleKey: '🎁 Reward Center', bodyLines, inlineKeyboard: rewardCenterKeyboard });
   } catch (error) {
     console.error({ scope: 'rewards', event: 'render_error', error });
-    await ctx.reply('Reward Center is temporarily unavailable. Please try again later.');
+    await renderScreen(ctx, { titleKey: '🎁 Reward Center', bodyLines: ['Reward Center is temporarily unavailable. Please try again later.'], inlineKeyboard: rewardCenterKeyboard });
   }
 };
 
 const renderReportsMenu = async (ctx: Context): Promise<void> => {
-  const text = 'Reports — choose a category:';
-  await ctx.reply(text, { reply_markup: reportsMenuKeyboard });
+  await renderScreen(ctx, { titleKey: 'Reports', bodyLines: ['Choose a category:'], inlineKeyboard: reportsMenuKeyboard });
 };
 
 const renderXpSummary = async (ctx: Context): Promise<void> => {
   const { user } = await ensureUserAndSettings(ctx);
   const summary = await getXpSummary(user.id);
-  const lines = ['XP Summary', `Earned: ${summary.earned}`, `Spent: ${summary.spent}`, `Net: ${summary.net}`];
-  await ctx.reply(lines.join('\n'), { reply_markup: reportsMenuKeyboard });
+  const lines = [`Earned: ${summary.earned}`, `Spent: ${summary.spent}`, `Net: ${summary.net}`];
+  await renderScreen(ctx, { titleKey: 'XP Summary', bodyLines: lines, inlineKeyboard: reportsMenuKeyboard });
 };
 
 const ensureReportContext = async (ctx: Context): Promise<{ userId: string; reportDay: ReportDayRow; items: ReportItemRow[] }> => {
@@ -184,7 +245,7 @@ const renderDailyStatus = async (ctx: Context): Promise<void> => {
     kb.text(`${s.filled ? '✅' : '⬜️'} ${s.item.label}`, `dr:item:${s.item.id}`).row();
   });
   kb.text('⬅️ Back to Home', 'home:back');
-  await ctx.reply(lines.join('\n'), { reply_markup: kb });
+  await renderScreen(ctx, { titleKey: 'Daily Report', bodyLines: lines, inlineKeyboard: kb });
 };
 
 const renderNextItem = async (ctx: Context): Promise<void> => {
@@ -192,7 +253,7 @@ const renderNextItem = async (ctx: Context): Promise<void> => {
   const statuses = await listCompletionStatus(reportDay.id, items);
   const next = statuses.find((s) => !s.filled);
   if (!next) {
-    await ctx.reply('All items are completed for today!', { reply_markup: dailyReportKeyboard(reportDay.id) });
+    await renderScreen(ctx, { titleKey: 'Daily Report', bodyLines: ['All items are completed for today!'], inlineKeyboard: dailyReportKeyboard(reportDay.id) });
     return;
   }
   await promptForItem(ctx, reportDay.id, next.item);
@@ -205,7 +266,7 @@ const promptForItem = async (ctx: Context, reportDayId: string, item: ReportItem
     .text('⏭ Skip', `dr:skip:${reportDayId}:${item.id}`)
     .row()
     .text('⬅️ Cancel', 'dr:menu');
-  await ctx.reply(`Set value for: ${item.label}\nSend the value as text.`, { reply_markup: kb });
+  await renderScreen(ctx, { titleKey: 'Daily Report', bodyLines: [`Set value for: ${item.label}`, 'Send the value as text.'], inlineKeyboard: kb });
 };
 
 const handleSaveValue = async (ctx: Context, text: string): Promise<void> => {
@@ -216,13 +277,13 @@ const handleSaveValue = async (ctx: Context, text: string): Promise<void> => {
   const { reportDay, items } = await ensureReportContext(ctx);
   if (reportDay.id !== reportDayId) {
     userStates.delete(String(ctx.from.id));
-    await ctx.reply('Session expired for that item. Please pick it again.');
+    await renderScreen(ctx, { titleKey: 'Daily Report', bodyLines: ['Session expired for that item. Please pick it again.'], inlineKeyboard: dailyReportKeyboard(reportDay.id) });
     return;
   }
   const item = items.find((i) => i.id === itemId);
   if (!item) {
     userStates.delete(String(ctx.from.id));
-    await ctx.reply('Item not found.');
+    await renderScreen(ctx, { titleKey: 'Daily Report', bodyLines: ['Item not found.'], inlineKeyboard: dailyReportKeyboard(reportDay.id) });
     return;
   }
 
@@ -234,7 +295,7 @@ const handleSaveValue = async (ctx: Context, text: string): Promise<void> => {
 
   await saveValue({ reportDayId, item, valueJson, userId: reportDay.user_id });
   userStates.delete(String(ctx.from.id));
-  await ctx.reply('Saved.', { reply_markup: dailyReportKeyboard(reportDayId) });
+  await renderScreen(ctx, { titleKey: 'Daily Report', bodyLines: ['Saved.'], inlineKeyboard: dailyReportKeyboard(reportDayId) });
   await renderDailyStatus(ctx);
 };
 
@@ -261,7 +322,35 @@ bot.hears('🧾 Daily Report', async (ctx: Context) => {
 });
 
 bot.hears('⚙️ Settings', async (ctx: Context) => {
-  await ctx.reply('Settings — choose an option:', { reply_markup: settingsMenuKeyboard });
+  await renderScreen(ctx, { titleKey: 'Settings', bodyLines: ['Choose an option:'], inlineKeyboard: settingsMenuKeyboard });
+});
+
+// Generic token-based callbacks
+bot.callbackQuery(/^[A-Za-z0-9_-]{8,12}$/, async (ctx) => {
+  await safeAnswerCallback(ctx);
+  try {
+    const token = ctx.callbackQuery.data;
+    const payload = await consumeCallbackToken(token);
+    const action = typeof payload === 'object' && payload ? (payload as { action?: string }).action : null;
+
+    if (!action) {
+      await ctx.answerCallbackQuery({ text: 'Expired or invalid action. Please refresh.', show_alert: true });
+      return;
+    }
+
+    switch (action) {
+      case 'noop':
+        break;
+      case 'home.back':
+        await sendHome(ctx);
+        break;
+      default:
+        await ctx.answerCallbackQuery({ text: 'Expired or invalid action. Please refresh.', show_alert: true });
+    }
+  } catch (error) {
+    console.error({ scope: 'callback_tokens', event: 'consume_failure', error });
+    await ctx.answerCallbackQuery({ text: 'Unexpected error. Please try again.', show_alert: true });
+  }
 });
 
 // Generic token-based callbacks
@@ -307,7 +396,11 @@ bot.callbackQuery('rep:xp', async (ctx) => {
 bot.callbackQuery(/rep:(sleep|study|tasks|chart)/, async (ctx) => {
   await safeAnswerCallback(ctx);
   const target = ctx.match?.[1] ?? '';
-  await ctx.reply(`${target} report: Coming soon.`, { reply_markup: reportsMenuKeyboard });
+  await renderScreen(ctx, {
+    titleKey: 'Reports',
+    bodyLines: [`${target} report: Coming soon.`],
+    inlineKeyboard: reportsMenuKeyboard
+  });
 });
 
 // Reward center
@@ -321,13 +414,17 @@ bot.callbackQuery('rw:buy', async (ctx) => {
   const { user } = await ensureUserAndSettings(ctx);
   const rewards = await listRewards(user.id);
   if (!rewards.length) {
-    await ctx.reply('No rewards available yet.', { reply_markup: rewardCenterKeyboard });
+    await renderScreen(ctx, {
+      titleKey: '🎁 Reward Center',
+      bodyLines: ['No rewards available yet.'],
+      inlineKeyboard: rewardCenterKeyboard
+    });
     return;
   }
   const kb = new InlineKeyboard();
   rewards.forEach((r) => kb.text(`${r.title} (${r.xp_cost} XP)`, `rw:cfm:${r.id}`).row());
   kb.text('⬅️ Back', 'rw:menu');
-  await ctx.reply('Choose a reward to buy:', { reply_markup: kb });
+  await renderScreen(ctx, { titleKey: '🎁 Reward Center', bodyLines: ['Choose a reward to buy:'], inlineKeyboard: kb });
 });
 
 bot.callbackQuery(/^rw:cfm:([a-f0-9-]+)$/, async (ctx) => {
@@ -337,17 +434,25 @@ bot.callbackQuery(/^rw:cfm:([a-f0-9-]+)$/, async (ctx) => {
   const { user } = await ensureUserAndSettings(ctx);
   const reward = rewardId ? await getRewardById(rewardId) : null;
   if (!reward) {
-    await ctx.reply('Reward not found.', { reply_markup: rewardCenterKeyboard });
+    await renderScreen(ctx, { titleKey: '🎁 Reward Center', bodyLines: ['Reward not found.'], inlineKeyboard: rewardCenterKeyboard });
     return;
   }
   await purchaseReward({ userId: user.id, reward });
   const balance = await getXpBalance(user.id);
-  await ctx.reply(`Purchased "${reward.title}" for ${reward.xp_cost} XP.\nNew balance: ${balance} XP.`, { reply_markup: rewardCenterKeyboard });
+  await renderScreen(ctx, {
+    titleKey: '🎁 Reward Center',
+    bodyLines: [`Purchased "${reward.title}" for ${reward.xp_cost} XP.`, `New balance: ${balance} XP.`],
+    inlineKeyboard: rewardCenterKeyboard
+  });
 });
 
 bot.callbackQuery('rw:edit', async (ctx) => {
   await safeAnswerCallback(ctx);
-  await ctx.reply('Store editing will be implemented in the next stage.', { reply_markup: rewardCenterKeyboard });
+  await renderScreen(ctx, {
+    titleKey: '🎁 Reward Center',
+    bodyLines: ['Store editing will be implemented in the next stage.'],
+    inlineKeyboard: rewardCenterKeyboard
+  });
 });
 
 // Settings
@@ -361,24 +466,24 @@ bot.callbackQuery('set:form', async (ctx) => {
     .text('Duration Mode', 'set:study:duration')
     .row()
     .text('⬅️ Back', 'home:back');
-  await ctx.reply('Choose your study logging mode:', { reply_markup: kb });
+  await renderScreen(ctx, { titleKey: 'Settings', bodyLines: ['Choose your study logging mode:'], inlineKeyboard: kb });
 });
 
 bot.callbackQuery(/^set:study:(.+)$/, async (ctx) => {
   await safeAnswerCallback(ctx);
   const mode = ctx.match?.[1];
-  await ctx.reply(`Study mode set to ${mode}.`, { reply_markup: settingsMenuKeyboard });
+  await renderScreen(ctx, { titleKey: 'Settings', bodyLines: [`Study mode set to ${mode}.`], inlineKeyboard: settingsMenuKeyboard });
 });
 
 bot.callbackQuery('set:routines', async (ctx) => {
   await safeAnswerCallback(ctx);
   userStates.set(String(ctx.from?.id ?? ''), { settingsRoutine: { step: 'label' } });
-  await ctx.reply('Send routine name to add (yes/no item).');
+  await renderScreen(ctx, { titleKey: 'Settings', bodyLines: ['Send routine name to add (yes/no item).'], inlineKeyboard: settingsMenuKeyboard });
 });
 
 bot.callbackQuery('set:xp', async (ctx) => {
   await safeAnswerCallback(ctx);
-  await ctx.reply('XP & Streak rules will be configurable soon.', { reply_markup: settingsMenuKeyboard });
+  await renderScreen(ctx, { titleKey: 'Settings', bodyLines: ['XP & Streak rules will be configurable soon.'], inlineKeyboard: settingsMenuKeyboard });
 });
 
 // Daily report
@@ -409,7 +514,11 @@ bot.callbackQuery(/^dr:item:([a-f0-9-]+)$/, async (ctx) => {
     await promptForItem(ctx, reportDay.id, item);
   } catch (error) {
     console.error({ scope: 'daily_report', event: 'item_callback_error', error });
-    await ctx.reply('Unable to open that item right now.');
+    await renderScreen(ctx, {
+      titleKey: 'Daily Report',
+      bodyLines: ['Unable to open that item right now.'],
+      inlineKeyboard: dailyReportKeyboard(null)
+    });
   }
 });
 
@@ -419,17 +528,15 @@ bot.callbackQuery(/^dr:skip:([a-f0-9-]+):([a-f0-9-]+)$/, async (ctx) => {
   const itemId = ctx.match?.[2];
   const { reportDay, items } = await ensureReportContext(ctx);
   if (reportDay.id !== reportDayId) {
-    await ctx.reply('Report session is outdated. Opening current day instead.');
     await renderDailyStatus(ctx);
     return;
   }
   const item = items.find((i) => i.id === itemId);
   if (!item) {
-    await ctx.reply('Item not found.');
+    await renderScreen(ctx, { titleKey: 'Daily Report', bodyLines: ['Item not found.'], inlineKeyboard: dailyReportKeyboard(reportDay.id) });
     return;
   }
   await saveValue({ reportDayId, item, valueJson: { skipped: true }, userId: reportDay.user_id });
-  await ctx.reply('Skipped.', { reply_markup: dailyReportKeyboard(reportDayId) });
   await renderDailyStatus(ctx);
 });
 
@@ -451,14 +558,14 @@ bot.on('message:text', async (ctx: Context) => {
 
   if (state?.settingsRoutine?.step === 'label') {
     userStates.set(String(ctx.from.id), { settingsRoutine: { step: 'xp', label: text } });
-    await ctx.reply('Enter XP value for this routine (integer).');
+    await renderScreen(ctx, { titleKey: 'Settings', bodyLines: ['Enter XP value for this routine (integer).'], inlineKeyboard: settingsMenuKeyboard });
     return;
   }
 
   if (state?.settingsRoutine?.step === 'xp') {
     const xp = Number(text);
     if (Number.isNaN(xp)) {
-      await ctx.reply('Please enter a number for XP value.');
+      await renderScreen(ctx, { titleKey: 'Settings', bodyLines: ['Please enter a number for XP value.'], inlineKeyboard: settingsMenuKeyboard });
       return;
     }
     const label = state.settingsRoutine.label ?? 'Routine';
@@ -477,7 +584,7 @@ bot.on('message:text', async (ctx: Context) => {
       sortOrder: Date.now() % 100000
     });
     userStates.delete(String(ctx.from.id));
-    await ctx.reply('Routine added.', { reply_markup: settingsMenuKeyboard });
+    await renderScreen(ctx, { titleKey: 'Settings', bodyLines: ['Routine added.'], inlineKeyboard: settingsMenuKeyboard });
     return;
   }
 });
