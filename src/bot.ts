@@ -9,6 +9,7 @@ import type { ReportItemRow, ReportDayRow } from './types/supabase';
 import { ensureDefaultItems, ensureDefaultTemplate, upsertItem } from './services/reportTemplates';
 import { getOrCreateReportDay, listCompletionStatus, saveValue } from './services/dailyReport';
 import { getOrCreateUserSettings, setUserOnboarded } from './services/userSettings';
+import { consumeCallbackToken } from './services/callbackTokens';
 
 export const bot = new Bot(config.telegram.botToken);
 
@@ -261,6 +262,34 @@ bot.hears('🧾 Daily Report', async (ctx: Context) => {
 
 bot.hears('⚙️ Settings', async (ctx: Context) => {
   await ctx.reply('Settings — choose an option:', { reply_markup: settingsMenuKeyboard });
+});
+
+// Generic token-based callbacks
+bot.callbackQuery(/^[A-Za-z0-9_-]{8,12}$/, async (ctx) => {
+  await safeAnswerCallback(ctx);
+  try {
+    const token = ctx.callbackQuery.data;
+    const payload = await consumeCallbackToken(token);
+    const action = typeof payload === 'object' && payload ? (payload as { action?: string }).action : null;
+
+    if (!action) {
+      await ctx.answerCallbackQuery({ text: 'Expired or invalid action. Please refresh.', show_alert: true });
+      return;
+    }
+
+    switch (action) {
+      case 'noop':
+        break;
+      case 'home.back':
+        await sendHome(ctx);
+        break;
+      default:
+        await ctx.answerCallbackQuery({ text: 'Expired or invalid action. Please refresh.', show_alert: true });
+    }
+  } catch (error) {
+    console.error({ scope: 'callback_tokens', event: 'consume_failure', error });
+    await ctx.answerCallbackQuery({ text: 'Unexpected error. Please try again.', show_alert: true });
+  }
 });
 
 // Home/back
