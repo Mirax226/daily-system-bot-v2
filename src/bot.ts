@@ -301,8 +301,56 @@ const renderDashboard = async (ctx: Context): Promise<void> => {
         // ignore onboarding update errors to keep UX running
       }
     }
-    const bodyLines = buildDashboardLines(isNew, user.timezone);
-    await renderScreen(ctx, { titleKey: 'Dashboard', bodyLines });
+    const { reportDay, items } = await ensureReportContext(ctx);
+    const statuses = await listCompletionStatus(reportDay.id, items);
+    const completed = statuses.filter((s) => s.filled).length;
+    const total = statuses.length;
+    const xpBalance = await getXpBalance(user.id);
+    const streak = (user.settings_json as { streak?: number } | undefined)?.streak ?? 0;
+
+    const bodyLines = [
+      ...buildDashboardLines(isNew, user.timezone),
+      '',
+      `XP Balance: ${xpBalance}`,
+      `Today: ${completed}/${total} items`,
+      `Current streak: ${streak} days`
+    ];
+
+    const makeToken = (action: string) => createCallbackToken({ payload: { action } });
+    const [
+      dailyReportToken,
+      reportcarToken,
+      tasksToken,
+      remindersToken,
+      rewardsToken,
+      reportsToken,
+      settingsToken
+    ] = await Promise.all([
+      makeToken('nav.daily_report'),
+      makeToken('nav.reportcar'),
+      makeToken('nav.tasks'),
+      makeToken('nav.reminders'),
+      makeToken('nav.rewards'),
+      makeToken('nav.reports'),
+      makeToken('nav.settings')
+    ]);
+
+    const kb = new InlineKeyboard()
+      .text('🧾 Daily Report', dailyReportToken)
+      .row()
+      .text('📘 Reportcar', reportcarToken)
+      .row()
+      .text('✅ Tasks / Routines', tasksToken)
+      .row()
+      .text('⏰ Reminders', remindersToken)
+      .row()
+      .text('🎁 Reward Center', rewardsToken)
+      .row()
+      .text('📊 Reports', reportsToken)
+      .row()
+      .text('⚙️ Settings', settingsToken);
+
+    await renderScreen(ctx, { titleKey: 'Dashboard', bodyLines, inlineKeyboard: kb });
   } catch (error) {
     console.error({ scope: 'home', event: 'render_error', error });
     await renderScreen(ctx, {
@@ -407,6 +455,48 @@ const renderNextItem = async (ctx: Context): Promise<void> => {
   await promptForItem(ctx, reportDay.id, next.item);
 };
 
+const renderDailyReportRoot = async (ctx: Context): Promise<void> => {
+  const { reportDay, items } = await ensureReportContext(ctx);
+  const statuses = await listCompletionStatus(reportDay.id, items);
+  const completed = statuses.filter((s) => s.filled).length;
+  const total = statuses.length;
+  const templateName = (await ensureDefaultTemplate(reportDay.user_id)).title ?? 'Default Template';
+  const bodyLines = [
+    `Date: ${reportDay.local_date}`,
+    `Template: ${templateName}`,
+    `Completion: ${completed}/${total}`,
+    ''
+  ];
+
+  const makeToken = (action: string) => createCallbackToken({ payload: { action } });
+  const [statusToken, nextToken, pickToken, templatesToken, historyToken, lockToken, backToken] = await Promise.all([
+    makeToken('dr.status'),
+    makeToken('dr.next'),
+    makeToken('dr.pick_item'),
+    makeToken('dr.templates'),
+    makeToken('dr.history'),
+    makeToken('dr.lock'),
+    makeToken('dr.back')
+  ]);
+
+  const kb = new InlineKeyboard()
+    .text('📋 Today Status', statusToken)
+    .row()
+    .text('✏️ Fill Next', nextToken)
+    .row()
+    .text('🧩 Fill Specific Item', pickToken)
+    .row()
+    .text('🗂 Templates', templatesToken)
+    .row()
+    .text('🕘 History', historyToken)
+    .row()
+    .text('✅ Submit / Lock', lockToken)
+    .row()
+    .text('⬅️ Back', backToken);
+
+  await renderScreen(ctx, { titleKey: 'Daily Report', bodyLines, inlineKeyboard: kb });
+};
+
 const promptForItem = async (ctx: Context, reportDayId: string, item: ReportItemRow) => {
   const telegramId = String(ctx.from?.id ?? '');
   userStates.set(telegramId, { awaitingValue: { reportDayId, itemId: item.id } });
@@ -467,7 +557,7 @@ bot.command('home', async (ctx: Context) => {
 
 bot.hears('🏠 Dashboard', renderDashboard);
 bot.hears('🧾 Daily Report', async (ctx: Context) => {
-  await renderDailyStatus(ctx);
+  await renderDailyReportRoot(ctx);
 });
 bot.hears('📘 Reportcar', renderReportcar);
 bot.hears('✅ Tasks / Routines', renderTasks);
@@ -522,6 +612,48 @@ bot.callbackQuery(/^[A-Za-z0-9_-]{8,12}$/, async (ctx) => {
       case 'noop':
         break;
       case 'home.back':
+        await renderDashboard(ctx);
+        break;
+      case 'nav.daily_report':
+        await renderDailyReportRoot(ctx);
+        break;
+      case 'nav.reportcar':
+        await renderReportcar(ctx);
+        break;
+      case 'nav.tasks':
+        await renderTasks(ctx);
+        break;
+      case 'nav.reminders':
+        await renderReminders(ctx);
+        break;
+      case 'nav.rewards':
+        await renderRewardCenter(ctx);
+        break;
+      case 'nav.reports':
+        await renderReportsMenu(ctx);
+        break;
+      case 'nav.settings':
+        await renderScreen(ctx, { titleKey: 'Settings', bodyLines: ['Choose an option:'], inlineKeyboard: settingsMenuKeyboard });
+        break;
+      case 'dr.status':
+        await renderDailyStatus(ctx);
+        break;
+      case 'dr.next':
+        await renderNextItem(ctx);
+        break;
+      case 'dr.pick_item':
+        await renderDailyStatus(ctx);
+        break;
+      case 'dr.templates':
+        await renderScreen(ctx, { titleKey: 'Daily Report', bodyLines: ['Templates coming soon.'], inlineKeyboard: new InlineKeyboard().text('⬅️ Back', await createCallbackToken({ payload: { action: 'dr.back' } })) });
+        break;
+      case 'dr.history':
+        await renderScreen(ctx, { titleKey: 'Daily Report', bodyLines: ['History coming soon.'], inlineKeyboard: new InlineKeyboard().text('⬅️ Back', await createCallbackToken({ payload: { action: 'dr.back' } })) });
+        break;
+      case 'dr.lock':
+        await renderScreen(ctx, { titleKey: 'Daily Report', bodyLines: ['Submit/Lock coming soon.'], inlineKeyboard: new InlineKeyboard().text('⬅️ Back', await createCallbackToken({ payload: { action: 'dr.back' } })) });
+        break;
+      case 'dr.back':
         await renderDashboard(ctx);
         break;
       case 'error.send_report': {
