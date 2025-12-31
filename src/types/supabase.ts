@@ -334,6 +334,40 @@ export type Database = {
         };
         Relationships: [];
       };
+      callback_tokens: {
+        Row: {
+          token: string;
+          user_id: string | null;
+          payload_json: Record<string, unknown>;
+          created_at: string;
+          expires_at: string;
+          used_at: string | null;
+        };
+        Insert: {
+          token: string;
+          user_id?: string | null;
+          payload_json: Record<string, unknown>;
+          created_at?: string;
+          expires_at: string;
+          used_at?: string | null;
+        };
+        Update: {
+          token?: string;
+          user_id?: string | null;
+          payload_json?: Record<string, unknown>;
+          created_at?: string;
+          expires_at?: string;
+          used_at?: string | null;
+        };
+        Relationships: [
+          {
+            foreignKeyName: 'callback_tokens_user_id_fkey';
+            columns: ['user_id'];
+            referencedRelation: 'users';
+            referencedColumns: ['id'];
+          }
+        ];
+      };
       user_settings: {
         Row: {
           id: string;
@@ -513,6 +547,7 @@ export type RewardRow = Database['public']['Tables']['rewards']['Row'];
 export type RewardPurchaseRow = Database['public']['Tables']['reward_purchases']['Row'];
 export type XpLedgerRow = Database['public']['Tables']['xp_ledger']['Row'];
 export type UserSettingsRow = Database['public']['Tables']['user_settings']['Row'];
+export type CallbackTokenRow = Database['public']['Tables']['callback_tokens']['Row'];
 export type ReportTemplateRow = Database['public']['Tables']['report_templates']['Row'];
 export type ReportItemRow = Database['public']['Tables']['report_items']['Row'];
 export type ReportDayRow = Database['public']['Tables']['report_days']['Row'];
