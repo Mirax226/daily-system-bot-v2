@@ -1,0 +1,554 @@
+export type Database = {
+  public: {
+    Tables: {
+      users: {
+        Row: {
+          id: string;
+          telegram_id: string;
+          username: string | null;
+          timezone: string;
+          home_chat_id: string | null;
+          home_message_id: string | null;
+          settings_json: Record<string, unknown>;
+          created_at: string;
+          updated_at: string;
+        };
+        Insert: {
+          id?: string;
+          telegram_id: string;
+          username?: string | null;
+          timezone?: string;
+          home_chat_id?: string | null;
+          home_message_id?: string | null;
+          settings_json?: Record<string, unknown>;
+          created_at?: string;
+          updated_at?: string;
+        };
+        Update: {
+          id?: string;
+          telegram_id?: string;
+          username?: string | null;
+          timezone?: string;
+          home_chat_id?: string | null;
+          home_message_id?: string | null;
+          settings_json?: Record<string, unknown>;
+          created_at?: string;
+          updated_at?: string;
+        };
+        Relationships: [];
+      };
+      reminders: {
+        Row: {
+          id: string;
+          user_id: string;
+          title: string;
+          detail: string | null;
+          next_run_at_utc: string | null;
+          last_sent_at_utc: string | null;
+          enabled: boolean;
+          created_at: string;
+          updated_at: string;
+        };
+        Insert: {
+          id?: string;
+          user_id: string;
+          title: string;
+          detail?: string | null;
+          next_run_at_utc?: string | null;
+          last_sent_at_utc?: string | null;
+          enabled?: boolean;
+          created_at?: string;
+          updated_at?: string;
+        };
+        Update: {
+          id?: string;
+          user_id?: string;
+          title?: string;
+          detail?: string | null;
+          next_run_at_utc?: string | null;
+          last_sent_at_utc?: string | null;
+          enabled?: boolean;
+          created_at?: string;
+          updated_at?: string;
+        };
+        Relationships: [];
+      };
+      daily_reports: {
+        Row: {
+          id: string;
+          user_id: string;
+          report_date: string;
+          wake_time: string | null;
+          routine_morning: boolean | null;
+          routine_school: boolean | null;
+          routine_taxi: boolean | null;
+          routine_evening: boolean | null;
+          routine_night: boolean | null;
+          review_today_hours: number | null;
+          preview_tomorrow_hours: number | null;
+          homework_done: boolean | null;
+          workout_morning: boolean | null;
+          workout_evening: boolean | null;
+          pomodoro_3_count: number | null;
+          pomodoro_2_count: number | null;
+          pomodoro_1_count: number | null;
+          library_study_hours: number | null;
+          exam_school_questions: number | null;
+          exam_maz_questions: number | null;
+          exam_hesaban_questions: number | null;
+          exam_physics_questions: number | null;
+          exam_chemistry_questions: number | null;
+          exam_geology_questions: number | null;
+          exam_language_questions: number | null;
+          exam_religion_questions: number | null;
+          exam_arabic_questions: number | null;
+          exam_persian_questions: number | null;
+          read_book_minutes: number | null;
+          read_article_minutes: number | null;
+          watch_video_minutes: number | null;
+          course_minutes: number | null;
+          english_conversation_minutes: number | null;
+          skill_learning_minutes: number | null;
+          telegram_bot_minutes: number | null;
+          trading_strategy_minutes: number | null;
+          tidy_study_area: boolean | null;
+          clean_room: boolean | null;
+          plan_tomorrow: boolean | null;
+          family_time_minutes: number | null;
+          sleep_time: string | null;
+          notes: string | null;
+          time_planned_study_minutes: number | null;
+          time_planned_skills_minutes: number | null;
+          time_planned_misc_minutes: number | null;
+          streak_done: boolean | null;
+          streak_days: number | null;
+          xp_s: number | null;
+          xp_study: number | null;
+          xp_misc: number | null;
+          xp_total: number | null;
+          status: string | null;
+          created_at: string;
+          updated_at: string;
+        };
+        Insert: {
+          id?: string;
+          user_id: string;
+          report_date: string;
+          wake_time?: string | null;
+          routine_morning?: boolean | null;
+          routine_school?: boolean | null;
+          routine_taxi?: boolean | null;
+          routine_evening?: boolean | null;
+          routine_night?: boolean | null;
+          review_today_hours?: number | null;
+          preview_tomorrow_hours?: number | null;
+          homework_done?: boolean | null;
+          workout_morning?: boolean | null;
+          workout_evening?: boolean | null;
+          pomodoro_3_count?: number | null;
+          pomodoro_2_count?: number | null;
+          pomodoro_1_count?: number | null;
+          library_study_hours?: number | null;
+          exam_school_questions?: number | null;
+          exam_maz_questions?: number | null;
+          exam_hesaban_questions?: number | null;
+          exam_physics_questions?: number | null;
+          exam_chemistry_questions?: number | null;
+          exam_geology_questions?: number | null;
+          exam_language_questions?: number | null;
+          exam_religion_questions?: number | null;
+          exam_arabic_questions?: number | null;
+          exam_persian_questions?: number | null;
+          read_book_minutes?: number | null;
+          read_article_minutes?: number | null;
+          watch_video_minutes?: number | null;
+          course_minutes?: number | null;
+          english_conversation_minutes?: number | null;
+          skill_learning_minutes?: number | null;
+          telegram_bot_minutes?: number | null;
+          trading_strategy_minutes?: number | null;
+          tidy_study_area?: boolean | null;
+          clean_room?: boolean | null;
+          plan_tomorrow?: boolean | null;
+          family_time_minutes?: number | null;
+          sleep_time?: string | null;
+          notes?: string | null;
+          time_planned_study_minutes?: number | null;
+          time_planned_skills_minutes?: number | null;
+          time_planned_misc_minutes?: number | null;
+          streak_done?: boolean | null;
+          streak_days?: number | null;
+          xp_s?: number | null;
+          xp_study?: number | null;
+          xp_misc?: number | null;
+          xp_total?: number | null;
+          status?: string | null;
+          created_at?: string;
+          updated_at?: string;
+        };
+        Update: {
+          id?: string;
+          user_id?: string;
+          report_date?: string;
+          wake_time?: string | null;
+          routine_morning?: boolean | null;
+          routine_school?: boolean | null;
+          routine_taxi?: boolean | null;
+          routine_evening?: boolean | null;
+          routine_night?: boolean | null;
+          review_today_hours?: number | null;
+          preview_tomorrow_hours?: number | null;
+          homework_done?: boolean | null;
+          workout_morning?: boolean | null;
+          workout_evening?: boolean | null;
+          pomodoro_3_count?: number | null;
+          pomodoro_2_count?: number | null;
+          pomodoro_1_count?: number | null;
+          library_study_hours?: number | null;
+          exam_school_questions?: number | null;
+          exam_maz_questions?: number | null;
+          exam_hesaban_questions?: number | null;
+          exam_physics_questions?: number | null;
+          exam_chemistry_questions?: number | null;
+          exam_geology_questions?: number | null;
+          exam_language_questions?: number | null;
+          exam_religion_questions?: number | null;
+          exam_arabic_questions?: number | null;
+          exam_persian_questions?: number | null;
+          read_book_minutes?: number | null;
+          read_article_minutes?: number | null;
+          watch_video_minutes?: number | null;
+          course_minutes?: number | null;
+          english_conversation_minutes?: number | null;
+          skill_learning_minutes?: number | null;
+          telegram_bot_minutes?: number | null;
+          trading_strategy_minutes?: number | null;
+          tidy_study_area?: boolean | null;
+          clean_room?: boolean | null;
+          plan_tomorrow?: boolean | null;
+          family_time_minutes?: number | null;
+          sleep_time?: string | null;
+          notes?: string | null;
+          time_planned_study_minutes?: number | null;
+          time_planned_skills_minutes?: number | null;
+          time_planned_misc_minutes?: number | null;
+          streak_done?: boolean | null;
+          streak_days?: number | null;
+          xp_s?: number | null;
+          xp_study?: number | null;
+          xp_misc?: number | null;
+          xp_total?: number | null;
+          status?: string | null;
+          created_at?: string;
+          updated_at?: string;
+        };
+        Relationships: [];
+      };
+      rewards: {
+        Row: {
+          id: string;
+          user_id: string | null;
+          title: string;
+          description: string | null;
+          xp_cost: number;
+          is_active: boolean;
+          created_at: string;
+          updated_at: string;
+        };
+        Insert: {
+          id?: string;
+          user_id?: string | null;
+          title: string;
+          description?: string | null;
+          xp_cost: number;
+          is_active?: boolean;
+          created_at?: string;
+          updated_at?: string;
+        };
+        Update: {
+          id?: string;
+          user_id?: string | null;
+          title?: string;
+          description?: string | null;
+          xp_cost?: number;
+          is_active?: boolean;
+          created_at?: string;
+          updated_at?: string;
+        };
+        Relationships: [];
+      };
+      reward_purchases: {
+        Row: {
+          id: string;
+          user_id: string;
+          reward_id: string;
+          title_snapshot: string;
+          cost_xp_snapshot: number;
+          purchased_at_utc: string;
+        };
+        Insert: {
+          id?: string;
+          user_id: string;
+          reward_id: string;
+          title_snapshot: string;
+          cost_xp_snapshot: number;
+          purchased_at_utc?: string;
+        };
+        Update: {
+          id?: string;
+          user_id?: string;
+          reward_id?: string;
+          title_snapshot?: string;
+          cost_xp_snapshot?: number;
+          purchased_at_utc?: string;
+        };
+        Relationships: [];
+      };
+      xp_ledger: {
+        Row: {
+          id: string;
+          user_id: string;
+          delta: number;
+          reason: string;
+          ref_type: string | null;
+          ref_id: string | null;
+          created_at_utc: string;
+        };
+        Insert: {
+          id?: string;
+          user_id: string;
+          delta: number;
+          reason: string;
+          ref_type?: string | null;
+          ref_id?: string | null;
+          created_at_utc?: string;
+        };
+        Update: {
+          id?: string;
+          user_id?: string;
+          delta?: number;
+          reason?: string;
+          ref_type?: string | null;
+          ref_id?: string | null;
+          created_at_utc?: string;
+        };
+        Relationships: [];
+      };
+      callback_tokens: {
+        Row: {
+          token: string;
+          user_id: string | null;
+          payload_json: Record<string, unknown>;
+          created_at: string;
+          expires_at: string;
+          used_at: string | null;
+        };
+        Insert: {
+          token: string;
+          user_id?: string | null;
+          payload_json: Record<string, unknown>;
+          created_at?: string;
+          expires_at: string;
+          used_at?: string | null;
+        };
+        Update: {
+          token?: string;
+          user_id?: string | null;
+          payload_json?: Record<string, unknown>;
+          created_at?: string;
+          expires_at?: string;
+          used_at?: string | null;
+        };
+        Relationships: [
+          {
+            foreignKeyName: 'callback_tokens_user_id_fkey';
+            columns: ['user_id'];
+            referencedRelation: 'users';
+            referencedColumns: ['id'];
+          }
+        ];
+      };
+      user_settings: {
+        Row: {
+          id: string;
+          user_id: string;
+          onboarded: boolean;
+          created_at: string;
+          updated_at: string;
+        };
+        Insert: {
+          id?: string;
+          user_id: string;
+          onboarded?: boolean;
+          created_at?: string;
+          updated_at?: string;
+        };
+        Update: {
+          id?: string;
+          user_id?: string;
+          onboarded?: boolean;
+          created_at?: string;
+          updated_at?: string;
+        };
+        Relationships: [
+          {
+            foreignKeyName: 'user_settings_user_id_fkey';
+            columns: ['user_id'];
+            referencedRelation: 'users';
+            referencedColumns: ['id'];
+          }
+        ];
+      };
+      report_templates: {
+        Row: {
+          id: string;
+          user_id: string;
+          title: string;
+          created_at: string;
+          updated_at: string;
+        };
+        Insert: {
+          id?: string;
+          user_id: string;
+          title: string;
+          created_at?: string;
+          updated_at?: string;
+        };
+        Update: {
+          id?: string;
+          user_id?: string;
+          title?: string;
+          created_at?: string;
+          updated_at?: string;
+        };
+        Relationships: [];
+      };
+      report_items: {
+        Row: {
+          id: string;
+          template_id: string;
+          label: string;
+          item_key: string;
+          item_type: string;
+          category: string | null;
+          xp_mode: string | null;
+          xp_value: number | null;
+          options_json: Record<string, unknown>;
+          sort_order: number;
+          enabled: boolean;
+          created_at: string;
+          updated_at: string;
+        };
+        Insert: {
+          id?: string;
+          template_id: string;
+          label: string;
+          item_key: string;
+          item_type: string;
+          category?: string | null;
+          xp_mode?: string | null;
+          xp_value?: number | null;
+          options_json?: Record<string, unknown>;
+          sort_order?: number;
+          enabled?: boolean;
+          created_at?: string;
+          updated_at?: string;
+        };
+        Update: {
+          id?: string;
+          template_id?: string;
+          label?: string;
+          item_key?: string;
+          item_type?: string;
+          category?: string | null;
+          xp_mode?: string | null;
+          xp_value?: number | null;
+          options_json?: Record<string, unknown>;
+          sort_order?: number;
+          enabled?: boolean;
+          created_at?: string;
+          updated_at?: string;
+        };
+        Relationships: [];
+      };
+      report_days: {
+        Row: {
+          id: string;
+          user_id: string;
+          template_id: string;
+          local_date: string;
+          status: string | null;
+          created_at_utc: string;
+          updated_at_utc: string;
+        };
+        Insert: {
+          id?: string;
+          user_id: string;
+          template_id: string;
+          local_date: string;
+          status?: string | null;
+          created_at_utc?: string;
+          updated_at_utc?: string;
+        };
+        Update: {
+          id?: string;
+          user_id?: string;
+          template_id?: string;
+          local_date?: string;
+          status?: string | null;
+          created_at_utc?: string;
+          updated_at_utc?: string;
+        };
+        Relationships: [];
+      };
+      report_values: {
+        Row: {
+          id: string;
+          report_day_id: string;
+          item_id: string;
+          value_json: Record<string, unknown> | null;
+          xp_delta_applied: boolean;
+          created_at_utc: string;
+          updated_at_utc: string;
+        };
+        Insert: {
+          id?: string;
+          report_day_id: string;
+          item_id: string;
+          value_json?: Record<string, unknown> | null;
+          xp_delta_applied?: boolean;
+          created_at_utc?: string;
+          updated_at_utc?: string;
+        };
+        Update: {
+          id?: string;
+          report_day_id?: string;
+          item_id?: string;
+          value_json?: Record<string, unknown> | null;
+          xp_delta_applied?: boolean;
+          created_at_utc?: string;
+          updated_at_utc?: string;
+        };
+        Relationships: [];
+      };
+    };
+    Views: {};
+    Functions: {};
+    Enums: {};
+    CompositeTypes: {};
+  };
+};
+
+export type ReminderRow = Database['public']['Tables']['reminders']['Row'];
+export type DailyReportRow = Database['public']['Tables']['daily_reports']['Row'];
+export type DailyReportInsert = Database['public']['Tables']['daily_reports']['Insert'];
+export type DailyReportUpdate = Database['public']['Tables']['daily_reports']['Update'];
+export type RewardRow = Database['public']['Tables']['rewards']['Row'];
+export type RewardPurchaseRow = Database['public']['Tables']['reward_purchases']['Row'];
+export type XpLedgerRow = Database['public']['Tables']['xp_ledger']['Row'];
+export type UserSettingsRow = Database['public']['Tables']['user_settings']['Row'];
+export type CallbackTokenRow = Database['public']['Tables']['callback_tokens']['Row'];
+export type ReportTemplateRow = Database['public']['Tables']['report_templates']['Row'];
+export type ReportItemRow = Database['public']['Tables']['report_items']['Row'];
+export type ReportDayRow = Database['public']['Tables']['report_days']['Row'];
+export type ReportValueRow = Database['public']['Tables']['report_values']['Row'];
