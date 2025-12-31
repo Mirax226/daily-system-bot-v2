@@ -6,7 +6,7 @@ export async function makeActionButton(
   ctx: Context,
   params: { label: string; action: string; data?: any; ttlMinutes?: number }
 ): Promise<{ text: string; callback_data: string }> {
-  const userId = (ctx as unknown as { session?: { userId?: string } }).session?.userId ?? ctx.from?.id?.toString();
+  const userId = (ctx as unknown as { session?: { userId?: string } }).session?.userId;
   const payload = { action: params.action, data: params.data ?? null };
   const token = await createCallbackToken({ userId, payload, ttlMinutes: params.ttlMinutes });
   if (token.length > 32) {
