@@ -17,16 +17,31 @@
       "streak": "Current streak: {streak} days"
     },
     "daily_report": {
-      "all_done": "All items are completed for today!",
-      "date": "Date: {date}",
-      "template": "Template: {template}",
-      "completion": "Completion: {completed}/{total}"
+      "title": "Daily Report",
+      "root_header": "Daily Report for {date}",
+      "template_line": "Template: {template}",
+      "completion_line": "Completion: {completed}/{total}",
+      "status_header": "Completion Status:",
+      "filter_all": "All",
+      "filter_not_filled": "Not filled",
+      "filter_filled": "Filled",
+      "all_done": "All items are completed for today.",
+      "session_expired": "Session expired for that item. Please pick it again.",
+      "item_not_found": "Item not found.",
+      "saved": "Saved."
     }
   },
   "buttons": {
     "reload": "Reload",
     "back": "Back",
-    "send_report": "Send report"
+    "send_report": "Send report",
+    "dr_today_status": "📋 Today Status",
+    "dr_fill_next": "✏️ Fill Next",
+    "dr_fill_specific": "🧩 Fill Specific Item",
+    "dr_templates": "🗂 Templates",
+    "dr_history": "🕘 History",
+    "dr_lock": "✅ Submit / Lock",
+    "back": "⬅️ Back"
   },
   "errors": {
     "unexpected": "An unexpected error occurred and could not be reported.",
