@@ -462,7 +462,7 @@ const renderDailyStatusWithFilter = async (ctx: Context, filter: 'all' | 'not_fi
   const statuses = await listCompletionStatus(reportDay.id, items);
 
   let filtered = statuses;
-  if (filter === 'not_filled') filtered = statuses.filter((s) => !s.filled && !s.skipped);
+  if (filter === 'not_filled') filtered = statuses.filter((s) => !s.filled);
   if (filter === 'filled') filtered = statuses.filter((s) => s.filled);
 
   const lines: string[] = [];
