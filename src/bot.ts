@@ -408,7 +408,7 @@ const promptForItem = async (ctx: Context, reportDayId: string, item: ReportItem
 const renderNextItem = async (ctx: Context): Promise<void> => {
   const { reportDay, items } = await ensureReportContext(ctx);
   const statuses = await listCompletionStatus(reportDay.id, items);
-  const next = statuses.find((s) => !s.filled);
+  const next = statuses.find((s) => !s.filled && !s.skipped);
   if (!next) {
     const kb = await buildDailyReportKeyboard(ctx, reportDay.id);
     await renderScreen(ctx, { titleKey: t('screens.daily_report.title'), bodyLines: [t('screens.daily_report.all_done')], inlineKeyboard: kb });
@@ -462,7 +462,7 @@ const renderDailyStatusWithFilter = async (ctx: Context, filter: 'all' | 'not_fi
   const statuses = await listCompletionStatus(reportDay.id, items);
 
   let filtered = statuses;
-  if (filter === 'not_filled') filtered = statuses.filter((s) => !s.filled);
+  if (filter === 'not_filled') filtered = statuses.filter((s) => !s.filled && !s.skipped);
   if (filter === 'filled') filtered = statuses.filter((s) => s.filled);
 
   const lines: string[] = [];
@@ -472,7 +472,8 @@ const renderDailyStatusWithFilter = async (ctx: Context, filter: 'all' | 'not_fi
     lines.push(t('screens.daily_report.all_done'));
   } else {
     filtered.forEach((s, idx) => {
-      lines.push(`${s.filled ? '✅' : '⬜️'} ${idx + 1}) ${s.item.label}`);
+      const icon = s.filled ? '✅' : s.skipped ? '⏭' : '⬜️';
+      lines.push(`${icon} ${idx + 1}) ${s.item.label}`);
     });
   }
 
@@ -486,7 +487,7 @@ const renderDailyStatusWithFilter = async (ctx: Context, filter: 'all' | 'not_fi
 
   for (const status of filtered) {
     const itemBtn = await makeActionButton(ctx, {
-      label: `${status.filled ? '✅' : '⬜️'} ${status.item.label}`,
+      label: `${status.filled ? '✅' : status.skipped ? '⏭' : '⬜️'} ${status.item.label}`,
       action: 'dr.item',
       data: { itemId: status.item.id }
     });
