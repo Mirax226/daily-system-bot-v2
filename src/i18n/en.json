@@ -37,7 +37,11 @@
       "numeric_current": "Current value: {value}",
       "numeric_hint": "Use the buttons below to adjust the value, or send a number as text.",
       "numeric_save": "💾 Save",
-      "numeric_skip": "⏭ Skip"
+      "numeric_skip": "⏭ Skip",
+      "time_title": "Set time for {label}",
+      "time_current": "Current time: {value}",
+      "time_hint": "Use the buttons below to choose the hour, minutes, and AM/PM.",
+      "time_save": "💾 Save time"
     }
   },
   "buttons": {

@@ -23,6 +23,7 @@ type ReminderlessState = {
   awaitingValue?: { reportDayId: string; itemId: string };
   settingsRoutine?: { step: 'label' | 'xp'; label?: string };
   numericDraft?: { reportDayId: string; itemId: string; value: number };
+  timeDraft?: { reportDayId: string; itemId: string; hour12: number; minuteTens: number; minuteOnes: number; ampm: 'AM' | 'PM' };
 };
 
 const userStates = new Map<string, ReminderlessState>();
@@ -407,6 +408,100 @@ const parseDurationMinutes = (input: string): number | null => {
   return n;
 };
 
+const timeDraftToDisplay = (draft: { hour12: number; minuteTens: number; minuteOnes: number; ampm: 'AM' | 'PM' }): { hhmm24: string; label: string } => {
+  const hour12 = Math.min(12, Math.max(1, draft.hour12));
+  const mt = Math.min(5, Math.max(0, draft.minuteTens));
+  const mo = Math.min(9, Math.max(0, draft.minuteOnes));
+  const minutes = mt * 10 + mo;
+
+  let hour24: number;
+  if (draft.ampm === 'AM') {
+    hour24 = hour12 % 12;
+  } else {
+    hour24 = (hour12 % 12) + 12;
+  }
+
+  const HH = hour24.toString().padStart(2, '0');
+  const MM = minutes.toString().padStart(2, '0');
+
+  const hhmm24 = `${HH}:${MM}`;
+  const hh12 = hour12.toString().padStart(2, '0');
+  const label = `${hh12}:${MM} ${draft.ampm}`;
+  return { hhmm24, label };
+};
+
+const renderTimePicker = async (
+  ctx: Context,
+  reportDayId: string,
+  item: ReportItemRow,
+  draft: { hour12: number; minuteTens: number; minuteOnes: number; ampm: 'AM' | 'PM' }
+): Promise<void> => {
+  const { label: timeLabel } = timeDraftToDisplay(draft);
+
+  const lines = [
+    t('screens.daily_report.time_title', { label: item.label }),
+    t('screens.daily_report.time_current', { value: timeLabel }),
+    t('screens.daily_report.time_hint')
+  ];
+
+  const kb = new InlineKeyboard();
+
+  const hourRows = [
+    [1, 2, 3, 4],
+    [5, 6, 7, 8],
+    [9, 10, 11, 12]
+  ];
+  for (const row of hourRows) {
+    for (const h of row) {
+      const btn = await makeActionButton(ctx, {
+        label: h.toString(),
+        action: 'dr.time_set_hour',
+        data: { reportDayId, itemId: item.id, hour12: h }
+      });
+      kb.text(btn.text, btn.callback_data);
+    }
+    kb.row();
+  }
+
+  for (let mt = 0; mt <= 5; mt++) {
+    const btn = await makeActionButton(ctx, {
+      label: `${mt}0`,
+      action: 'dr.time_set_mtens',
+      data: { reportDayId, itemId: item.id, minuteTens: mt }
+    });
+    kb.text(btn.text, btn.callback_data);
+  }
+  kb.row();
+
+  for (let mo = 0; mo <= 9; mo++) {
+    const btn = await makeActionButton(ctx, {
+      label: mo.toString(),
+      action: 'dr.time_set_mones',
+      data: { reportDayId, itemId: item.id, minuteOnes: mo }
+    });
+    kb.text(btn.text, btn.callback_data);
+  }
+  kb.row();
+
+  const amBtn = await makeActionButton(ctx, { label: 'AM', action: 'dr.time_set_ampm', data: { reportDayId, itemId: item.id, ampm: 'AM' as const } });
+  const pmBtn = await makeActionButton(ctx, { label: 'PM', action: 'dr.time_set_ampm', data: { reportDayId, itemId: item.id, ampm: 'PM' as const } });
+  kb.text(amBtn.text, amBtn.callback_data).text(pmBtn.text, pmBtn.callback_data);
+  kb.row();
+
+  const saveBtn = await makeActionButton(ctx, { label: t('screens.daily_report.time_save'), action: 'dr.time_save', data: { reportDayId, itemId: item.id } });
+  const skipBtn = await makeActionButton(ctx, { label: t('screens.daily_report.numeric_skip'), action: 'dr.skip', data: { reportDayId, itemId: item.id } });
+  const backBtn = await makeActionButton(ctx, { label: t('buttons.back'), action: 'dr.back' });
+
+  kb.text(saveBtn.text, saveBtn.callback_data).row();
+  kb.text(skipBtn.text, skipBtn.callback_data).text(backBtn.text, backBtn.callback_data);
+
+  await renderScreen(ctx, {
+    titleKey: 'Daily Report',
+    bodyLines: lines,
+    inlineKeyboard: kb
+  });
+};
+
 const renderNumericInput = async (ctx: Context, reportDayId: string, item: ReportItemRow, value: number): Promise<void> => {
   const lines = [
     t('screens.daily_report.numeric_title', { label: item.label }),
@@ -459,6 +554,17 @@ const renderNumericInput = async (ctx: Context, reportDayId: string, item: Repor
 const promptForItem = async (ctx: Context, reportDayId: string, item: ReportItemRow) => {
   const telegramId = String(ctx.from?.id ?? '');
   const existing = userStates.get(telegramId) ?? {};
+
+  if (item.item_type === 'time_hhmm') {
+    const initialDraft = { reportDayId, itemId: item.id, hour12: 10, minuteTens: 0, minuteOnes: 0, ampm: 'PM' as const };
+    userStates.set(telegramId, {
+      ...existing,
+      awaitingValue: { reportDayId, itemId: item.id },
+      timeDraft: initialDraft
+    });
+    await renderTimePicker(ctx, reportDayId, item, initialDraft);
+    return;
+  }
 
   if (item.item_type === 'number' || item.item_type === 'duration_minutes') {
     const draftValue = 0;
@@ -889,6 +995,123 @@ bot.callbackQuery(/^[A-Za-z0-9_-]{8,12}$/, async (ctx) => {
           return;
         }
         await promptForItem(ctx, reportDay.id, item);
+        break;
+      }
+      case 'dr.time_set_hour': {
+        const data = (payload as { data?: { reportDayId?: string; itemId?: string; hour12?: number } }).data;
+        const reportDayId = data?.reportDayId;
+        const itemId = data?.itemId;
+        const hour12 = data?.hour12;
+        if (!reportDayId || !itemId || !hour12) return;
+        const telegramId = String(ctx.from?.id ?? '');
+        const state = userStates.get(telegramId);
+        const draft = state?.timeDraft;
+        if (!draft || draft.reportDayId !== reportDayId || draft.itemId !== itemId) {
+          await renderDailyReportRoot(ctx);
+          return;
+        }
+        const nextDraft = { ...draft, hour12 };
+        userStates.set(telegramId, { ...state, timeDraft: nextDraft });
+        const { items } = await ensureReportContext(ctx);
+        const item = items.find((i) => i.id === itemId);
+        if (!item) {
+          await renderDailyReportRoot(ctx);
+          return;
+        }
+        await renderTimePicker(ctx, reportDayId, item, nextDraft);
+        break;
+      }
+      case 'dr.time_set_mtens': {
+        const data = (payload as { data?: { reportDayId?: string; itemId?: string; minuteTens?: number } }).data;
+        const reportDayId = data?.reportDayId;
+        const itemId = data?.itemId;
+        const minuteTens = data?.minuteTens;
+        if (!reportDayId || !itemId || minuteTens === undefined) return;
+        const telegramId = String(ctx.from?.id ?? '');
+        const state = userStates.get(telegramId);
+        const draft = state?.timeDraft;
+        if (!draft || draft.reportDayId !== reportDayId || draft.itemId !== itemId) {
+          await renderDailyReportRoot(ctx);
+          return;
+        }
+        const nextDraft = { ...draft, minuteTens };
+        userStates.set(telegramId, { ...state, timeDraft: nextDraft });
+        const { items } = await ensureReportContext(ctx);
+        const item = items.find((i) => i.id === itemId);
+        if (!item) {
+          await renderDailyReportRoot(ctx);
+          return;
+        }
+        await renderTimePicker(ctx, reportDayId, item, nextDraft);
+        break;
+      }
+      case 'dr.time_set_mones': {
+        const data = (payload as { data?: { reportDayId?: string; itemId?: string; minuteOnes?: number } }).data;
+        const reportDayId = data?.reportDayId;
+        const itemId = data?.itemId;
+        const minuteOnes = data?.minuteOnes;
+        if (!reportDayId || !itemId || minuteOnes === undefined) return;
+        const telegramId = String(ctx.from?.id ?? '');
+        const state = userStates.get(telegramId);
+        const draft = state?.timeDraft;
+        if (!draft || draft.reportDayId !== reportDayId || draft.itemId !== itemId) {
+          await renderDailyReportRoot(ctx);
+          return;
+        }
+        const nextDraft = { ...draft, minuteOnes };
+        userStates.set(telegramId, { ...state, timeDraft: nextDraft });
+        const { items } = await ensureReportContext(ctx);
+        const item = items.find((i) => i.id === itemId);
+        if (!item) {
+          await renderDailyReportRoot(ctx);
+          return;
+        }
+        await renderTimePicker(ctx, reportDayId, item, nextDraft);
+        break;
+      }
+      case 'dr.time_set_ampm': {
+        const data = (payload as { data?: { reportDayId?: string; itemId?: string; ampm?: 'AM' | 'PM' } }).data;
+        const reportDayId = data?.reportDayId;
+        const itemId = data?.itemId;
+        const ampm = data?.ampm;
+        if (!reportDayId || !itemId || !ampm) return;
+        const telegramId = String(ctx.from?.id ?? '');
+        const state = userStates.get(telegramId);
+        const draft = state?.timeDraft;
+        if (!draft || draft.reportDayId !== reportDayId || draft.itemId !== itemId) {
+          await renderDailyReportRoot(ctx);
+          return;
+        }
+        const nextDraft = { ...draft, ampm };
+        userStates.set(telegramId, { ...state, timeDraft: nextDraft });
+        const { items } = await ensureReportContext(ctx);
+        const item = items.find((i) => i.id === itemId);
+        if (!item) {
+          await renderDailyReportRoot(ctx);
+          return;
+        }
+        await renderTimePicker(ctx, reportDayId, item, nextDraft);
+        break;
+      }
+      case 'dr.time_save': {
+        const data = (payload as { data?: { reportDayId?: string; itemId?: string } }).data;
+        const reportDayId = data?.reportDayId;
+        const itemId = data?.itemId;
+        if (!reportDayId || !itemId) return;
+        const telegramId = String(ctx.from?.id ?? '');
+        const state = userStates.get(telegramId);
+        const draft = state?.timeDraft;
+        if (!draft || draft.reportDayId !== reportDayId || draft.itemId !== itemId) {
+          await renderDailyReportRoot(ctx);
+          return;
+        }
+        const { hhmm24 } = timeDraftToDisplay(draft);
+        await handleSaveValue(ctx, hhmm24);
+        const updated = userStates.get(telegramId);
+        if (updated) {
+          delete updated.timeDraft;
+          userStates.set(telegramId, updated);
+        }
         break;
       }
       case 'dr.num_delta': {
