@@ -184,9 +184,9 @@ const buildReportsMenuKeyboard = async (ctx: Context): Promise<InlineKeyboard> =
 };
 
 const buildDailyReportKeyboard = async (ctx: Context, reportDayId: string | null): Promise<InlineKeyboard> => {
-  const statusBtn = await makeActionButton(ctx, { label: '📋 Completion Status', action: 'dr.status', data: { reportDayId } });
-  const nextBtn = await makeActionButton(ctx, { label: '✏️ Fill Next Item', action: 'dr.next', data: { reportDayId } });
-  const backBtn = await makeActionButton(ctx, { label: '⬅️ Back', action: 'dr.back' });
+  const statusBtn = await makeActionButton(ctx, { label: t('buttons.dr_today_status'), action: 'dr.status', data: { reportDayId } });
+  const nextBtn = await makeActionButton(ctx, { label: t('buttons.dr_fill_next'), action: 'dr.next', data: { reportDayId } });
+  const backBtn = await makeActionButton(ctx, { label: t('buttons.back'), action: 'dr.back' });
   return new InlineKeyboard()
     .text(statusBtn.text, statusBtn.callback_data)
     .row()
@@ -372,20 +372,37 @@ const renderAI = async (ctx: Context): Promise<void> => {
   await renderScreen(ctx, { titleKey: 'AI', bodyLines: ['AI features will be available soon.'], inlineKeyboard: kb });
 };
 
-const renderDailyStatus = async (ctx: Context): Promise<void> => {
-  const { reportDay, items } = await ensureReportContext(ctx);
-  const statuses = await listCompletionStatus(reportDay.id, items);
-  const lines = [`Daily Report (${reportDay.local_date})`, 'Completion Status:'];
-  statuses.forEach((s, idx) => lines.push(`${s.filled ? '✅' : '⬜️'} ${idx + 1}) ${s.item.label}`));
+const parseTimeHhmm = (input: string): { hhmm: string; minutes: number } | null => {
+  const trimmed = input.trim();
+  const parts = trimmed.split(':');
+  if (parts.length !== 2) return null;
+  const hours = Number(parts[0]);
+  const minutes = Number(parts[1]);
+  if (!Number.isInteger(hours) || !Number.isInteger(minutes)) return null;
+  if (hours < 0 || hours > 23) return null;
+  if (minutes < 0 || minutes > 59) return null;
+  const hh = hours.toString().padStart(2, '0');
+  const mm = minutes.toString().padStart(2, '0');
+  const total = hours * 60 + minutes;
+  return { hhmm: `${hh}:${mm}`, minutes: total };
+};
 
-  const kb = new InlineKeyboard();
-  for (const status of statuses) {
-    const btn = await makeActionButton(ctx, { label: `${status.filled ? '✅' : '⬜️'} ${status.item.label}`, action: 'dr.item', data: { itemId: status.item.id } });
-    kb.text(btn.text, btn.callback_data).row();
-  }
-  const backBtn = await makeActionButton(ctx, { label: '⬅️ Back', action: 'dr.back' });
-  kb.text(backBtn.text, backBtn.callback_data);
-  await renderScreen(ctx, { titleKey: 'Daily Report', bodyLines: lines, inlineKeyboard: kb });
+const parseDurationMinutes = (input: string): number | null => {
+  const trimmed = input.trim();
+  const n = Number(trimmed);
+  if (!Number.isFinite(n)) return null;
+  if (!Number.isInteger(n)) return null;
+  if (n <= 0) return null;
+  return n;
+};
+
+const promptForItem = async (ctx: Context, reportDayId: string, item: ReportItemRow) => {
+  const telegramId = String(ctx.from?.id ?? '');
+  userStates.set(telegramId, { awaitingValue: { reportDayId, itemId: item.id } });
+  const skipBtn = await makeActionButton(ctx, { label: '⏭ Skip', action: 'dr.skip', data: { reportDayId, itemId: item.id } });
+  const cancelBtn = await makeActionButton(ctx, { label: '⬅️ Cancel', action: 'dr.menu' });
+  const kb = new InlineKeyboard().text(skipBtn.text, skipBtn.callback_data).row().text(cancelBtn.text, cancelBtn.callback_data);
+  await renderScreen(ctx, { titleKey: 'Daily Report', bodyLines: [`Set value for: ${item.label}`, 'Send the value as text.'], inlineKeyboard: kb });
 };
 
 const promptForItem = async (ctx: Context, reportDayId: string, item: ReportItemRow) => {
@@ -403,7 +420,7 @@ const renderNextItem = async (ctx: Context): Promise<void> => {
   const next = statuses.find((s) => !s.filled);
   if (!next) {
     const kb = await buildDailyReportKeyboard(ctx, reportDay.id);
-    await renderScreen(ctx, { titleKey: 'Daily Report', bodyLines: [t('screens.daily_report.all_done')], inlineKeyboard: kb });
+    await renderScreen(ctx, { titleKey: t('screens.daily_report.title'), bodyLines: [t('screens.daily_report.all_done')], inlineKeyboard: kb });
     return;
   }
   await promptForItem(ctx, reportDay.id, next.item);
@@ -415,20 +432,21 @@ const renderDailyReportRoot = async (ctx: Context): Promise<void> => {
   const completed = statuses.filter((s) => s.filled).length;
   const total = statuses.length;
   const templateName = (await ensureDefaultTemplate(reportDay.user_id)).title ?? 'Default Template';
+
   const bodyLines = [
-    t('screens.daily_report.date', { date: reportDay.local_date }),
-    t('screens.daily_report.template', { template: templateName }),
-    t('screens.daily_report.completion', { completed, total }),
+    t('screens.daily_report.root_header', { date: reportDay.local_date }),
+    t('screens.daily_report.template_line', { template: templateName }),
+    t('screens.daily_report.completion_line', { completed, total }),
     ''
   ];
 
-  const statusBtn = await makeActionButton(ctx, { label: '📋 Today Status', action: 'dr.status' });
-  const nextBtn = await makeActionButton(ctx, { label: '✏️ Fill Next', action: 'dr.next' });
-  const pickBtn = await makeActionButton(ctx, { label: '🧩 Fill Specific Item', action: 'dr.pick_item' });
-  const templatesBtn = await makeActionButton(ctx, { label: '🗂 Templates', action: 'dr.templates' });
-  const historyBtn = await makeActionButton(ctx, { label: '🕘 History', action: 'dr.history' });
-  const lockBtn = await makeActionButton(ctx, { label: '✅ Submit / Lock', action: 'dr.lock' });
-  const backBtn = await makeActionButton(ctx, { label: '⬅️ Back', action: 'dr.back' });
+  const statusBtn = await makeActionButton(ctx, { label: t('buttons.dr_today_status'), action: 'dr.status' });
+  const nextBtn = await makeActionButton(ctx, { label: t('buttons.dr_fill_next'), action: 'dr.next' });
+  const pickBtn = await makeActionButton(ctx, { label: t('buttons.dr_fill_specific'), action: 'dr.pick_item' });
+  const templatesBtn = await makeActionButton(ctx, { label: t('buttons.dr_templates'), action: 'dr.templates' });
+  const historyBtn = await makeActionButton(ctx, { label: t('buttons.dr_history'), action: 'dr.history' });
+  const lockBtn = await makeActionButton(ctx, { label: t('buttons.dr_lock'), action: 'dr.lock' });
+  const backBtn = await makeActionButton(ctx, { label: t('buttons.back'), action: 'dr.back' });
 
   const kb = new InlineKeyboard()
     .text(statusBtn.text, statusBtn.callback_data)
@@ -445,33 +463,155 @@ const renderDailyReportRoot = async (ctx: Context): Promise<void> => {
     .row()
     .text(backBtn.text, backBtn.callback_data);
 
-  await renderScreen(ctx, { titleKey: 'Daily Report', bodyLines, inlineKeyboard: kb });
+  await renderScreen(ctx, { titleKey: t('screens.daily_report.title'), bodyLines, inlineKeyboard: kb });
+};
+
+const renderDailyStatusWithFilter = async (ctx: Context, filter: 'all' | 'not_filled' | 'filled' = 'all'): Promise<void> => {
+  const { reportDay, items } = await ensureReportContext(ctx);
+  const statuses = await listCompletionStatus(reportDay.id, items);
+
+  let filtered = statuses;
+  if (filter === 'not_filled') filtered = statuses.filter((s) => !s.filled);
+  if (filter === 'filled') filtered = statuses.filter((s) => s.filled);
+
+  const lines: string[] = [];
+  lines.push(t('screens.daily_report.root_header', { date: reportDay.local_date }), t('screens.daily_report.status_header'));
+
+  if (filtered.length === 0) {
+    lines.push(t('screens.daily_report.all_done'));
+  } else {
+    filtered.forEach((s, idx) => {
+      lines.push(`${s.filled ? '✅' : '⬜️'} ${idx + 1}) ${s.item.label}`);
+    });
+  }
+
+  const kb = new InlineKeyboard();
+
+  const allBtn = await makeActionButton(ctx, { label: t('screens.daily_report.filter_all'), action: 'dr.status', data: { filter: 'all' } });
+  const notFilledBtn = await makeActionButton(ctx, { label: t('screens.daily_report.filter_not_filled'), action: 'dr.status', data: { filter: 'not_filled' } });
+  const filledBtn = await makeActionButton(ctx, { label: t('screens.daily_report.filter_filled'), action: 'dr.status', data: { filter: 'filled' } });
+
+  kb.text(allBtn.text, allBtn.callback_data).text(notFilledBtn.text, notFilledBtn.callback_data).text(filledBtn.text, filledBtn.callback_data).row();
+
+  for (const status of filtered) {
+    const itemBtn = await makeActionButton(ctx, {
+      label: `${status.filled ? '✅' : '⬜️'} ${status.item.label}`,
+      action: 'dr.item',
+      data: { itemId: status.item.id }
+    });
+    kb.text(itemBtn.text, itemBtn.callback_data).row();
+  }
+
+  const backBtn = await makeActionButton(ctx, { label: t('buttons.back'), action: 'dr.back' });
+  kb.text(backBtn.text, backBtn.callback_data);
+
+  await renderScreen(ctx, {
+    titleKey: t('screens.daily_report.title'),
+    bodyLines: lines,
+    inlineKeyboard: kb
+  });
 };
 
 const handleSaveValue = async (ctx: Context, text: string): Promise<void> => {
   if (!ctx.from) return;
-  const state = userStates.get(String(ctx.from.id));
+  const userId = String(ctx.from.id);
+  const state = userStates.get(userId);
   if (!state?.awaitingValue) return;
+
   const { reportDayId, itemId } = state.awaitingValue;
   const { reportDay, items } = await ensureReportContext(ctx);
+
   if (reportDay.id !== reportDayId) {
-    userStates.delete(String(ctx.from.id));
-    const kb = await buildDailyReportKeyboard(ctx, reportDay.id);
-    await renderScreen(ctx, { titleKey: 'Daily Report', bodyLines: ['Session expired for that item. Please pick it again.'], inlineKeyboard: kb });
+    userStates.delete(userId);
+    await renderScreen(ctx, {
+      titleKey: t('screens.daily_report.title'),
+      bodyLines: [t('screens.daily_report.session_expired')],
+      inlineKeyboard: await buildDailyReportKeyboard(ctx, reportDay.id)
+    });
     return;
   }
+
   const item = items.find((i) => i.id === itemId);
   if (!item) {
-    userStates.delete(String(ctx.from.id));
-    const kb = await buildDailyReportKeyboard(ctx, reportDay.id);
-    await renderScreen(ctx, { titleKey: 'Daily Report', bodyLines: ['Item not found.'], inlineKeyboard: kb });
+    userStates.delete(userId);
+    await renderScreen(ctx, {
+      titleKey: t('screens.daily_report.title'),
+      bodyLines: [t('screens.daily_report.item_not_found')],
+      inlineKeyboard: await buildDailyReportKeyboard(ctx, reportDay.id)
+    });
     return;
   }
 
-  const numericValue = Number(text);
-  const valueJson = item.item_type === 'number' && !Number.isNaN(numericValue) ? { value: numericValue, minutes: numericValue } : { value: text };
+  let valueJson: Record<string, unknown> | null = null;
 
-  await saveValue({ reportDayId, item, valueJson, userId: reportDay.user_id });
+  switch (item.item_type) {
+    case 'time_hhmm': {
+      const parsed = parseTimeHhmm(text);
+      if (!parsed) {
+        await renderScreen(ctx, {
+          titleKey: t('screens.daily_report.title'),
+          bodyLines: [t('screens.daily_report.invalid_time')],
+          inlineKeyboard: await buildDailyReportKeyboard(ctx, reportDay.id)
+        });
+        return;
+      }
+      valueJson = { value: parsed.hhmm, minutes: parsed.minutes };
+      break;
+    }
+
+    case 'duration_minutes': {
+      const mins = parseDurationMinutes(text);
+      if (mins === null) {
+        await renderScreen(ctx, {
+          titleKey: t('screens.daily_report.title'),
+          bodyLines: [t('screens.daily_report.invalid_duration')],
+          inlineKeyboard: await buildDailyReportKeyboard(ctx, reportDay.id)
+        });
+        return;
+      }
+      valueJson = { value: mins, minutes: mins };
+      break;
+    }
+
+    case 'number': {
+      const n = Number(text.trim());
+      if (!Number.isFinite(n)) {
+        await renderScreen(ctx, {
+          titleKey: t('screens.daily_report.title'),
+          bodyLines: [t('screens.daily_report.invalid_number')],
+          inlineKeyboard: await buildDailyReportKeyboard(ctx, reportDay.id)
+        });
+        return;
+      }
+      valueJson = { value: n, minutes: n };
+      break;
+    }
+
+    default:
+      valueJson = { value: text };
+  }
+
+  try {
+    await saveValue({ reportDayId, item, valueJson, userId: reportDay.user_id });
+  } catch (error) {
+    console.error({
+      scope: 'daily_report',
+      event: 'save_value_failed',
+      error,
+      reportDayId,
+      itemId: item.id,
+      valueJson
+    });
+
+    await renderScreen(ctx, {
+      titleKey: t('screens.daily_report.title'),
+      bodyLines: [t('screens.daily_report.save_failed')],
+      inlineKeyboard: await buildDailyReportKeyboard(ctx, reportDay.id)
+    });
+
+    return;
+  }
+
   const userSettings = (await ensureUserAndSettings(ctx)).user.settings_json as Record<string, unknown>;
   await logForUser({
     userId: reportDay.user_id,
@@ -480,10 +620,20 @@ const handleSaveValue = async (ctx: Context, text: string): Promise<void> => {
     payload: { action: 'save_value', item_id: item.id },
     enabled: telemetryEnabledForUser(userSettings)
   });
-  userStates.delete(String(ctx.from.id));
-  const kb = await buildDailyReportKeyboard(ctx, reportDayId);
-  await renderScreen(ctx, { titleKey: 'Daily Report', bodyLines: ['Saved.'], inlineKeyboard: kb });
-  await renderDailyStatus(ctx);
+
+  userStates.delete(userId);
+  await renderScreen(ctx, {
+    titleKey: t('screens.daily_report.title'),
+    bodyLines: [t('screens.daily_report.saved')],
+    inlineKeyboard: await buildDailyReportKeyboard(ctx, reportDayId)
+  });
+  await renderDailyStatusWithFilter(ctx, 'all');
+};
+
+const renderSettingsRoot = async (ctx: Context): Promise<void> => {
+  const backBtn = await makeActionButton(ctx, { label: '⬅️ Back', action: 'nav.dashboard' });
+  const kb = new InlineKeyboard().text(backBtn.text, backBtn.callback_data);
+  await renderScreen(ctx, { titleKey: 'Settings', bodyLines: ['Choose an option:'], inlineKeyboard: kb });
 };
 
 const renderSettingsRoot = async (ctx: Context): Promise<void> => {
@@ -656,14 +806,16 @@ bot.callbackQuery(/^[A-Za-z0-9_-]{8,12}$/, async (ctx) => {
         break;
       }
 
-      case 'dr.status':
-        await renderDailyStatus(ctx);
+      case 'dr.status': {
+        const filter = (payload as { data?: { filter?: 'all' | 'not_filled' | 'filled' } }).data?.filter ?? 'all';
+        await renderDailyStatusWithFilter(ctx, filter);
         break;
+      }
       case 'dr.next':
         await renderNextItem(ctx);
         break;
       case 'dr.pick_item':
-        await renderDailyStatus(ctx);
+        await renderDailyStatusWithFilter(ctx, 'all');
         break;
       case 'dr.item': {
         const itemId = (payload as { data?: { itemId?: string } }).data?.itemId;
@@ -699,22 +851,22 @@ bot.callbackQuery(/^[A-Za-z0-9_-]{8,12}$/, async (ctx) => {
         const reportDayId = (payload as { data?: { reportDayId?: string } }).data?.reportDayId;
         const itemId = (payload as { data?: { itemId?: string } }).data?.itemId;
         if (!reportDayId || !itemId) {
-          await renderDailyStatus(ctx);
+          await renderDailyStatusWithFilter(ctx, 'all');
           return;
         }
         const { reportDay, items } = await ensureReportContext(ctx);
         if (reportDay.id !== reportDayId) {
-          await renderDailyStatus(ctx);
+          await renderDailyStatusWithFilter(ctx, 'all');
           return;
         }
         const item = items.find((i) => i.id === itemId);
         if (!item) {
           const kb = await buildDailyReportKeyboard(ctx, reportDay.id);
-          await renderScreen(ctx, { titleKey: 'Daily Report', bodyLines: ['Item not found.'], inlineKeyboard: kb });
+          await renderScreen(ctx, { titleKey: t('screens.daily_report.title'), bodyLines: [t('screens.daily_report.item_not_found')], inlineKeyboard: kb });
           return;
         }
         await saveValue({ reportDayId, item, valueJson: { skipped: true }, userId: reportDay.user_id });
-        await renderDailyStatus(ctx);
+        await renderDailyStatusWithFilter(ctx, 'all');
         break;
       }
       case 'dr.menu':
