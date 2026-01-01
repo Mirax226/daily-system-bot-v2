@@ -402,6 +402,15 @@ const promptForItem = async (ctx: Context, reportDayId: string, item: ReportItem
   await renderScreen(ctx, { titleKey: 'Daily Report', bodyLines: [`Set value for: ${item.label}`, 'Send the value as text.'], inlineKeyboard: kb });
 };
 
+const promptForItem = async (ctx: Context, reportDayId: string, item: ReportItemRow) => {
+  const telegramId = String(ctx.from?.id ?? '');
+  userStates.set(telegramId, { awaitingValue: { reportDayId, itemId: item.id } });
+  const skipBtn = await makeActionButton(ctx, { label: '⏭ Skip', action: 'dr.skip', data: { reportDayId, itemId: item.id } });
+  const cancelBtn = await makeActionButton(ctx, { label: '⬅️ Cancel', action: 'dr.menu' });
+  const kb = new InlineKeyboard().text(skipBtn.text, skipBtn.callback_data).row().text(cancelBtn.text, cancelBtn.callback_data);
+  await renderScreen(ctx, { titleKey: 'Daily Report', bodyLines: [`Set value for: ${item.label}`, 'Send the value as text.'], inlineKeyboard: kb });
+};
+
 const renderNextItem = async (ctx: Context): Promise<void> => {
   const { reportDay, items } = await ensureReportContext(ctx);
   const statuses = await listCompletionStatus(reportDay.id, items);
@@ -587,6 +596,12 @@ const handleSaveValue = async (ctx: Context, text: string): Promise<void> => {
   const kb = await buildDailyReportKeyboard(ctx, reportDayId);
   await renderScreen(ctx, { titleKey: t('screens.daily_report.title'), bodyLines: [t('screens.daily_report.saved')], inlineKeyboard: kb });
   await renderDailyStatusWithFilter(ctx, 'all');
+};
+
+const renderSettingsRoot = async (ctx: Context): Promise<void> => {
+  const backBtn = await makeActionButton(ctx, { label: '⬅️ Back', action: 'nav.dashboard' });
+  const kb = new InlineKeyboard().text(backBtn.text, backBtn.callback_data);
+  await renderScreen(ctx, { titleKey: 'Settings', bodyLines: ['Choose an option:'], inlineKeyboard: kb });
 };
 
 const renderSettingsRoot = async (ctx: Context): Promise<void> => {
