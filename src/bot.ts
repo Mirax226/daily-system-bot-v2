@@ -26,6 +26,7 @@ type ReminderlessState = {
 };
 
 const userStates = new Map<string, ReminderlessState>();
+const reportContextCache = new Map<string, { reportDay: ReportDayRow; items: ReportItemRow[] }>();
 
 const greetings = ['👋 Hey there!', '🙌 Welcome!', '🚀 Ready to plan your day?', '🌟 Let’s make today productive!', '💪 Keep going!'];
 const chooseGreeting = (): string => greetings[Math.floor(Math.random() * greetings.length)];
@@ -198,10 +199,16 @@ const buildDailyReportKeyboard = async (ctx: Context, reportDayId: string | null
 
 const ensureReportContext = async (ctx: Context): Promise<{ userId: string; reportDay: ReportDayRow; items: ReportItemRow[] }> => {
   const { user } = await ensureUserAndSettings(ctx);
+  const local = formatLocalTime(user.timezone ?? config.defaultTimezone);
+  const cacheKey = `${user.id}:${local.date}`;
+  const cached = reportContextCache.get(cacheKey);
+  if (cached) {
+    return { userId: user.id, ...cached };
+  }
   const template = await ensureDefaultTemplate(user.id);
   const items = await ensureDefaultItems(user.id);
-  const local = formatLocalTime(user.timezone ?? config.defaultTimezone);
   const reportDay = await getOrCreateReportDay({ userId: user.id, templateId: template.id, localDate: local.date });
+  reportContextCache.set(cacheKey, { reportDay, items });
   return { userId: user.id, reportDay, items };
 };
 
@@ -219,11 +226,14 @@ const renderDashboard = async (ctx: Context): Promise<void> => {
     if (isNew || ctx.message) {
       await sendMainMenu(ctx, aiEnabledForUser(user.settings_json as Record<string, unknown>));
     }
-    const { reportDay, items } = await ensureReportContext(ctx);
+    const reportContextPromise = ensureReportContext(ctx);
+    const xpBalancePromise = getXpBalance(user.id);
+
+    const { reportDay, items } = await reportContextPromise;
     const statuses = await listCompletionStatus(reportDay.id, items);
     const completed = statuses.filter((s) => s.filled).length;
     const total = statuses.length;
-    const xpBalance = await getXpBalance(user.id);
+    const xpBalance = await xpBalancePromise;
     const streak = (user.settings_json as { streak?: number } | undefined)?.streak ?? 0;
 
     const bodyLines = [
