@@ -1,0 +1,35 @@
+{
+  "screens": {
+    "dashboard": {
+      "greeting": "Hello!",
+      "time": "Current time: {date} | {time}",
+      "welcome_new": [
+        "Welcome to your productivity hub!",
+        "You can:",
+        "• Configure your daily report form.",
+        "• Earn and spend XP in the Reward Center.",
+        "• Review reports and charts.",
+        "• Manage reminders (coming back soon)."
+      ],
+      "welcome_back": "Welcome back! Use the menu below to continue.",
+      "xp_balance": "XP Balance: {xp}",
+      "today_items": "Today: {completed}/{total} items",
+      "streak": "Current streak: {streak} days"
+    },
+    "daily_report": {
+      "all_done": "All items are completed for today!",
+      "date": "Date: {date}",
+      "template": "Template: {template}",
+      "completion": "Completion: {completed}/{total}"
+    }
+  },
+  "buttons": {
+    "reload": "Reload",
+    "back": "Back",
+    "send_report": "Send report"
+  },
+  "errors": {
+    "unexpected": "An unexpected error occurred and could not be reported.",
+    "with_code": "An error occurred. Tracking code: {code}"
+  }
+}

@@ -14,6 +14,7 @@ import { makeActionButton } from './ui/inlineButtons';
 import { renderScreen, ensureUserAndSettings as renderEnsureUserAndSettings } from './ui/renderScreen';
 import { aiEnabledForUser, sendMainMenu } from './ui/mainMenu';
 import { formatLocalTime } from './utils/time';
+import { t } from './i18n';
 import type { ReportItemRow, ReportDayRow } from './types/supabase';
 
 export const bot = new Bot<Context>(config.telegram.botToken);
@@ -94,11 +95,11 @@ const logForUser = async (params: {
   });
 
 const sendErrorNotice = async (ctx: Context, errorCode: string) => {
-  const btn = await makeActionButton(ctx, { label: 'Send report', action: 'error.send_report', data: { errorCode } });
+  const btn = await makeActionButton(ctx, { label: t('buttons.send_report'), action: 'error.send_report', data: { errorCode } });
   const kb = new InlineKeyboard().text(btn.text, btn.callback_data);
   await renderScreen(ctx, {
     titleKey: 'Error',
-    bodyLines: [`An error occurred. Tracking code: ${errorCode}`],
+    bodyLines: [t('errors.with_code', { code: errorCode })],
     inlineKeyboard: kb
   });
 };
@@ -121,7 +122,7 @@ const handleBotError = async (ctx: Context, error: unknown, traceId: string): Pr
   } catch (err) {
     console.error({ scope: 'bot', event: 'error_handler_failed', err, originalError: error, traceId });
     try {
-      await ctx.reply('An unexpected error occurred and could not be reported.');
+      await ctx.reply(t('errors.unexpected'));
     } catch {
       // ignore
     }
@@ -139,19 +140,12 @@ bot.use(async (ctx, next) => {
 
 const buildDashboardLines = (isNew: boolean, timezone?: string | null): string[] => {
   const local = formatLocalTime(timezone ?? config.defaultTimezone);
-  const lines = [chooseGreeting(), `⏱ Current time: ${local.date} | ${local.time}`];
+  const lines = [chooseGreeting(), t('screens.dashboard.time', { date: local.date, time: local.time })];
   if (isNew) {
-    lines.push(
-      '',
-      'Welcome to your productivity hub!',
-      'You can:',
-      '• Configure your daily report form.',
-      '• Earn and spend XP in the Reward Center.',
-      '• Review reports and charts.',
-      '• Manage reminders (coming back soon).'
-    );
+    const welcomeNew = t('screens.dashboard.welcome_new');
+    lines.push('', ...(Array.isArray(welcomeNew) ? welcomeNew : [welcomeNew]));
   } else {
-    lines.push('', 'Welcome back! Use the menu below to continue.');
+    lines.push('', t('screens.dashboard.welcome_back'));
   }
   return lines;
 };
@@ -234,9 +228,9 @@ const renderDashboard = async (ctx: Context): Promise<void> => {
     const bodyLines = [
       ...buildDashboardLines(isNew, user.timezone),
       '',
-      `XP Balance: ${xpBalance}`,
-      `Today: ${completed}/${total} items`,
-      `Current streak: ${streak} days`
+      t('screens.dashboard.xp_balance', { xp: xpBalance }),
+      t('screens.dashboard.today_items', { completed, total }),
+      t('screens.dashboard.streak', { streak })
     ];
 
     const dailyReportBtn = await makeActionButton(ctx, { label: '🧾 Daily Report', action: 'nav.daily_report' });
@@ -409,7 +403,7 @@ const renderNextItem = async (ctx: Context): Promise<void> => {
   const next = statuses.find((s) => !s.filled);
   if (!next) {
     const kb = await buildDailyReportKeyboard(ctx, reportDay.id);
-    await renderScreen(ctx, { titleKey: 'Daily Report', bodyLines: ['All items are completed for today!'], inlineKeyboard: kb });
+    await renderScreen(ctx, { titleKey: 'Daily Report', bodyLines: [t('screens.daily_report.all_done')], inlineKeyboard: kb });
     return;
   }
   await promptForItem(ctx, reportDay.id, next.item);
@@ -421,7 +415,12 @@ const renderDailyReportRoot = async (ctx: Context): Promise<void> => {
   const completed = statuses.filter((s) => s.filled).length;
   const total = statuses.length;
   const templateName = (await ensureDefaultTemplate(reportDay.user_id)).title ?? 'Default Template';
-  const bodyLines = [`Date: ${reportDay.local_date}`, `Template: ${templateName}`, `Completion: ${completed}/${total}`, ''];
+  const bodyLines = [
+    t('screens.daily_report.date', { date: reportDay.local_date }),
+    t('screens.daily_report.template', { template: templateName }),
+    t('screens.daily_report.completion', { completed, total }),
+    ''
+  ];
 
   const statusBtn = await makeActionButton(ctx, { label: '📋 Today Status', action: 'dr.status' });
   const nextBtn = await makeActionButton(ctx, { label: '✏️ Fill Next', action: 'dr.next' });
