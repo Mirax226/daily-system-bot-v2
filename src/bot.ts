@@ -496,8 +496,6 @@ const renderSettingsRoot = async (ctx: Context): Promise<void> => {
 // ===== Handlers =====
 
 bot.command('start', async (ctx: Context) => {
-  const { user } = await ensureUserAndSettings(ctx);
-  await sendMainMenu(ctx, aiEnabledForUser(user.settings_json as Record<string, unknown>));
   await renderDashboard(ctx);
 });
 
