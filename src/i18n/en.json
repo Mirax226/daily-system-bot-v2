@@ -32,7 +32,12 @@
       "invalid_time": "Please enter time as HH:MM (for example: 06:30).",
       "invalid_duration": "Please enter duration in minutes (for example: 90).",
       "invalid_number": "Please enter a numeric value.",
-      "save_failed": "Could not save the value. Please try again."
+      "save_failed": "Could not save the value. Please try again.",
+      "numeric_title": "Set value for {label}",
+      "numeric_current": "Current value: {value}",
+      "numeric_hint": "Use the buttons below to adjust the value, or send a number as text.",
+      "numeric_save": "💾 Save",
+      "numeric_skip": "⏭ Skip"
     }
   },
   "buttons": {

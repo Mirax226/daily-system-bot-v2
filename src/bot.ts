@@ -22,6 +22,7 @@ export const bot = new Bot<Context>(config.telegram.botToken);
 type ReminderlessState = {
   awaitingValue?: { reportDayId: string; itemId: string };
   settingsRoutine?: { step: 'label' | 'xp'; label?: string };
+  numericDraft?: { reportDayId: string; itemId: string; value: number };
 };
 
 const userStates = new Map<string, ReminderlessState>();
@@ -396,9 +397,71 @@ const parseDurationMinutes = (input: string): number | null => {
   return n;
 };
 
+const renderNumericInput = async (ctx: Context, reportDayId: string, item: ReportItemRow, value: number): Promise<void> => {
+  const lines = [
+    t('screens.daily_report.numeric_title', { label: item.label }),
+    t('screens.daily_report.numeric_current', { value }),
+    t('screens.daily_report.numeric_hint')
+  ];
+
+  const kb = new InlineKeyboard();
+
+  const deltasRow1 = [-15, -5, 5, 15];
+  for (const delta of deltasRow1) {
+    const btn = await makeActionButton(ctx, {
+      label: delta > 0 ? `+${delta}` : `${delta}`,
+      action: 'dr.num_delta',
+      data: { reportDayId, itemId: item.id, delta }
+    });
+    kb.text(btn.text, btn.callback_data);
+  }
+  kb.row();
+
+  const deltasRow2 = [30, 60];
+  for (const delta of deltasRow2) {
+    const btn = await makeActionButton(ctx, {
+      label: `+${delta}`,
+      action: 'dr.num_delta',
+      data: { reportDayId, itemId: item.id, delta }
+    });
+    kb.text(btn.text, btn.callback_data);
+  }
+  kb.row();
+
+  const saveBtn = await makeActionButton(ctx, {
+    label: t('screens.daily_report.numeric_save'),
+    action: 'dr.num_save',
+    data: { reportDayId, itemId: item.id }
+  });
+  const skipBtn = await makeActionButton(ctx, { label: t('screens.daily_report.numeric_skip'), action: 'dr.skip', data: { reportDayId, itemId: item.id } });
+  const backBtn = await makeActionButton(ctx, { label: t('buttons.back'), action: 'dr.back' });
+
+  kb.text(saveBtn.text, saveBtn.callback_data).row();
+  kb.text(skipBtn.text, skipBtn.callback_data).text(backBtn.text, backBtn.callback_data);
+
+  await renderScreen(ctx, {
+    titleKey: 'Daily Report',
+    bodyLines: lines,
+    inlineKeyboard: kb
+  });
+};
+
 const promptForItem = async (ctx: Context, reportDayId: string, item: ReportItemRow) => {
   const telegramId = String(ctx.from?.id ?? '');
-  userStates.set(telegramId, { awaitingValue: { reportDayId, itemId: item.id } });
+  const existing = userStates.get(telegramId) ?? {};
+
+  if (item.item_type === 'number' || item.item_type === 'duration_minutes') {
+    const draftValue = 0;
+    userStates.set(telegramId, {
+      ...existing,
+      awaitingValue: { reportDayId, itemId: item.id },
+      numericDraft: { reportDayId, itemId: item.id, value: draftValue }
+    });
+    await renderNumericInput(ctx, reportDayId, item, draftValue);
+    return;
+  }
+
+  userStates.set(telegramId, { ...existing, awaitingValue: { reportDayId, itemId: item.id } });
   const skipBtn = await makeActionButton(ctx, { label: '⏭ Skip', action: 'dr.skip', data: { reportDayId, itemId: item.id } });
   const cancelBtn = await makeActionButton(ctx, { label: '⬅️ Cancel', action: 'dr.menu' });
   const kb = new InlineKeyboard().text(skipBtn.text, skipBtn.callback_data).row().text(cancelBtn.text, cancelBtn.callback_data);
@@ -816,6 +879,64 @@ bot.callbackQuery(/^[A-Za-z0-9_-]{8,12}$/, async (ctx) => {
           return;
         }
         await promptForItem(ctx, reportDay.id, item);
+        break;
+      }
+      case 'dr.num_delta': {
+        const data = (payload as { data?: { reportDayId?: string; itemId?: string; delta?: number } }).data;
+        const reportDayId = data?.reportDayId;
+        const itemId = data?.itemId;
+        const delta = data?.delta ?? 0;
+        if (!reportDayId || !itemId) {
+          await renderDailyStatusWithFilter(ctx, 'all');
+          return;
+        }
+        const telegramId = String(ctx.from?.id ?? '');
+        const state = userStates.get(telegramId);
+        if (!state?.numericDraft || state.numericDraft.reportDayId !== reportDayId || state.numericDraft.itemId !== itemId) {
+          await renderDailyStatusWithFilter(ctx, 'all');
+          return;
+        }
+        const current = state.numericDraft.value ?? 0;
+        const next = Math.max(0, current + delta);
+
+        userStates.set(telegramId, {
+          ...state,
+          numericDraft: { reportDayId, itemId, value: next }
+        });
+
+        const { items } = await ensureReportContext(ctx);
+        const item = items.find((i) => i.id === itemId);
+        if (!item) {
+          await renderDailyStatusWithFilter(ctx, 'all');
+          return;
+        }
+
+        await renderNumericInput(ctx, reportDayId, item, next);
+        break;
+      }
+      case 'dr.num_save': {
+        const data = (payload as { data?: { reportDayId?: string; itemId?: string } }).data;
+        const reportDayId = data?.reportDayId;
+        const itemId = data?.itemId;
+        if (!reportDayId || !itemId) {
+          await renderDailyStatusWithFilter(ctx, 'all');
+          return;
+        }
+        const telegramId = String(ctx.from?.id ?? '');
+        const state = userStates.get(telegramId);
+        const draft = state?.numericDraft;
+        if (!draft || draft.reportDayId !== reportDayId || draft.itemId !== itemId) {
+          await renderDailyStatusWithFilter(ctx, 'all');
+          return;
+        }
+
+        await handleSaveValue(ctx, String(draft.value));
+
+        const updated = userStates.get(telegramId);
+        if (updated) {
+          delete updated.numericDraft;
+          userStates.set(telegramId, updated);
+        }
         break;
       }
       case 'dr.templates': {
