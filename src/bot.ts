@@ -33,7 +33,7 @@ import {
 
 import {
   getOrCreateReportDay,
-  getReportDayByLocalDate,
+  getReportDayByDate,
   listCompletionStatus,
   saveValue,
   lockReportDay,
@@ -795,7 +795,7 @@ const renderDailyReportRoot = async (ctx: Context, localDate?: string): Promise<
       const yesterday = `${y2}-${m2}-${d2}`;
 
       try {
-        const yd = await getReportDayByLocalDate({ userId: user.id, localDate: yesterday });
+        const yd = await getReportDayByDate({ userId: user.id, templateId: template.id, localDate: yesterday });
         if (yd) {
           const ydItems = await ensureDefaultItems(user.id);
           const ydStatuses = await listCompletionStatus(yd.id, ydItems);
@@ -817,7 +817,7 @@ const renderDailyReportRoot = async (ctx: Context, localDate?: string): Promise<
 const renderDailyStatusWithFilter = async (ctx: Context, reportDayId: string, filter: 'all' | 'not_filled' | 'filled' = 'all'): Promise<void> => {
   const { user } = await ensureUserAndSettings(ctx);
 
-  // Find reportDay for id (use range for safety; service provides getReportDayByLocalDate but not by id).
+  // Find reportDay for id (use range for safety; service provides getReportDayByDate but not by id).
   // Most flows pass current reportDayId; we can rely on context cache for that day.
   const cached = [...reportContextCache.values()].find((v) => v.reportDay.id === reportDayId);
   const reportDay = cached?.reportDay ?? (await getOrCreateReportDay({ userId: user.id, templateId: (await ensureDefaultTemplate(user.id)).id, localDate: formatLocalTime(user.timezone ?? config.defaultTimezone).date }));
@@ -863,22 +863,25 @@ const renderDailyStatusWithFilter = async (ctx: Context, reportDayId: string, fi
 };
 
 const renderTemplatesScreen = async (ctx: Context): Promise<void> => {
-  const { user } = await ensureUserAndSettings(ctx);
+  const { user, settings } = await ensureUserAndSettings(ctx);
   const templates = await listUserTemplates(user.id);
+  const settingsJson = (settings.settings_json ?? {}) as { active_template_id?: string | null };
+  const activeTemplateId = settingsJson.active_template_id ?? null;
+  const templatesWithStatus = templates.map((tpl) => ({ ...tpl, is_active: tpl.id === activeTemplateId }));
 
   const lines: string[] = [t('screens.templates.title'), ''];
 
   if (!templates.length) {
     lines.push(t('screens.templates.none'));
   } else {
-    templates.forEach((tpl) => {
+    templatesWithStatus.forEach((tpl) => {
       lines.push(`• ${tpl.title ?? 'Template'}${tpl.is_active ? ` (${t('common.active')})` : ''}`);
     });
   }
 
   const kb = new InlineKeyboard();
 
-  for (const tpl of templates) {
+  for (const tpl of templatesWithStatus) {
     const btn = await makeActionButton(ctx, { label: `🗂 ${tpl.title ?? 'Template'}`, action: 'tpl.open', data: { templateId: tpl.id } });
     kb.text(btn.text, btn.callback_data).row();
   }
@@ -893,18 +896,21 @@ const renderTemplatesScreen = async (ctx: Context): Promise<void> => {
 };
 
 const renderTemplateDetails = async (ctx: Context, templateId: string): Promise<void> => {
-  const { user } = await ensureUserAndSettings(ctx);
-  const tpl = await getTemplateById(user.id, templateId);
-  if (!tpl) {
+  const { user, settings } = await ensureUserAndSettings(ctx);
+  const tpl = await getTemplateById(templateId);
+  if (!tpl || tpl.user_id !== user.id) {
     await renderTemplatesScreen(ctx);
     return;
   }
 
+  const settingsJson = (settings.settings_json ?? {}) as { active_template_id?: string | null };
+  const tplWithStatus = { ...tpl, is_active: settingsJson.active_template_id === tpl.id };
+
   const lines: string[] = [
     t('screens.templates.details_title'),
     '',
-    `${t('common.title')}: ${tpl.title ?? '-'}`,
-    `${t('common.status')}: ${tpl.is_active ? t('common.active') : t('common.inactive')}`
+    `${t('common.title')}: ${tplWithStatus.title ?? '-'}`,
+    `${t('common.status')}: ${tplWithStatus.is_active ? t('common.active') : t('common.inactive')}`
   ];
 
   const kb = new InlineKeyboard();
@@ -1661,7 +1667,7 @@ bot.callbackQuery(/^[A-Za-z0-9_-]{8,12}$/, async (ctx) => {
         const cached = [...reportContextCache.values()].find((v) => v.reportDay.id === reportDayId);
         const reportDay = cached?.reportDay ?? (await ensureReportContext(ctx)).reportDay;
 
-        await unlockReportDay({ reportDayId: reportDay.id });
+        await unlockReportDay({ reportDayId: reportDay.id, userId: reportDay.user_id });
 
         reportContextCache.forEach((v, k) => {
           if (v.reportDay.id === reportDay.id) reportContextCache.delete(k);
@@ -1706,7 +1712,7 @@ bot.callbackQuery(/^[A-Za-z0-9_-]{8,12}$/, async (ctx) => {
           return;
         }
         const { user: u } = await ensureUserAndSettings(ctx);
-        await duplicateTemplate(u.id, templateId);
+        await duplicateTemplate({ userId: u.id, templateId });
         reportContextCache.clear();
         await renderTemplatesScreen(ctx);
         return;
@@ -1719,7 +1725,7 @@ bot.callbackQuery(/^[A-Za-z0-9_-]{8,12}$/, async (ctx) => {
           return;
         }
         const { user: u } = await ensureUserAndSettings(ctx);
-        await deleteTemplate(u.id, templateId);
+        await deleteTemplate({ userId: u.id, templateId });
         reportContextCache.clear();
         await renderTemplatesScreen(ctx);
         return;
