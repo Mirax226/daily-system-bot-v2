@@ -1,5 +1,6 @@
 import { getSupabaseClient } from '../db';
 import type { ReportItemRow, ReportTemplateRow } from '../types/supabase';
+import { getOrCreateUserSettings } from './userSettings';
 
 const REPORT_TEMPLATES_TABLE = 'report_templates';
 const REPORT_ITEMS_TABLE = 'report_items';
@@ -164,4 +165,117 @@ export async function upsertItem(
   }
 
   return data as ReportItemRow;
+}
+
+export async function getTemplateById(templateId: string, client: Client = getSupabaseClient()): Promise<ReportTemplateRow | null> {
+  const { data, error } = await client.from(REPORT_TEMPLATES_TABLE).select('*').eq('id', templateId).maybeSingle();
+  if (error) {
+    console.error({ scope: 'report_templates', event: 'template_get_error', templateId, error });
+    throw new Error(`Failed to load report template: ${error.message}`);
+  }
+  return (data as ReportTemplateRow | null) ?? null;
+}
+
+export type TemplateWithCount = ReportTemplateRow & { itemCount: number };
+
+export async function listUserTemplates(userId: string, client: Client = getSupabaseClient()): Promise<TemplateWithCount[]> {
+  const { data, error } = await client
+    .from(REPORT_TEMPLATES_TABLE)
+    .select('*')
+    .eq('user_id', userId)
+    .order('created_at', { ascending: true });
+
+  if (error) {
+    console.error({ scope: 'report_templates', event: 'list_user_error', userId, error });
+    throw new Error(`Failed to list templates: ${error.message}`);
+  }
+
+  const templates = (data as ReportTemplateRow[]) ?? [];
+  if (templates.length === 0) return [];
+
+  const templateIds = templates.map((t) => t.id);
+  const { data: itemsData, error: itemsError } = await client.from(REPORT_ITEMS_TABLE).select('id,template_id').in('template_id', templateIds);
+  if (itemsError) {
+    console.error({ scope: 'report_templates', event: 'list_user_items_error', userId, error: itemsError });
+    throw new Error(`Failed to load template items: ${itemsError.message}`);
+  }
+
+  const counts = new Map<string, number>();
+  (itemsData as { id: string; template_id: string }[] | null)?.forEach((row) => {
+    counts.set(row.template_id, (counts.get(row.template_id) ?? 0) + 1);
+  });
+
+  return templates.map((t) => ({ ...t, itemCount: counts.get(t.id) ?? 0 }));
+}
+
+export async function setActiveTemplate(userId: string, templateId: string, client: Client = getSupabaseClient()): Promise<void> {
+  const settings = await getOrCreateUserSettings(userId, client);
+  const currentJson = (settings.settings_json as Record<string, unknown> | null) ?? {};
+  const nextSettingsJson = { ...currentJson, active_template_id: templateId };
+  const { error } = await client
+    .from('user_settings')
+    .update({ settings_json: nextSettingsJson, updated_at: new Date().toISOString() })
+    .eq('id', settings.id);
+  if (error) {
+    console.error({ scope: 'report_templates', event: 'set_active_error', userId, templateId, error });
+    throw new Error(`Failed to set active template: ${error.message}`);
+  }
+}
+
+export async function deleteTemplate(params: { userId: string; templateId: string }, client: Client = getSupabaseClient()): Promise<void> {
+  const { error } = await client.from(REPORT_TEMPLATES_TABLE).delete().eq('id', params.templateId).eq('user_id', params.userId);
+  if (error) {
+    console.error({ scope: 'report_templates', event: 'delete_error', params, error });
+    throw new Error(`Failed to delete template: ${error.message}`);
+  }
+}
+
+export async function duplicateTemplate(
+  params: { userId: string; templateId: string },
+  client: Client = getSupabaseClient()
+): Promise<ReportTemplateRow> {
+  const existing = await getTemplateById(params.templateId, client);
+  if (!existing || existing.user_id !== params.userId) {
+    throw new Error('Template not found');
+  }
+
+  const newTemplatePayload = { user_id: params.userId, title: `Copy of ${existing.title}` };
+  const { data: inserted, error: insertError } = await client.from(REPORT_TEMPLATES_TABLE).insert(newTemplatePayload).select('*').single();
+  if (insertError || !inserted) {
+    console.error({ scope: 'report_templates', event: 'duplicate_insert_error', params, error: insertError });
+    throw new Error(`Failed to duplicate template: ${insertError?.message}`);
+  }
+  const newTemplate = inserted as ReportTemplateRow;
+
+  const { data: items, error: itemsError } = await client
+    .from(REPORT_ITEMS_TABLE)
+    .select('*')
+    .eq('template_id', params.templateId)
+    .order('sort_order', { ascending: true });
+  if (itemsError) {
+    console.error({ scope: 'report_templates', event: 'duplicate_items_error', params, error: itemsError });
+    throw new Error(`Failed to copy template items: ${itemsError.message}`);
+  }
+
+  const itemsPayload = (items as ReportItemRow[]).map((item) => ({
+    template_id: newTemplate.id,
+    label: item.label,
+    item_key: item.item_key,
+    item_type: item.item_type,
+    category: item.category,
+    xp_mode: item.xp_mode,
+    xp_value: item.xp_value,
+    options_json: item.options_json ?? {},
+    sort_order: item.sort_order,
+    enabled: item.enabled
+  }));
+
+  if (itemsPayload.length > 0) {
+    const { error: insertItemsError } = await client.from(REPORT_ITEMS_TABLE).insert(itemsPayload);
+    if (insertItemsError) {
+      console.error({ scope: 'report_templates', event: 'duplicate_items_insert_error', params, error: insertItemsError });
+    }
+  }
+
+  return newTemplate;
 }
