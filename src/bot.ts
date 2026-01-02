@@ -31,7 +31,10 @@ import {
   saveValue,
   listRecentReportDays,
   getReportDayById,
-  lockReportDay
+  lockReportDay,
+  unlockReportDay,
+  autoLockIfCompleted,
+  getReportDayByDate
 } from './services/dailyReport';
 import { consumeCallbackToken } from './services/callbackTokens';
 import { getRecentTelemetryEvents, isTelemetryEnabled, logTelemetryEvent } from './services/telemetry';
@@ -66,7 +69,7 @@ const clearReportContextCache = (reportDayId?: string): void => {
     return;
   }
   for (const [key, value] of reportContextCache.entries()) {
-    if (value.reportDay.id === reportDayId) {
+    if (value.reportDay.id === reportDayId || key === reportDayId) {
       reportContextCache.delete(key);
     }
   }
@@ -241,32 +244,91 @@ const buildDailyReportKeyboard = async (ctx: Context, reportDayId: string | null
     .text(backBtn.text, backBtn.callback_data);
 };
 
-const ensureReportContext = async (ctx: Context): Promise<{ userId: string; reportDay: ReportDayRow; items: ReportItemRow[] }> => {
+const ensureReportContext = async (
+  ctx: Context,
+  opts?: { reportDayId?: string; localDate?: string; createIfMissing?: boolean }
+): Promise<{ userId: string; reportDay: ReportDayRow; items: ReportItemRow[] }> => {
   const { user, settings } = await ensureUserAndSettings(ctx);
-  const local = formatLocalTime(user.timezone ?? config.defaultTimezone);
-  const activeTemplateId = (settings.settings_json as { active_template_id?: string } | null)?.active_template_id;
-  const cacheKey = `${user.id}:${local.date}:${activeTemplateId ?? 'default'}`;
-  const cached = reportContextCache.get(cacheKey);
-  if (cached) {
-    return { userId: user.id, ...cached };
+
+  if (opts?.reportDayId) {
+    const cachedById = reportContextCache.get(opts.reportDayId);
+    if (cachedById) return { userId: user.id, ...cachedById };
+    const reportDay = await getReportDayById(opts.reportDayId);
+    if (!reportDay || reportDay.user_id !== user.id) {
+      throw new Error('Report day not found');
+    }
+    const template = (await getTemplateById(reportDay.template_id)) ?? (await ensureDefaultTemplate(user.id));
+    const items = await listItems(template.id);
+    const context = { reportDay, items };
+    reportContextCache.set(reportDay.id, context);
+    return { userId: user.id, ...context };
   }
 
+  const local = formatLocalTime(user.timezone ?? config.defaultTimezone);
+  const targetDate = opts?.localDate ?? local.date;
+  const activeTemplateId = (settings.settings_json as { active_template_id?: string } | null)?.active_template_id;
   const defaultTemplate = await ensureDefaultTemplate(user.id);
 
   let template = activeTemplateId ? await getTemplateById(activeTemplateId) : null;
   if (!template || template.user_id !== user.id) {
     template = defaultTemplate;
   }
+  const cacheKey = `${user.id}:${targetDate}:${template.id}`;
+  const cached = reportContextCache.get(cacheKey);
+  if (cached) return { userId: user.id, ...cached };
+
   const items = template.id === defaultTemplate.id ? await ensureDefaultItems(user.id) : await listItems(template.id);
-  const reportDay = await getOrCreateReportDay({ userId: user.id, templateId: template.id, localDate: local.date });
-  reportContextCache.set(cacheKey, { reportDay, items });
-  return { userId: user.id, reportDay, items };
+  let reportDay: ReportDayRow | null;
+  if (opts?.createIfMissing === false) {
+    reportDay = await getReportDayByDate({ userId: user.id, templateId: template.id, localDate: targetDate });
+    if (!reportDay) throw new Error('Report day not found');
+  } else {
+    reportDay = await getOrCreateReportDay({ userId: user.id, templateId: template.id, localDate: targetDate });
+  }
+
+  const context = { reportDay, items };
+  reportContextCache.set(cacheKey, context);
+  reportContextCache.set(reportDay.id, context);
+  return { userId: user.id, ...context };
+};
+
+const shiftLocalDate = (date: string, deltaDays: number): string => {
+  const [y, m, d] = date.split('-').map((part) => Number(part));
+  const dt = new Date(Date.UTC(y, m - 1, d, 12, 0, 0));
+  dt.setUTCDate(dt.getUTCDate() + deltaDays);
+  return dt.toISOString().slice(0, 10);
+};
+
+const loadYesterdayStatus = async (
+  ctx: Context
+): Promise<{ hasOpen: boolean; reportDay: ReportDayRow | null; items: ReportItemRow[]; statuses: Awaited<ReturnType<typeof listCompletionStatus>> | null }> => {
+  const { user } = await ensureUserAndSettings(ctx);
+  const local = formatLocalTime(user.timezone ?? config.defaultTimezone);
+  const yesterdayDate = shiftLocalDate(local.date, -1);
+  const template = await ensureDefaultTemplate(user.id);
+  const reportDay = await getReportDayByDate({ userId: user.id, templateId: template.id, localDate: yesterdayDate });
+  if (!reportDay) return { hasOpen: false, reportDay: null, items: [], statuses: null };
+  const items = await ensureDefaultItems(user.id);
+  const statuses = await listCompletionStatus(reportDay.id, items);
+  const openCount = statuses.filter((s) => !s.filled && !s.skipped).length;
+  if (openCount === 0) {
+    if (!reportDay.locked) {
+      await autoLockIfCompleted({ reportDay, items });
+      clearReportContextCache(reportDay.id);
+    }
+    return { hasOpen: false, reportDay, items, statuses };
+  }
+  if (reportDay.locked) {
+    return { hasOpen: false, reportDay, items, statuses };
+  }
+  return { hasOpen: true, reportDay, items, statuses };
 };
 
 const renderDashboard = async (ctx: Context): Promise<void> => {
   try {
     const { user, settings } = await ensureUserAndSettings(ctx);
     const isNew = !settings.onboarded;
+    await loadYesterdayStatus(ctx);
     if (isNew) {
       try {
         await setUserOnboarded(user.id);
@@ -864,24 +926,23 @@ const renderNumericInput = async (ctx: Context, reportDayId: string, item: Repor
   });
 };
 
-const promptForItem = async (ctx: Context, reportDayId: string, item: ReportItemRow) => {
+const promptForItem = async (ctx: Context, reportDay: ReportDayRow, item: ReportItemRow) => {
   const telegramId = String(ctx.from?.id ?? '');
   const existing = userStates.get(telegramId) ?? {};
 
-  const { reportDay } = await ensureReportContext(ctx);
-  if (reportDay.id === reportDayId && reportDay.locked) {
-    await renderLockedDay(ctx, reportDay);
+  if (reportDay.locked) {
+    await renderLockedDayInfo(ctx, reportDay);
     return;
   }
 
   if (item.item_type === 'time_hhmm') {
-    const initialDraft = { reportDayId, itemId: item.id, hour12: 10, minuteTens: 0, minuteOnes: 0, ampm: 'PM' as const };
+    const initialDraft = { reportDayId: reportDay.id, itemId: item.id, hour12: 10, minuteTens: 0, minuteOnes: 0, ampm: 'PM' as const };
     userStates.set(telegramId, {
       ...existing,
-      awaitingValue: { reportDayId, itemId: item.id },
+      awaitingValue: { reportDayId: reportDay.id, itemId: item.id },
       timeDraft: initialDraft
     });
-    await renderTimePicker(ctx, reportDayId, item, initialDraft);
+    await renderTimePicker(ctx, reportDay.id, item, initialDraft);
     return;
   }
 
@@ -889,15 +950,15 @@ const promptForItem = async (ctx: Context, reportDayId: string, item: ReportItem
     const draftValue = 0;
     userStates.set(telegramId, {
       ...existing,
-      awaitingValue: { reportDayId, itemId: item.id },
-      numericDraft: { reportDayId, itemId: item.id, value: draftValue }
+      awaitingValue: { reportDayId: reportDay.id, itemId: item.id },
+      numericDraft: { reportDayId: reportDay.id, itemId: item.id, value: draftValue }
     });
-    await renderNumericInput(ctx, reportDayId, item, draftValue);
+    await renderNumericInput(ctx, reportDay.id, item, draftValue);
     return;
   }
 
-  userStates.set(telegramId, { ...existing, awaitingValue: { reportDayId, itemId: item.id } });
-  const skipBtn = await makeActionButton(ctx, { label: '⏭ Skip', action: 'dr.skip', data: { reportDayId, itemId: item.id } });
+  userStates.set(telegramId, { ...existing, awaitingValue: { reportDayId: reportDay.id, itemId: item.id } });
+  const skipBtn = await makeActionButton(ctx, { label: '⏭ Skip', action: 'dr.skip', data: { reportDayId: reportDay.id, itemId: item.id } });
   const cancelBtn = await makeActionButton(ctx, { label: '⬅️ Cancel', action: 'dr.menu' });
   const kb = new InlineKeyboard().text(skipBtn.text, skipBtn.callback_data).row().text(cancelBtn.text, cancelBtn.callback_data);
   await renderScreen(ctx, { titleKey: 'Daily Report', bodyLines: [`Set value for: ${item.label}`, 'Send the value as text.'], inlineKeyboard: kb });
@@ -906,7 +967,7 @@ const promptForItem = async (ctx: Context, reportDayId: string, item: ReportItem
 const renderNextItem = async (ctx: Context): Promise<void> => {
   const { reportDay, items } = await ensureReportContext(ctx);
   if (reportDay.locked) {
-    await renderLockedDay(ctx, reportDay);
+    await renderLockedDayInfo(ctx, reportDay);
     return;
   }
   const statuses = await listCompletionStatus(reportDay.id, items);
@@ -916,7 +977,7 @@ const renderNextItem = async (ctx: Context): Promise<void> => {
     await renderScreen(ctx, { titleKey: t('screens.daily_report.title'), bodyLines: [t('screens.daily_report.all_done')], inlineKeyboard: kb });
     return;
   }
-  await promptForItem(ctx, reportDay.id, next.item);
+  await promptForItem(ctx, reportDay, next.item);
 };
 
 const renderDailyReportRoot = async (ctx: Context): Promise<void> => {
@@ -926,6 +987,7 @@ const renderDailyReportRoot = async (ctx: Context): Promise<void> => {
   const total = statuses.length;
   const template = (await getTemplateById(reportDay.template_id)) ?? (await ensureDefaultTemplate(reportDay.user_id));
   const templateName = template.title ?? 'Default Template';
+  const yesterdayStatus = await loadYesterdayStatus(ctx);
 
   const bodyLines = [
     t('screens.daily_report.root_header', { date: reportDay.local_date }),
@@ -933,31 +995,212 @@ const renderDailyReportRoot = async (ctx: Context): Promise<void> => {
     t('screens.daily_report.completion_line', { completed, total }),
     ''
   ];
+  if (reportDay.locked) {
+    bodyLines.push(t('screens.daily_report.today_locked_flag'), '');
+  }
 
   const statusBtn = await makeActionButton(ctx, { label: t('buttons.dr_today_status'), action: 'dr.status' });
-  const nextBtn = await makeActionButton(ctx, { label: t('buttons.dr_fill_next'), action: 'dr.next' });
-  const pickBtn = await makeActionButton(ctx, { label: t('buttons.dr_fill_specific'), action: 'dr.pick_item' });
   const templatesBtn = await makeActionButton(ctx, { label: t('buttons.dr_templates'), action: 'dr.templates' });
   const historyBtn = await makeActionButton(ctx, { label: t('buttons.dr_history'), action: 'dr.history' });
-  const lockBtn = await makeActionButton(ctx, { label: t('buttons.dr_lock'), action: 'dr.lock' });
   const backBtn = await makeActionButton(ctx, { label: t('buttons.back'), action: 'dr.back' });
+  const kb = new InlineKeyboard();
+
+  kb.text(statusBtn.text, statusBtn.callback_data).row();
+
+  if (!reportDay.locked) {
+    const nextBtn = await makeActionButton(ctx, { label: t('buttons.dr_fill_next'), action: 'dr.next' });
+    const pickBtn = await makeActionButton(ctx, { label: t('buttons.dr_fill_specific'), action: 'dr.pick_item' });
+    kb.text(nextBtn.text, nextBtn.callback_data).row();
+    kb.text(pickBtn.text, pickBtn.callback_data).row();
+  }
+
+  kb.text(templatesBtn.text, templatesBtn.callback_data).row();
+  kb.text(historyBtn.text, historyBtn.callback_data).row();
+
+  if (yesterdayStatus.hasOpen) {
+    const catchupBtn = await makeActionButton(ctx, { label: t('buttons.dr_yesterday_catchup'), action: 'dr.yesterday_menu' });
+    kb.text(catchupBtn.text, catchupBtn.callback_data).row();
+  }
+
+  if (!reportDay.locked) {
+    const lockBtn = await makeActionButton(ctx, { label: t('buttons.dr_lock'), action: 'dr.lock' });
+    kb.text(lockBtn.text, lockBtn.callback_data).row();
+  } else {
+    const unlockBtn = await makeActionButton(ctx, { label: t('buttons.dr_unlock'), action: 'dr.unlock' });
+    kb.text(unlockBtn.text, unlockBtn.callback_data).row();
+  }
+
+  kb.text(backBtn.text, backBtn.callback_data);
+
+  await renderScreen(ctx, { titleKey: t('screens.daily_report.title'), bodyLines, inlineKeyboard: kb });
+};
+
+const renderTemplatesScreen = async (ctx: Context): Promise<void> => {
+  const { user, settings } = await ensureUserAndSettings(ctx);
+  await ensureDefaultTemplate(user.id);
+  const templates = await listUserTemplates(user.id);
+  const activeTemplateId = (settings.settings_json as { active_template_id?: string } | null)?.active_template_id ?? templates[0]?.id ?? null;
+
+  const lines: string[] = [t('screens.daily_report.templates_title'), ''];
+  if (!templates.length) {
+    lines.push('No templates found.');
+  } else {
+    templates.forEach((tpl) => {
+      const prefix = tpl.id === activeTemplateId ? '⭐' : '•';
+      lines.push(`${prefix} ${tpl.title} (${tpl.itemCount} items)`);
+    });
+  }
+
+  const kb = new InlineKeyboard();
+  for (const tpl of templates) {
+    const setActiveBtn = await makeActionButton(ctx, { label: 'Set Active', action: 'dr.template_set_active', data: { templateId: tpl.id } });
+    const detailsBtn = await makeActionButton(ctx, { label: 'Details', action: 'dr.template_details', data: { templateId: tpl.id } });
+    kb.text(setActiveBtn.text, setActiveBtn.callback_data).text(detailsBtn.text, detailsBtn.callback_data).row();
+  }
+
+  const newBtn = await makeActionButton(ctx, { label: '➕ New Template', action: 'dr.template_new' });
+  const backBtn = await makeActionButton(ctx, { label: '⬅️ Back', action: 'dr.menu' });
+  kb.text(newBtn.text, newBtn.callback_data).row().text(backBtn.text, backBtn.callback_data);
+
+  await renderScreen(ctx, {
+    titleKey: t('screens.daily_report.title'),
+    bodyLines: lines,
+    inlineKeyboard: kb
+  });
+};
+
+const renderTemplateDetails = async (ctx: Context, templateId: string): Promise<void> => {
+  const { user } = await ensureUserAndSettings(ctx);
+  const template = await getTemplateById(templateId);
+  if (!template || template.user_id !== user.id) {
+    await renderTemplatesScreen(ctx);
+    return;
+  }
+  const items = await listItems(template.id);
+  const lines = [template.title, `${items.length} items`];
+  const preview = items.slice(0, 5);
+  if (preview.length) {
+    lines.push('', ...preview.map((i) => `• ${i.label}`));
+  }
+
+  const duplicateBtn = await makeActionButton(ctx, { label: '✏️ Duplicate', action: 'dr.template_duplicate', data: { templateId } });
+  const deleteBtn = await makeActionButton(ctx, { label: '🗑 Delete', action: 'dr.template_delete_confirm', data: { templateId } });
+  const backBtn = await makeActionButton(ctx, { label: '⬅️ Back', action: 'dr.templates' });
+
+  const kb = new InlineKeyboard().text(duplicateBtn.text, duplicateBtn.callback_data).row().text(deleteBtn.text, deleteBtn.callback_data).row().text(backBtn.text, backBtn.callback_data);
+
+  await renderScreen(ctx, {
+    titleKey: t('screens.daily_report.title'),
+    bodyLines: lines,
+    inlineKeyboard: kb
+  });
+};
+
+const renderHistory = async (ctx: Context, range: '7d' | '30d' = '7d'): Promise<void> => {
+  const { user } = await ensureUserAndSettings(ctx);
+  const days = await listRecentReportDays({ userId: user.id, range });
+
+  const lines: string[] = [t('screens.daily_report.history_title'), t('screens.daily_report.history_range', { range: range === '7d' ? '7 days' : '30 days' }), ''];
+  if (!days.length) {
+    lines.push('No reports found in this range.');
+  } else {
+    days.forEach((entry) => {
+      let icon = '⚠️';
+      if (entry.total > 0 && entry.completed === entry.total) icon = '✅';
+      else if (entry.completed === 0) icon = '⬜️';
+      lines.push(`${icon} ${entry.day.local_date} — ${entry.completed}/${entry.total}`);
+    });
+  }
+
+  const kb = new InlineKeyboard();
+  const last7 = await makeActionButton(ctx, { label: 'Last 7 days', action: 'dr.history', data: { range: '7d' as const } });
+  const last30 = await makeActionButton(ctx, { label: 'Last 30 days', action: 'dr.history', data: { range: '30d' as const } });
+  kb.text(last7.text, last7.callback_data).text(last30.text, last30.callback_data).row();
+
+  for (const entry of days) {
+    const labelIcon = entry.total > 0 && entry.completed === entry.total ? '✅' : entry.completed === 0 ? '⬜️' : '⚠️';
+    const btn = await makeActionButton(ctx, {
+      label: `${labelIcon} ${entry.day.local_date} — ${entry.completed}/${entry.total}`,
+      action: 'dr.history_day',
+      data: { reportDayId: entry.day.id, range }
+    });
+    kb.text(btn.text, btn.callback_data).row();
+  }
+
+  const backBtn = await makeActionButton(ctx, { label: '⬅️ Back', action: 'dr.menu' });
+  kb.text(backBtn.text, backBtn.callback_data);
+
+  await renderScreen(ctx, {
+    titleKey: t('screens.daily_report.title'),
+    bodyLines: lines,
+    inlineKeyboard: kb
+  });
+};
+
+const renderHistoryDay = async (ctx: Context, reportDayId: string, range: '7d' | '30d' = '7d'): Promise<void> => {
+  const { user } = await ensureUserAndSettings(ctx);
+  const reportDay = await getReportDayById(reportDayId);
+  if (!reportDay || reportDay.user_id !== user.id) {
+    await renderHistory(ctx, range);
+    return;
+  }
+  const items = await listItems(reportDay.template_id);
+  const statuses = await listCompletionStatus(reportDay.id, items);
+  const completed = statuses.filter((s) => s.filled).length;
+  const lines: string[] = [reportDay.local_date, `Completion: ${completed}/${statuses.length}`, ''];
+  statuses.forEach((status) => {
+    const icon = status.filled ? '✅' : status.skipped ? '⏭' : '⬜️';
+    lines.push(`${icon} ${status.item.label}`);
+  });
+
+  const exportBtn = await makeActionButton(ctx, { label: '📤 Export (coming soon)', action: 'noop' });
+  const backHistoryBtn = await makeActionButton(ctx, { label: '⬅️ Back to history', action: 'dr.history', data: { range } });
+  const backBtn = await makeActionButton(ctx, { label: '⬅️ Back', action: 'dr.menu' });
 
   const kb = new InlineKeyboard()
-    .text(statusBtn.text, statusBtn.callback_data)
+    .text(exportBtn.text, exportBtn.callback_data)
     .row()
-    .text(nextBtn.text, nextBtn.callback_data)
-    .row()
-    .text(pickBtn.text, pickBtn.callback_data)
-    .row()
-    .text(templatesBtn.text, templatesBtn.callback_data)
-    .row()
-    .text(historyBtn.text, historyBtn.callback_data)
-    .row()
-    .text(lockBtn.text, lockBtn.callback_data)
+    .text(backHistoryBtn.text, backHistoryBtn.callback_data)
     .row()
     .text(backBtn.text, backBtn.callback_data);
 
-  await renderScreen(ctx, { titleKey: t('screens.daily_report.title'), bodyLines, inlineKeyboard: kb });
+  await renderScreen(ctx, {
+    titleKey: t('screens.daily_report.title'),
+    bodyLines: lines,
+    inlineKeyboard: kb
+  });
+};
+
+const renderYesterdayMenu = async (ctx: Context): Promise<void> => {
+  const status = await loadYesterdayStatus(ctx);
+  if (!status.reportDay || !status.statuses || !status.hasOpen || status.reportDay.locked) {
+    await renderDailyReportRoot(ctx);
+    return;
+  }
+  const completed = status.statuses.filter((s) => s.filled).length;
+  const skipped = status.statuses.filter((s) => s.skipped).length;
+  const open = status.statuses.filter((s) => !s.filled && !s.skipped).length;
+
+  const lines = [
+    t('screens.daily_report.yesterday_title', { date: status.reportDay.local_date }),
+    `Completed: ${completed}`,
+    `Skipped: ${skipped}`,
+    `Open: ${open}`,
+    '',
+    'You can fill remaining items or skip them all to close yesterday.'
+  ];
+
+  const fillBtn = await makeActionButton(ctx, { label: 'Fill remaining items', action: 'dr.yesterday_next' });
+  const skipBtn = await makeActionButton(ctx, { label: 'Skip remaining & close yesterday', action: 'dr.yesterday_skip_all' });
+  const backBtn = await makeActionButton(ctx, { label: '⬅️ Back', action: 'dr.back' });
+
+  const kb = new InlineKeyboard().text(fillBtn.text, fillBtn.callback_data).row().text(skipBtn.text, skipBtn.callback_data).row().text(backBtn.text, backBtn.callback_data);
+
+  await renderScreen(ctx, {
+    titleKey: t('screens.daily_report.title'),
+    bodyLines: lines,
+    inlineKeyboard: kb
+  });
 };
 
 const renderTemplatesScreen = async (ctx: Context): Promise<void> => {
@@ -1143,15 +1386,16 @@ const renderDailyStatusWithFilter = async (ctx: Context, filter: 'all' | 'not_fi
   });
 };
 
-const renderLockedDay = async (ctx: Context, reportDay: ReportDayRow): Promise<void> => {
+const renderLockedDayInfo = async (ctx: Context, reportDay: ReportDayRow): Promise<void> => {
   const telegramId = String(ctx.from?.id ?? '');
   if (telegramId) {
     userStates.delete(telegramId);
   }
-  const kb = await buildDailyReportKeyboard(ctx, reportDay.id);
+  const backBtn = await makeActionButton(ctx, { label: t('buttons.back'), action: 'dr.back' });
+  const kb = new InlineKeyboard().text(backBtn.text, backBtn.callback_data);
   await renderScreen(ctx, {
     titleKey: t('screens.daily_report.title'),
-    bodyLines: [t('screens.daily_report.already_locked'), 'This day is locked. You can no longer edit values for this date.', 'این روز قفل شده و دیگر قابل ویرایش نیست.'],
+    bodyLines: [t('screens.daily_report.locked_info')],
     inlineKeyboard: kb
   });
 };
@@ -1163,9 +1407,17 @@ const handleSaveValue = async (ctx: Context, text: string): Promise<void> => {
   if (!state?.awaitingValue) return;
 
   const { reportDayId, itemId } = state.awaitingValue;
-  const { reportDay, items } = await ensureReportContext(ctx);
+  let context;
+  try {
+    context = await ensureReportContext(ctx, { reportDayId });
+  } catch {
+    userStates.delete(userId);
+    await renderDailyReportRoot(ctx);
+    return;
+  }
+  const { reportDay, items } = context;
   if (reportDay.locked) {
-    await renderLockedDay(ctx, reportDay);
+    await renderLockedDayInfo(ctx, reportDay);
     return;
   }
 
@@ -1649,7 +1901,7 @@ bot.callbackQuery(/^[A-Za-z0-9_-]{8,12}$/, async (ctx) => {
         }
         const { reportDay, items } = await ensureReportContext(ctx);
         if (reportDay.locked) {
-          await renderLockedDay(ctx, reportDay);
+          await renderLockedDayInfo(ctx, reportDay);
           return;
         }
         const item = items.find((i) => i.id === itemId);
@@ -1657,7 +1909,7 @@ bot.callbackQuery(/^[A-Za-z0-9_-]{8,12}$/, async (ctx) => {
           await ctx.answerCallbackQuery({ text: 'Item not found', show_alert: true });
           return;
         }
-        await promptForItem(ctx, reportDay.id, item);
+        await promptForItem(ctx, reportDay, item);
         break;
       }
 
@@ -1668,9 +1920,9 @@ bot.callbackQuery(/^[A-Za-z0-9_-]{8,12}$/, async (ctx) => {
         const itemId = data?.itemId;
         const hour12 = data?.hour12;
         if (!reportDayId || !itemId || !hour12) return;
-        const { reportDay } = await ensureReportContext(ctx);
+        const { reportDay } = await ensureReportContext(ctx, { reportDayId });
         if (reportDay.id === reportDayId && reportDay.locked) {
-          await renderLockedDay(ctx, reportDay);
+          await renderLockedDayInfo(ctx, reportDay);
           return;
         }
         const telegramId = String(ctx.from?.id ?? '');
@@ -1682,7 +1934,7 @@ bot.callbackQuery(/^[A-Za-z0-9_-]{8,12}$/, async (ctx) => {
         }
         const nextDraft = { ...draft, hour12 };
         userStates.set(telegramId, { ...state, timeDraft: nextDraft });
-        const { items } = await ensureReportContext(ctx);
+        const { items } = await ensureReportContext(ctx, { reportDayId });
         const item = items.find((i) => i.id === itemId);
         if (!item) {
           await renderDailyReportRoot(ctx);
@@ -1698,9 +1950,9 @@ bot.callbackQuery(/^[A-Za-z0-9_-]{8,12}$/, async (ctx) => {
         const itemId = data?.itemId;
         const minuteTens = data?.minuteTens;
         if (!reportDayId || !itemId || minuteTens === undefined) return;
-        const { reportDay } = await ensureReportContext(ctx);
+        const { reportDay } = await ensureReportContext(ctx, { reportDayId });
         if (reportDay.id === reportDayId && reportDay.locked) {
-          await renderLockedDay(ctx, reportDay);
+          await renderLockedDayInfo(ctx, reportDay);
           return;
         }
         const telegramId = String(ctx.from?.id ?? '');
@@ -1712,7 +1964,7 @@ bot.callbackQuery(/^[A-Za-z0-9_-]{8,12}$/, async (ctx) => {
         }
         const nextDraft = { ...draft, minuteTens };
         userStates.set(telegramId, { ...state, timeDraft: nextDraft });
-        const { items } = await ensureReportContext(ctx);
+        const { items } = await ensureReportContext(ctx, { reportDayId });
         const item = items.find((i) => i.id === itemId);
         if (!item) {
           await renderDailyReportRoot(ctx);
@@ -1728,9 +1980,9 @@ bot.callbackQuery(/^[A-Za-z0-9_-]{8,12}$/, async (ctx) => {
         const itemId = data?.itemId;
         const minuteOnes = data?.minuteOnes;
         if (!reportDayId || !itemId || minuteOnes === undefined) return;
-        const { reportDay } = await ensureReportContext(ctx);
+        const { reportDay } = await ensureReportContext(ctx, { reportDayId });
         if (reportDay.id === reportDayId && reportDay.locked) {
-          await renderLockedDay(ctx, reportDay);
+          await renderLockedDayInfo(ctx, reportDay);
           return;
         }
         const telegramId = String(ctx.from?.id ?? '');
@@ -1742,7 +1994,7 @@ bot.callbackQuery(/^[A-Za-z0-9_-]{8,12}$/, async (ctx) => {
         }
         const nextDraft = { ...draft, minuteOnes };
         userStates.set(telegramId, { ...state, timeDraft: nextDraft });
-        const { items } = await ensureReportContext(ctx);
+        const { items } = await ensureReportContext(ctx, { reportDayId });
         const item = items.find((i) => i.id === itemId);
         if (!item) {
           await renderDailyReportRoot(ctx);
@@ -1758,9 +2010,9 @@ bot.callbackQuery(/^[A-Za-z0-9_-]{8,12}$/, async (ctx) => {
         const itemId = data?.itemId;
         const ampm = data?.ampm;
         if (!reportDayId || !itemId || !ampm) return;
-        const { reportDay } = await ensureReportContext(ctx);
+        const { reportDay } = await ensureReportContext(ctx, { reportDayId });
         if (reportDay.id === reportDayId && reportDay.locked) {
-          await renderLockedDay(ctx, reportDay);
+          await renderLockedDayInfo(ctx, reportDay);
           return;
         }
         const telegramId = String(ctx.from?.id ?? '');
@@ -1772,7 +2024,7 @@ bot.callbackQuery(/^[A-Za-z0-9_-]{8,12}$/, async (ctx) => {
         }
         const nextDraft = { ...draft, ampm };
         userStates.set(telegramId, { ...state, timeDraft: nextDraft });
-        const { items } = await ensureReportContext(ctx);
+        const { items } = await ensureReportContext(ctx, { reportDayId });
         const item = items.find((i) => i.id === itemId);
         if (!item) {
           await renderDailyReportRoot(ctx);
@@ -1787,9 +2039,9 @@ bot.callbackQuery(/^[A-Za-z0-9_-]{8,12}$/, async (ctx) => {
         const reportDayId = data?.reportDayId;
         const itemId = data?.itemId;
         if (!reportDayId || !itemId) return;
-        const { reportDay } = await ensureReportContext(ctx);
+        const { reportDay } = await ensureReportContext(ctx, { reportDayId });
         if (reportDay.id === reportDayId && reportDay.locked) {
-          await renderLockedDay(ctx, reportDay);
+          await renderLockedDayInfo(ctx, reportDay);
           return;
         }
         const telegramId = String(ctx.from?.id ?? '');
@@ -1819,9 +2071,9 @@ bot.callbackQuery(/^[A-Za-z0-9_-]{8,12}$/, async (ctx) => {
           await renderDailyStatusWithFilter(ctx, 'all');
           return;
         }
-        const { reportDay } = await ensureReportContext(ctx);
+        const { reportDay } = await ensureReportContext(ctx, { reportDayId });
         if (reportDay.id === reportDayId && reportDay.locked) {
-          await renderLockedDay(ctx, reportDay);
+          await renderLockedDayInfo(ctx, reportDay);
           return;
         }
         const telegramId = String(ctx.from?.id ?? '');
@@ -1838,7 +2090,7 @@ bot.callbackQuery(/^[A-Za-z0-9_-]{8,12}$/, async (ctx) => {
           numericDraft: { reportDayId, itemId, value: next }
         });
 
-        const { items } = await ensureReportContext(ctx);
+        const { items } = await ensureReportContext(ctx, { reportDayId });
         const item = items.find((i) => i.id === itemId);
         if (!item) {
           await renderDailyStatusWithFilter(ctx, 'all');
@@ -1857,9 +2109,9 @@ bot.callbackQuery(/^[A-Za-z0-9_-]{8,12}$/, async (ctx) => {
           await renderDailyStatusWithFilter(ctx, 'all');
           return;
         }
-        const { reportDay } = await ensureReportContext(ctx);
+        const { reportDay } = await ensureReportContext(ctx, { reportDayId });
         if (reportDay.id === reportDayId && reportDay.locked) {
-          await renderLockedDay(ctx, reportDay);
+          await renderLockedDayInfo(ctx, reportDay);
           return;
         }
         const telegramId = String(ctx.from?.id ?? '');
@@ -1999,6 +2251,50 @@ bot.callbackQuery(/^[A-Za-z0-9_-]{8,12}$/, async (ctx) => {
         break;
       }
 
+      case 'dr.yesterday_menu': {
+        await renderYesterdayMenu(ctx);
+        break;
+      }
+
+      case 'dr.yesterday_next': {
+        const status = await loadYesterdayStatus(ctx);
+        if (!status.reportDay || !status.statuses || !status.hasOpen || status.reportDay.locked) {
+          await renderDailyReportRoot(ctx);
+          return;
+        }
+        const next = status.statuses.find((s) => !s.filled && !s.skipped);
+        if (!next) {
+          await autoLockIfCompleted({ reportDay: status.reportDay, items: status.items });
+          clearReportContextCache(status.reportDay.id);
+          await renderDailyReportRoot(ctx);
+          return;
+        }
+        await promptForItem(ctx, status.reportDay, next.item);
+        break;
+      }
+
+      case 'dr.yesterday_skip_all': {
+        const status = await loadYesterdayStatus(ctx);
+        if (!status.reportDay || !status.statuses || status.reportDay.locked || !status.hasOpen) {
+          await renderDailyReportRoot(ctx);
+          return;
+        }
+        for (const s of status.statuses) {
+          if (!s.filled && !s.skipped) {
+            await saveValue({ reportDayId: status.reportDay.id, item: s.item, valueJson: { skipped: true }, userId: status.reportDay.user_id });
+          }
+        }
+        await autoLockIfCompleted({ reportDay: status.reportDay, items: status.items });
+        clearReportContextCache(status.reportDay.id);
+        try {
+          await ctx.answerCallbackQuery({ text: t('screens.daily_report.yesterday_closed'), show_alert: true });
+        } catch {
+          // ignore
+        }
+        await renderDailyReportRoot(ctx);
+        break;
+      }
+
       case 'dr.lock': {
         const { reportDay } = await ensureReportContext(ctx);
         if (reportDay.locked) {
@@ -2034,15 +2330,10 @@ bot.callbackQuery(/^[A-Za-z0-9_-]{8,12}$/, async (ctx) => {
           return;
         }
         if (reportDay.locked) {
-          const kb = await buildDailyReportKeyboard(ctx, reportDay.id);
-          await renderScreen(ctx, {
-            titleKey: t('screens.daily_report.title'),
-            bodyLines: [t('screens.daily_report.already_locked')],
-            inlineKeyboard: kb
-          });
+          await renderLockedDayInfo(ctx, reportDay);
           return;
         }
-        const lockedDay = await lockReportDay(reportDayId);
+        const lockedDay = await lockReportDay({ reportDayId, userId: user.id });
         clearReportContextCache(reportDayId);
         const kb = await buildDailyReportKeyboard(ctx, lockedDay.id);
         await renderScreen(ctx, {
@@ -2053,6 +2344,24 @@ bot.callbackQuery(/^[A-Za-z0-9_-]{8,12}$/, async (ctx) => {
         break;
       }
 
+      case 'dr.unlock': {
+        const { user } = await ensureUserAndSettings(ctx);
+        const { reportDay } = await ensureReportContext(ctx);
+        if (!reportDay.locked) {
+          await renderDailyReportRoot(ctx);
+          return;
+        }
+        await unlockReportDay({ reportDayId: reportDay.id, userId: user.id });
+        clearReportContextCache(reportDay.id);
+        try {
+          await ctx.answerCallbackQuery({ text: t('screens.daily_report.unlocked_info'), show_alert: false });
+        } catch {
+          // ignore
+        }
+        await renderDailyReportRoot(ctx);
+        break;
+      }
+
       case 'dr.skip': {
         const reportDayId = (payload as { data?: { reportDayId?: string } }).data?.reportDayId;
         const itemId = (payload as { data?: { itemId?: string } }).data?.itemId;
@@ -2060,9 +2369,9 @@ bot.callbackQuery(/^[A-Za-z0-9_-]{8,12}$/, async (ctx) => {
           await renderDailyStatusWithFilter(ctx, 'all');
           return;
         }
-        const { reportDay, items } = await ensureReportContext(ctx);
+        const { reportDay, items } = await ensureReportContext(ctx, { reportDayId });
         if (reportDay.id === reportDayId && reportDay.locked) {
-          await renderLockedDay(ctx, reportDay);
+          await renderLockedDayInfo(ctx, reportDay);
           return;
         }
         if (reportDay.id !== reportDayId) {

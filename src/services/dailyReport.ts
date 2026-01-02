@@ -195,14 +195,71 @@ export async function getReportDayById(reportDayId: string, client: Client = get
   return (data as ReportDayRow | null) ?? null;
 }
 
-export async function lockReportDay(reportDayId: string, client: Client = getSupabaseClient()): Promise<ReportDayRow> {
-  const { data, error } = await client.from(REPORT_DAYS_TABLE).update({ locked: true }).eq('id', reportDayId).select('*').maybeSingle();
+export async function lockReportDay(
+  params: { reportDayId: string; userId?: string; reason?: string },
+  client: Client = getSupabaseClient()
+): Promise<ReportDayRow> {
+  const query = client.from(REPORT_DAYS_TABLE).update({ locked: true }).eq('id', params.reportDayId);
+  if (params.userId) query.eq('user_id', params.userId);
+  const { data, error } = await query.select('*').maybeSingle();
   if (error) {
-    console.error({ scope: 'daily_report', event: 'lock_error', reportDayId, error });
+    console.error({ scope: 'daily_report', event: 'lock_error', reportDayId: params.reportDayId, error, reason: params.reason });
     throw new Error(`Failed to lock report day: ${error.message}`);
   }
   if (!data) {
     throw new Error('Report day not found');
   }
   return data as ReportDayRow;
+}
+
+export async function unlockReportDay(
+  params: { reportDayId: string; userId: string },
+  client: Client = getSupabaseClient()
+): Promise<ReportDayRow> {
+  const { data, error } = await client
+    .from(REPORT_DAYS_TABLE)
+    .update({ locked: false })
+    .eq('id', params.reportDayId)
+    .eq('user_id', params.userId)
+    .select('*')
+    .maybeSingle();
+  if (error) {
+    console.error({ scope: 'daily_report', event: 'unlock_error', params, error });
+    throw new Error(`Failed to unlock report day: ${error.message}`);
+  }
+  if (!data) throw new Error('Report day not found');
+  return data as ReportDayRow;
+}
+
+export async function getReportDayByDate(
+  params: { userId: string; templateId: string; localDate: string },
+  client: Client = getSupabaseClient()
+): Promise<ReportDayRow | null> {
+  const { data, error } = await client
+    .from(REPORT_DAYS_TABLE)
+    .select('*')
+    .eq('user_id', params.userId)
+    .eq('template_id', params.templateId)
+    .eq('local_date', params.localDate)
+    .maybeSingle();
+
+  if (error) {
+    console.error({ scope: 'daily_report', event: 'day_get_by_date_error', params, error });
+    throw new Error(`Failed to load report day: ${error.message}`);
+  }
+  return (data as ReportDayRow | null) ?? null;
+}
+
+export async function autoLockIfCompleted(
+  params: { reportDay: ReportDayRow; items: ReportItemRow[] },
+  client: Client = getSupabaseClient()
+): Promise<ReportDayRow> {
+  const { reportDay, items } = params;
+  if (reportDay.locked) return reportDay;
+  const statuses = await listCompletionStatus(reportDay.id, items, client);
+  const openCount = statuses.filter((s) => !s.filled && !s.skipped).length;
+  if (openCount === 0) {
+    return lockReportDay({ reportDayId: reportDay.id, userId: reportDay.user_id, reason: 'auto_midnight' }, client);
+  }
+  return reportDay;
 }

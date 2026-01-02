@@ -42,14 +42,19 @@
       "time_current": "Current time: {value}",
       "time_hint": "Use the buttons below to choose the hour, minutes, and AM/PM.",
       "time_save": "💾 Save time",
-      "lock_confirm_title": "Submit / Lock this day?",
+      "lock_confirm_title": "Lock this day?",
       "lock_confirm_body": "Locking will prevent further edits to today’s values.",
       "already_locked": "This day is locked. You can no longer edit values for this date.",
+      "locked_info": "This day is locked. You can no longer edit values for this date.",
       "lock_success": "Day locked. Entries can no longer be edited.",
+      "unlocked_info": "This day is now unlocked. You can edit values again.",
       "templates_title": "Daily Report Templates",
       "template_delete_confirm": "Delete template \"{title}\"?",
       "history_title": "Daily Report History",
-      "history_range": "Range: {range}"
+      "history_range": "Range: {range}",
+      "today_locked_flag": "Today is locked (read-only).",
+      "yesterday_title": "Yesterday's report ({date})",
+      "yesterday_closed": "Yesterday has been closed. Remaining items were skipped."
     }
   },
   "buttons": {
@@ -61,7 +66,9 @@
     "dr_fill_specific": "🧩 Fill Specific Item",
     "dr_templates": "🗂 Templates",
     "dr_history": "🕘 History",
-    "dr_lock": "✅ Submit / Lock",
+    "dr_lock": "🔒 Lock day",
+    "dr_unlock": "🔓 Unlock day",
+    "dr_yesterday_catchup": "Complete yesterday",
     "back": "⬅️ Back"
   },
   "errors": {
