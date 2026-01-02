@@ -32,7 +32,7 @@ export async function listCompletionStatus(
   reportDayId: string,
   items: ReportItemRow[],
   client: Client = getSupabaseClient()
-): Promise<{ item: ReportItemRow; filled: boolean; value?: ReportValueRow | null }[]> {
+): Promise<{ item: ReportItemRow; filled: boolean; skipped: boolean; value?: ReportValueRow | null }[]> {
   const { data, error } = await client.from(REPORT_VALUES_TABLE).select('*').eq('report_day_id', reportDayId);
 
   if (error) {
@@ -46,7 +46,9 @@ export async function listCompletionStatus(
 
   return items.map((item) => {
     const value = lookup.get(item.id) ?? null;
-    return { item, filled: Boolean(value && value.value_json !== null), value };
+    const skipped = Boolean(value?.value_json && (value.value_json as { skipped?: boolean }).skipped === true);
+    const filled = Boolean(value && !skipped && value.value_json !== null);
+    return { item, filled, skipped, value };
   });
 }
 
