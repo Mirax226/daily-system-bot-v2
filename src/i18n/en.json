@@ -1,6 +1,7 @@
 {
   "screens": {
     "dashboard": {
+      "title": "Dashboard",
       "greeting": "Hello!",
       "time": "Current time: {date} | {time}",
       "welcome_new": [
@@ -58,6 +59,13 @@
     }
   },
   "buttons": {
+    "nav_daily_report": "🧾 Daily Report",
+    "nav_reportcar": "📘 Reportcar",
+    "nav_tasks": "✅ Tasks / Routines",
+    "nav_reminders": "⏰ Reminders",
+    "nav_rewards": "🎁 Reward Center",
+    "nav_reports": "📊 Reports",
+    "nav_settings": "⚙️ Settings",
     "reload": "Reload",
     "back": "Back",
     "send_report": "Send report",

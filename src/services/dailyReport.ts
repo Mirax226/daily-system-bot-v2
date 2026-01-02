@@ -184,6 +184,26 @@ export async function listRecentReportDays(
   return result;
 }
 
+export async function listReportDaysByRange(
+  params: { userId: string; startLocalDate: string; endLocalDate: string },
+  client: Client = getSupabaseClient()
+): Promise<ReportDayRow[]> {
+  const { data, error } = await client
+    .from(REPORT_DAYS_TABLE)
+    .select('*')
+    .eq('user_id', params.userId)
+    .gte('local_date', params.startLocalDate)
+    .lte('local_date', params.endLocalDate)
+    .order('local_date', { ascending: false });
+
+  if (error) {
+    console.error({ scope: 'daily_report', event: 'days_range_error', params, error });
+    throw new Error(`Failed to list report days: ${error.message}`);
+  }
+
+  return (data as ReportDayRow[]) ?? [];
+}
+
 export async function getReportDayById(reportDayId: string, client: Client = getSupabaseClient()): Promise<ReportDayRow | null> {
   const { data, error } = await client.from(REPORT_DAYS_TABLE).select('*').eq('id', reportDayId).maybeSingle();
 
