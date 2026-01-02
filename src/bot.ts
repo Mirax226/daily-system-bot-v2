@@ -1513,116 +1513,58 @@ bot.callbackQuery(/^[A-Za-z0-9_-]{8,12}$/, async (ctx) => {
 
 bot.on('message:text', async (ctx: Context) => {
   if (!ctx.from || !ctx.message || typeof ctx.message.text !== 'string') return;
-  const text = ctx.message.text.trim();
-  const state = userStates.get(String(ctx.from.id));
 
-  if (state?.awaitingValue) {
+  const text = ctx.message.text.trim();
+  const stateKey = String(ctx.from.id);
+  const state = userStates.get(stateKey) ?? {};
+
+  // 1) Daily Report text input (existing behavior)
+  if (state.awaitingValue) {
     await handleSaveValue(ctx, text);
     return;
   }
 
-  if (state?.rewardEdit) {
-    const rewardEdit = state.rewardEdit;
-    const telegramId = String(ctx.from.id);
-    if (rewardEdit.step === 'title') {
-      rewardEdit.draft.title = text;
-      if (rewardEdit.mode === 'create') {
-        const newState: ReminderlessState = { ...state, rewardEdit: { ...rewardEdit, step: 'description' } };
-        userStates.set(telegramId, newState);
-        const cancelBtn = await makeActionButton(ctx, { label: '⬅️ Cancel', action: 'rewards.edit_root' });
-        await renderScreen(ctx, {
-          titleKey: 'Add Reward',
-          bodyLines: ['Send description as text (or "-" to skip).'],
-          inlineKeyboard: new InlineKeyboard().text(cancelBtn.text, cancelBtn.callback_data)
-        });
-      } else {
-        if (rewardEdit.rewardId) {
-          await updateReward({ rewardId: rewardEdit.rewardId, patch: { title: text } });
-          delete state.rewardEdit;
-          userStates.set(telegramId, state);
-          const updated = await getRewardById(rewardEdit.rewardId);
-          if (updated) await renderRewardEditMenu(ctx, updated);
-        }
-      }
-      return;
-    }
+  // 2) Settings: add routine (label step)
+  if (state.settingsRoutine?.step === 'label') {
+    const nextState: ReminderlessState = {
+      ...state,
+      settingsRoutine: { step: 'xp', label: text }
+    };
+    userStates.set(stateKey, nextState);
 
-    if (rewardEdit.step === 'description') {
-      const desc = text === '-' ? null : text;
-      if (rewardEdit.mode === 'create') {
-        const newState: ReminderlessState = { ...state, rewardEdit: { ...rewardEdit, draft: { ...rewardEdit.draft, description: desc }, step: 'xp' } };
-        userStates.set(telegramId, newState);
-        const cancelBtn = await makeActionButton(ctx, { label: '⬅️ Cancel', action: 'rewards.edit_root' });
-        await renderScreen(ctx, {
-          titleKey: 'Add Reward',
-          bodyLines: ['Send XP cost as an integer.'],
-          inlineKeyboard: new InlineKeyboard().text(cancelBtn.text, cancelBtn.callback_data)
-        });
-      } else {
-        if (rewardEdit.rewardId) {
-          await updateReward({ rewardId: rewardEdit.rewardId, patch: { description: desc } });
-          delete state.rewardEdit;
-          userStates.set(telegramId, state);
-          const updated = await getRewardById(rewardEdit.rewardId);
-          if (updated) await renderRewardEditMenu(ctx, updated);
-        }
-      }
-      return;
-    }
+    const backBtn = await makeActionButton(ctx, { label: '⬅️ Back', action: 'nav.settings' });
+    const kb = new InlineKeyboard().text(backBtn.text, backBtn.callback_data);
 
-    if (rewardEdit.step === 'xp') {
-      const xp = Number(text);
-      if (!Number.isInteger(xp) || xp <= 0) {
-        const cancelBtn = await makeActionButton(ctx, {
-          label: '⬅️ Cancel',
-          action: rewardEdit.mode === 'create' ? 'rewards.edit_root' : 'rewards.edit_open',
-          data: rewardEdit.rewardId ? { rewardId: rewardEdit.rewardId } : undefined
-        });
-        await renderScreen(ctx, {
-          titleKey: rewardEdit.mode === 'create' ? 'Add Reward' : 'Edit Reward',
-          bodyLines: ['Please send a positive integer for XP cost.'],
-          inlineKeyboard: new InlineKeyboard().text(cancelBtn.text, cancelBtn.callback_data)
-        });
-        return;
-      }
+    await renderScreen(ctx, {
+      titleKey: 'Settings',
+      bodyLines: ['Enter XP value for this routine (integer).'],
+      inlineKeyboard: kb
+    });
 
-      if (rewardEdit.mode === 'create') {
-        const { user } = await ensureUserAndSettings(ctx);
-        const draftTitle = rewardEdit.draft.title ?? 'Reward';
-        const draftDesc = rewardEdit.draft.description ?? null;
-        await createReward({ userId: user.id, title: draftTitle, description: draftDesc, xpCost: xp });
-        delete state.rewardEdit;
-        userStates.set(telegramId, state);
-        await renderRewardStoreEditorRoot(ctx);
-      } else if (rewardEdit.rewardId) {
-        await updateReward({ rewardId: rewardEdit.rewardId, patch: { xpCost: xp } });
-        delete state.rewardEdit;
-        userStates.set(telegramId, state);
-        const updated = await getRewardById(rewardEdit.rewardId);
-        if (updated) await renderRewardEditMenu(ctx, updated);
-      }
-      return;
-    }
-  }
-
-  if (state?.settingsRoutine?.step === 'label') {
-    userStates.set(String(ctx.from.id), { settingsRoutine: { step: 'xp', label: text } });
-    const back = await makeActionButton(ctx, { label: '⬅️ Back', action: 'nav.settings' });
-    await renderScreen(ctx, { titleKey: 'Settings', bodyLines: ['Enter XP value for this routine (integer).'], inlineKeyboard: new InlineKeyboard().text(back.text, back.callback_data) });
     return;
   }
 
-  if (state?.settingsRoutine?.step === 'xp') {
+  // 3) Settings: add routine (xp step)
+  if (state.settingsRoutine?.step === 'xp') {
     const xp = Number(text);
-    if (Number.isNaN(xp)) {
-      const back = await makeActionButton(ctx, { label: '⬅️ Back', action: 'nav.settings' });
-      await renderScreen(ctx, { titleKey: 'Settings', bodyLines: ['Please enter a number for XP value.'], inlineKeyboard: new InlineKeyboard().text(back.text, back.callback_data) });
+    if (!Number.isInteger(xp)) {
+      const backBtn = await makeActionButton(ctx, { label: '⬅️ Back', action: 'nav.settings' });
+      const kb = new InlineKeyboard().text(backBtn.text, backBtn.callback_data);
+
+      await renderScreen(ctx, {
+        titleKey: 'Settings',
+        bodyLines: ['Please enter a number for XP value.'],
+        inlineKeyboard: kb
+      });
+
       return;
     }
+
     const label = state.settingsRoutine.label ?? 'Routine';
     const { user } = await ensureUserAndSettings(ctx);
     const template = await ensureDefaultTemplate(user.id);
     await ensureDefaultItems(user.id);
+
     await upsertItem({
       templateId: template.id,
       label,
@@ -1634,10 +1576,192 @@ bot.on('message:text', async (ctx: Context) => {
       optionsJson: {},
       sortOrder: Date.now() % 100000
     });
-    userStates.delete(String(ctx.from.id));
+
+    const nextState: ReminderlessState = {
+      ...state,
+      settingsRoutine: undefined
+    };
+    userStates.set(stateKey, nextState);
+
     await renderSettingsRoot(ctx);
     return;
   }
+
+  // 4) Reward Store editing flow
+  if (state.rewardEdit) {
+    const rewardEdit = state.rewardEdit;
+
+    // TITLE step
+    if (rewardEdit.step === 'title') {
+      if (rewardEdit.mode === 'create') {
+        const nextState: ReminderlessState = {
+          ...state,
+          rewardEdit: {
+            ...rewardEdit,
+            step: 'description',
+            draft: {
+              ...rewardEdit.draft,
+              title: text
+            }
+          }
+        };
+        userStates.set(stateKey, nextState);
+
+        const cancelBtn = await makeActionButton(ctx, { label: '⬅️ Cancel', action: 'rewards.edit_root' });
+        const kb = new InlineKeyboard().text(cancelBtn.text, cancelBtn.callback_data);
+
+        await renderScreen(ctx, {
+          titleKey: 'Add Reward',
+          bodyLines: ['Send reward description as text (or "-" to skip).'],
+          inlineKeyboard: kb
+        });
+
+        return;
+      } else {
+        // mode === 'edit'
+        if (!rewardEdit.rewardId) {
+          // invalid state, clear and go back
+          const nextState: ReminderlessState = { ...state, rewardEdit: undefined };
+          userStates.set(stateKey, nextState);
+          await renderRewardStoreEditorRoot(ctx);
+          return;
+        }
+
+        const updated = await updateReward({
+          rewardId: rewardEdit.rewardId,
+          patch: { title: text }
+        });
+
+        const nextState: ReminderlessState = { ...state, rewardEdit: undefined };
+        userStates.set(stateKey, nextState);
+
+        await renderRewardEditMenu(ctx, updated);
+        return;
+      }
+    }
+
+    // DESCRIPTION step
+    if (rewardEdit.step === 'description') {
+      const desc = text === '-' ? null : text;
+
+      if (rewardEdit.mode === 'create') {
+        const nextState: ReminderlessState = {
+          ...state,
+          rewardEdit: {
+            ...rewardEdit,
+            step: 'xp',
+            draft: {
+              ...rewardEdit.draft,
+              description: desc
+            }
+          }
+        };
+        userStates.set(stateKey, nextState);
+
+        const cancelBtn = await makeActionButton(ctx, { label: '⬅️ Cancel', action: 'rewards.edit_root' });
+        const kb = new InlineKeyboard().text(cancelBtn.text, cancelBtn.callback_data);
+
+        await renderScreen(ctx, {
+          titleKey: 'Add Reward',
+          bodyLines: ['Send XP cost as a positive integer.'],
+          inlineKeyboard: kb
+        });
+
+        return;
+      } else {
+        // mode === 'edit'
+        if (!rewardEdit.rewardId) {
+          const nextState: ReminderlessState = { ...state, rewardEdit: undefined };
+          userStates.set(stateKey, nextState);
+          await renderRewardStoreEditorRoot(ctx);
+          return;
+        }
+
+        const updated = await updateReward({
+          rewardId: rewardEdit.rewardId,
+          patch: { description: desc }
+        });
+
+        const nextState: ReminderlessState = { ...state, rewardEdit: undefined };
+        userStates.set(stateKey, nextState);
+
+        await renderRewardEditMenu(ctx, updated);
+        return;
+      }
+    }
+
+    // XP step
+    if (rewardEdit.step === 'xp') {
+      const xp = Number(text);
+      if (!Number.isInteger(xp) || xp <= 0) {
+        const titleKey = rewardEdit.mode === 'create' ? 'Add Reward' : 'Edit Reward';
+        const cancelAction = rewardEdit.mode === 'create' ? 'rewards.edit_root' : 'rewards.edit_open';
+        const cancelData: any = rewardEdit.mode === 'create' ? {} : { rewardId: rewardEdit.rewardId };
+
+        const cancelBtn = await makeActionButton(ctx, {
+          label: '⬅️ Cancel',
+          action: cancelAction,
+          data: cancelData
+        });
+        const kb = new InlineKeyboard().text(cancelBtn.text, cancelBtn.callback_data);
+
+        await renderScreen(ctx, {
+          titleKey,
+          bodyLines: ['Please send a positive integer for XP cost.'],
+          inlineKeyboard: kb
+        });
+
+        return;
+      }
+
+      if (rewardEdit.mode === 'create') {
+        const { user } = await ensureUserAndSettings(ctx);
+        const title = rewardEdit.draft.title ?? 'Reward';
+        const description = rewardEdit.draft.description ?? null;
+
+        await createReward({
+          userId: user.id,
+          title,
+          description,
+          xpCost: xp
+        });
+
+        const nextState: ReminderlessState = { ...state, rewardEdit: undefined };
+        userStates.set(stateKey, nextState);
+
+        await renderRewardStoreEditorRoot(ctx);
+        return;
+      } else {
+        // mode === 'edit'
+        if (!rewardEdit.rewardId) {
+          const nextState: ReminderlessState = { ...state, rewardEdit: undefined };
+          userStates.set(stateKey, nextState);
+          await renderRewardStoreEditorRoot(ctx);
+          return;
+        }
+
+        const updated = await updateReward({
+          rewardId: rewardEdit.rewardId,
+          patch: { xpCost: xp }
+        });
+
+        const nextState: ReminderlessState = { ...state, rewardEdit: undefined };
+        userStates.set(stateKey, nextState);
+
+        await renderRewardEditMenu(ctx, updated);
+        return;
+      }
+    }
+
+    // Any other unexpected rewardEdit step: clear and go back
+    const nextState: ReminderlessState = { ...state, rewardEdit: undefined };
+    userStates.set(stateKey, nextState);
+    await renderRewardStoreEditorRoot(ctx);
+    return;
+  }
+
+  // No special state: do nothing for free text (bot is button-driven)
+  return;
 });
 
 bot.catch((err: BotError<Context>) => {
