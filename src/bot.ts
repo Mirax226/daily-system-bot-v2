@@ -1359,6 +1359,15 @@ bot.callbackQuery(/^[A-Za-z0-9_-]{8,12}$/, async (ctx) => {
           bodyLines: lines,
           inlineKeyboard: kb
         });
+
+        const { items } = await ensureReportContext(ctx);
+        const item = items.find((i) => i.id === itemId);
+        if (!item) {
+          await renderDailyStatusWithFilter(ctx, 'all');
+          return;
+        }
+
+        await renderNumericInput(ctx, reportDayId, item, next);
         break;
       }
       case 'dr.num_delta': {
