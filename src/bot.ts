@@ -314,23 +314,50 @@ const renderRewardCenter = async (ctx: Context): Promise<void> => {
   }
 };
 
+const clearRewardEditState = (telegramId: string): void => {
+  const state = userStates.get(telegramId);
+  if (!state?.rewardEdit) return;
+  const nextState = { ...state };
+  delete nextState.rewardEdit;
+  userStates.set(telegramId, nextState);
+};
+
+const getRewardForUser = async (rewardId: string, userId: string): Promise<RewardRow | null> => {
+  const reward = await getRewardById(rewardId);
+  if (!reward) return null;
+  if (reward.user_id !== userId) return null;
+  return reward;
+};
+
 const renderRewardStoreEditorRoot = async (ctx: Context): Promise<void> => {
   const { user } = await ensureUserAndSettings(ctx);
+  const telegramId = String(ctx.from?.id ?? '');
+  clearRewardEditState(telegramId);
+
   const rewards = await listRewardsForEdit(user.id);
-  const bodyLines: string[] = [];
+  const bodyLines: string[] = ['Edit Store', ''];
 
   if (!rewards.length) {
-    bodyLines.push('Edit Store', '', 'No rewards defined yet.', '', 'Use this screen to manage your rewards.');
+    bodyLines.push('No rewards defined yet.', '', 'Use this screen to manage your rewards.');
   } else {
-    bodyLines.push('Edit Store', '', 'Rewards:');
+    bodyLines.push('Rewards:');
     rewards.forEach((r) => {
       const status = r.is_active ? 'active' : 'inactive';
       bodyLines.push(`• ${r.title} — ${r.xp_cost} XP (${status})`);
     });
   }
 
+  const kb = new InlineKeyboard();
+  const addBtn = await makeActionButton(ctx, { label: '➕ Add reward', action: 'rewards.add' });
+  kb.text(addBtn.text, addBtn.callback_data).row();
+
+  for (const reward of rewards) {
+    const editBtn = await makeActionButton(ctx, { label: `✏ ${reward.title}`, action: 'rewards.edit_open', data: { rewardId: reward.id } });
+    kb.text(editBtn.text, editBtn.callback_data).row();
+  }
+
   const backBtn = await makeActionButton(ctx, { label: '⬅️ Back', action: 'nav.rewards' });
-  const kb = new InlineKeyboard().text(backBtn.text, backBtn.callback_data);
+  kb.text(backBtn.text, backBtn.callback_data);
 
   await renderScreen(ctx, { titleKey: '🎁 Reward Center', bodyLines, inlineKeyboard: kb });
 };
@@ -362,6 +389,192 @@ const renderRewardEditMenu = async (ctx: Context, reward: RewardRow): Promise<vo
     .text(backBtn.text, backBtn.callback_data);
 
   await renderScreen(ctx, { titleKey: 'Edit Store', bodyLines: lines, inlineKeyboard: kb });
+};
+
+const renderCreateRewardTitlePrompt = async (ctx: Context, errorLine?: string): Promise<void> => {
+  const cancelBtn = await makeActionButton(ctx, { label: '⬅️ Cancel', action: 'rewards.edit_root' });
+  const lines = errorLine ? [errorLine, '', 'Send reward title as text.'] : ['Send reward title as text.'];
+  await renderScreen(ctx, {
+    titleKey: 'Add Reward',
+    bodyLines: lines,
+    inlineKeyboard: new InlineKeyboard().text(cancelBtn.text, cancelBtn.callback_data)
+  });
+};
+
+const renderCreateRewardDescriptionPrompt = async (
+  ctx: Context,
+  draft: { title?: string },
+  errorLine?: string
+): Promise<void> => {
+  const cancelBtn = await makeActionButton(ctx, { label: '⬅️ Cancel', action: 'rewards.edit_root' });
+  const lines = errorLine
+    ? [errorLine, '', 'Send reward description as text (or "-" to skip).']
+    : [`Title: ${draft.title ?? ''}`, 'Send reward description as text (or "-" to skip).'];
+  await renderScreen(ctx, {
+    titleKey: 'Add Reward',
+    bodyLines: lines,
+    inlineKeyboard: new InlineKeyboard().text(cancelBtn.text, cancelBtn.callback_data)
+  });
+};
+
+const renderCreateRewardXpPrompt = async (
+  ctx: Context,
+  draft: { title?: string; description?: string | null },
+  errorLine?: string
+): Promise<void> => {
+  const cancelBtn = await makeActionButton(ctx, { label: '⬅️ Cancel', action: 'rewards.edit_root' });
+  const summary: string[] = [];
+  if (draft.title) summary.push(`Title: ${draft.title}`);
+  if (draft.description !== undefined) summary.push(`Description: ${draft.description ?? '(none)'}`);
+  const lines = [...summary, errorLine ? errorLine : 'Send XP cost as a positive integer.'];
+  await renderScreen(ctx, {
+    titleKey: 'Add Reward',
+    bodyLines: lines,
+    inlineKeyboard: new InlineKeyboard().text(cancelBtn.text, cancelBtn.callback_data)
+  });
+};
+
+const renderEditRewardTitlePrompt = async (ctx: Context, rewardId: string, errorLine?: string): Promise<void> => {
+  const cancelBtn = await makeActionButton(ctx, { label: '⬅️ Cancel', action: 'rewards.edit_open', data: { rewardId } });
+  const lines = errorLine ? [errorLine, '', 'Send new title as text.'] : ['Send new title as text.'];
+  await renderScreen(ctx, {
+    titleKey: 'Edit Reward',
+    bodyLines: lines,
+    inlineKeyboard: new InlineKeyboard().text(cancelBtn.text, cancelBtn.callback_data)
+  });
+};
+
+const renderEditRewardDescriptionPrompt = async (ctx: Context, rewardId: string, errorLine?: string): Promise<void> => {
+  const cancelBtn = await makeActionButton(ctx, { label: '⬅️ Cancel', action: 'rewards.edit_open', data: { rewardId } });
+  const lines = errorLine
+    ? [errorLine, '', 'Send new description as text (or "-" to clear).']
+    : ['Send new description as text (or "-" to clear).'];
+  await renderScreen(ctx, {
+    titleKey: 'Edit Reward',
+    bodyLines: lines,
+    inlineKeyboard: new InlineKeyboard().text(cancelBtn.text, cancelBtn.callback_data)
+  });
+};
+
+const renderEditRewardXpPrompt = async (ctx: Context, rewardId: string, errorLine?: string): Promise<void> => {
+  const cancelBtn = await makeActionButton(ctx, { label: '⬅️ Cancel', action: 'rewards.edit_open', data: { rewardId } });
+  const lines = errorLine ? [errorLine, '', 'Send XP cost as a positive integer.'] : ['Send XP cost as a positive integer.'];
+  await renderScreen(ctx, {
+    titleKey: 'Edit Reward',
+    bodyLines: lines,
+    inlineKeyboard: new InlineKeyboard().text(cancelBtn.text, cancelBtn.callback_data)
+  });
+};
+
+const handleRewardEditText = async (ctx: Context, rewardState: NonNullable<ReminderlessState['rewardEdit']>): Promise<void> => {
+  const telegramId = String(ctx.from?.id ?? '');
+  const messageText = ctx.message?.text ?? '';
+  const trimmed = messageText.trim();
+  const existing = userStates.get(telegramId) ?? {};
+
+  if (rewardState.mode === 'create') {
+    if (rewardState.step === 'title') {
+      if (!trimmed) {
+        await renderCreateRewardTitlePrompt(ctx, 'Title cannot be empty.');
+        return;
+      }
+      userStates.set(telegramId, {
+        ...existing,
+        rewardEdit: { ...rewardState, step: 'description', draft: { ...rewardState.draft, title: trimmed } }
+      });
+      await renderCreateRewardDescriptionPrompt(ctx, { title: trimmed });
+      return;
+    }
+
+    if (rewardState.step === 'description') {
+      const description = trimmed === '-' ? null : trimmed;
+      const nextDraft = { ...rewardState.draft, description };
+      const title = rewardState.draft.title;
+      if (!title) {
+        userStates.set(telegramId, { ...existing, rewardEdit: { mode: 'create', step: 'title', draft: {} } });
+        await renderCreateRewardTitlePrompt(ctx, 'Title is required before setting description.');
+        return;
+      }
+      userStates.set(telegramId, {
+        ...existing,
+        rewardEdit: { ...rewardState, step: 'xp', draft: { ...nextDraft, title } }
+      });
+      await renderCreateRewardXpPrompt(ctx, { title, description });
+      return;
+    }
+
+    if (rewardState.step === 'xp') {
+      const xp = Number.parseInt(trimmed, 10);
+      const title = rewardState.draft.title;
+      if (!title) {
+        userStates.set(telegramId, { ...existing, rewardEdit: { mode: 'create', step: 'title', draft: {} } });
+        await renderCreateRewardTitlePrompt(ctx, 'Title is required before setting XP cost.');
+        return;
+      }
+      if (!Number.isInteger(xp) || xp <= 0) {
+        await renderCreateRewardXpPrompt(ctx, rewardState.draft, 'Please enter a positive integer.');
+        return;
+      }
+      const { user } = await ensureUserAndSettings(ctx);
+      await createReward({ userId: user.id, title, description: rewardState.draft.description ?? null, xpCost: xp });
+      clearRewardEditState(telegramId);
+      await renderRewardStoreEditorRoot(ctx);
+      return;
+    }
+  }
+
+  if (rewardState.mode === 'edit') {
+    const rewardId = rewardState.rewardId;
+    if (!rewardId) {
+      clearRewardEditState(telegramId);
+      await renderRewardStoreEditorRoot(ctx);
+      return;
+    }
+    const { user } = await ensureUserAndSettings(ctx);
+    const reward = await getRewardForUser(rewardId, user.id);
+    if (!reward) {
+      clearRewardEditState(telegramId);
+      await renderRewardStoreEditorRoot(ctx);
+      return;
+    }
+
+    if (rewardState.step === 'title') {
+      if (!trimmed) {
+        await renderEditRewardTitlePrompt(ctx, rewardId, 'Title cannot be empty.');
+        return;
+      }
+      const updated = await updateReward({ rewardId, patch: { title: trimmed } });
+      clearRewardEditState(telegramId);
+      await renderRewardEditMenu(ctx, updated);
+      return;
+    }
+
+    if (rewardState.step === 'description') {
+      const description = trimmed === '-' ? null : trimmed;
+      const updated = await updateReward({ rewardId, patch: { description } });
+      clearRewardEditState(telegramId);
+      await renderRewardEditMenu(ctx, updated);
+      return;
+    }
+
+    if (rewardState.step === 'xp') {
+      const xp = Number.parseInt(trimmed, 10);
+      if (!Number.isInteger(xp) || xp <= 0) {
+        await renderEditRewardXpPrompt(ctx, rewardId, 'Please enter a positive integer.');
+        return;
+      }
+      const updated = await updateReward({ rewardId, patch: { xpCost: xp } });
+      clearRewardEditState(telegramId);
+      await renderRewardEditMenu(ctx, updated);
+      return;
+    }
+
+    if (rewardState.step === 'confirm_delete') {
+      clearRewardEditState(telegramId);
+      await renderRewardStoreEditorRoot(ctx);
+      return;
+    }
+  }
 };
 
 const renderRewardBuyList = async (ctx: Context): Promise<void> => {
@@ -923,6 +1136,19 @@ bot.hears('⚙️ Settings', async (ctx: Context) => {
   await renderSettingsRoot(ctx);
 });
 bot.hears('🤖 AI', renderAI);
+bot.on('message:text', async (ctx: Context) => {
+  const telegramId = String(ctx.from?.id ?? '');
+  const state = userStates.get(telegramId);
+  const messageText = ctx.message?.text;
+  if (state?.rewardEdit) {
+    await handleRewardEditText(ctx, state.rewardEdit);
+    return;
+  }
+  if (state?.awaitingValue) {
+    if (!messageText) return;
+    await handleSaveValue(ctx, messageText);
+  }
+});
 bot.callbackQuery(/^[A-Za-z0-9_-]{8,12}$/, async (ctx) => {
   await safeAnswerCallback(ctx);
 
@@ -1021,12 +1247,7 @@ bot.callbackQuery(/^[A-Za-z0-9_-]{8,12}$/, async (ctx) => {
           ...(userStates.get(telegramId) || {}),
           rewardEdit: { mode: 'create', step: 'title', draft: {} }
         });
-        const cancelBtn = await makeActionButton(ctx, { label: '⬅️ Cancel', action: 'rewards.edit_root' });
-        await renderScreen(ctx, {
-          titleKey: 'Add Reward',
-          bodyLines: ['Send reward title as text.'],
-          inlineKeyboard: new InlineKeyboard().text(cancelBtn.text, cancelBtn.callback_data)
-        });
+        await renderCreateRewardTitlePrompt(ctx);
         break;
       }
 
@@ -1036,7 +1257,7 @@ bot.callbackQuery(/^[A-Za-z0-9_-]{8,12}$/, async (ctx) => {
           await renderRewardStoreEditorRoot(ctx);
           return;
         }
-        const reward = await getRewardById(rewardId);
+        const reward = await getRewardForUser(rewardId, user.id);
         if (!reward) {
           await renderRewardStoreEditorRoot(ctx);
           return;
@@ -1051,17 +1272,17 @@ bot.callbackQuery(/^[A-Za-z0-9_-]{8,12}$/, async (ctx) => {
           await renderRewardStoreEditorRoot(ctx);
           return;
         }
+        const reward = await getRewardForUser(rewardId, user.id);
+        if (!reward) {
+          await renderRewardStoreEditorRoot(ctx);
+          return;
+        }
         const telegramId = String(ctx.from?.id ?? '');
         userStates.set(telegramId, {
           ...(userStates.get(telegramId) || {}),
           rewardEdit: { mode: 'edit', rewardId, step: 'title', draft: {} }
         });
-        const cancelBtn = await makeActionButton(ctx, { label: '⬅️ Cancel', action: 'rewards.edit_open', data: { rewardId } });
-        await renderScreen(ctx, {
-          titleKey: 'Edit Reward',
-          bodyLines: ['Send new title as text.'],
-          inlineKeyboard: new InlineKeyboard().text(cancelBtn.text, cancelBtn.callback_data)
-        });
+        await renderEditRewardTitlePrompt(ctx, rewardId);
         break;
       }
 
@@ -1071,17 +1292,17 @@ bot.callbackQuery(/^[A-Za-z0-9_-]{8,12}$/, async (ctx) => {
           await renderRewardStoreEditorRoot(ctx);
           return;
         }
+        const reward = await getRewardForUser(rewardId, user.id);
+        if (!reward) {
+          await renderRewardStoreEditorRoot(ctx);
+          return;
+        }
         const telegramId = String(ctx.from?.id ?? '');
         userStates.set(telegramId, {
           ...(userStates.get(telegramId) || {}),
           rewardEdit: { mode: 'edit', rewardId, step: 'description', draft: {} }
         });
-        const cancelBtn = await makeActionButton(ctx, { label: '⬅️ Cancel', action: 'rewards.edit_open', data: { rewardId } });
-        await renderScreen(ctx, {
-          titleKey: 'Edit Reward',
-          bodyLines: ['Send new description as text (or "-" to clear).'],
-          inlineKeyboard: new InlineKeyboard().text(cancelBtn.text, cancelBtn.callback_data)
-        });
+        await renderEditRewardDescriptionPrompt(ctx, rewardId);
         break;
       }
 
@@ -1091,17 +1312,17 @@ bot.callbackQuery(/^[A-Za-z0-9_-]{8,12}$/, async (ctx) => {
           await renderRewardStoreEditorRoot(ctx);
           return;
         }
+        const reward = await getRewardForUser(rewardId, user.id);
+        if (!reward) {
+          await renderRewardStoreEditorRoot(ctx);
+          return;
+        }
         const telegramId = String(ctx.from?.id ?? '');
         userStates.set(telegramId, {
           ...(userStates.get(telegramId) || {}),
           rewardEdit: { mode: 'edit', rewardId, step: 'xp', draft: {} }
         });
-        const cancelBtn = await makeActionButton(ctx, { label: '⬅️ Cancel', action: 'rewards.edit_open', data: { rewardId } });
-        await renderScreen(ctx, {
-          titleKey: 'Edit Reward',
-          bodyLines: ['Send XP cost as an integer.'],
-          inlineKeyboard: new InlineKeyboard().text(cancelBtn.text, cancelBtn.callback_data)
-        });
+        await renderEditRewardXpPrompt(ctx, rewardId);
         break;
       }
 
@@ -1111,7 +1332,7 @@ bot.callbackQuery(/^[A-Za-z0-9_-]{8,12}$/, async (ctx) => {
           await renderRewardStoreEditorRoot(ctx);
           return;
         }
-        const reward = await getRewardById(rewardId);
+        const reward = await getRewardForUser(rewardId, user.id);
         if (!reward) {
           await renderRewardStoreEditorRoot(ctx);
           return;
@@ -1127,7 +1348,7 @@ bot.callbackQuery(/^[A-Za-z0-9_-]{8,12}$/, async (ctx) => {
           await renderRewardStoreEditorRoot(ctx);
           return;
         }
-        const reward = await getRewardById(rewardId);
+        const reward = await getRewardForUser(rewardId, user.id);
         if (!reward) {
           await renderRewardStoreEditorRoot(ctx);
           return;
@@ -1151,6 +1372,11 @@ bot.callbackQuery(/^[A-Za-z0-9_-]{8,12}$/, async (ctx) => {
       case 'rewards.delete_confirm': {
         const rewardId = (payload as { data?: { rewardId?: string } }).data?.rewardId;
         if (!rewardId) {
+          await renderRewardStoreEditorRoot(ctx);
+          return;
+        }
+        const reward = await getRewardForUser(rewardId, user.id);
+        if (!reward) {
           await renderRewardStoreEditorRoot(ctx);
           return;
         }
