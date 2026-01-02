@@ -923,7 +923,6 @@ bot.hears('⚙️ Settings', async (ctx: Context) => {
   await renderSettingsRoot(ctx);
 });
 bot.hears('🤖 AI', renderAI);
-
 bot.callbackQuery(/^[A-Za-z0-9_-]{8,12}$/, async (ctx) => {
   await safeAnswerCallback(ctx);
 
@@ -932,12 +931,24 @@ bot.callbackQuery(/^[A-Za-z0-9_-]{8,12}$/, async (ctx) => {
     const { user } = await ensureUserAndSettings(ctx);
     const enabled = telemetryEnabledForUser(user.settings_json as Record<string, unknown>);
 
-    await logTelemetryEvent({ userId: user.id, traceId, eventName: 'callback_token_pressed', payload: { data: ctx.callbackQuery.data }, enabled });
+    await logTelemetryEvent({
+      userId: user.id,
+      traceId,
+      eventName: 'callback_token_pressed',
+      payload: { data: ctx.callbackQuery.data },
+      enabled
+    });
 
     const token = ctx.callbackQuery.data;
     const payload = await consumeCallbackToken(token);
 
-    await logTelemetryEvent({ userId: user.id, traceId, eventName: 'callback_token_consumed', payload: { token, valid: Boolean(payload) }, enabled });
+    await logTelemetryEvent({
+      userId: user.id,
+      traceId,
+      eventName: 'callback_token_consumed',
+      payload: { token, valid: Boolean(payload) },
+      enabled
+    });
 
     const action = typeof payload === 'object' && payload ? (payload as { action?: string }).action : null;
 
@@ -950,6 +961,7 @@ bot.callbackQuery(/^[A-Za-z0-9_-]{8,12}$/, async (ctx) => {
       case 'noop':
         break;
 
+      // ===== Navigation =====
       case 'nav.dashboard':
         await renderDashboard(ctx);
         break;
@@ -975,6 +987,7 @@ bot.callbackQuery(/^[A-Za-z0-9_-]{8,12}$/, async (ctx) => {
         await renderSettingsRoot(ctx);
         break;
 
+      // ===== Reports =====
       case 'reports.xp':
         await renderXpSummary(ctx);
         break;
@@ -991,15 +1004,17 @@ bot.callbackQuery(/^[A-Za-z0-9_-]{8,12}$/, async (ctx) => {
         break;
       }
 
+      // ===== Rewards: Buy flow =====
       case 'rewards.buy':
         await renderRewardBuyList(ctx);
         break;
+
+      // ===== Rewards: Edit Store root =====
       case 'rewards.edit':
-        await renderRewardStoreEditorRoot(ctx);
-        break;
       case 'rewards.edit_root':
         await renderRewardStoreEditorRoot(ctx);
         break;
+
       case 'rewards.add': {
         const telegramId = String(ctx.from?.id ?? '');
         userStates.set(telegramId, {
@@ -1014,6 +1029,7 @@ bot.callbackQuery(/^[A-Za-z0-9_-]{8,12}$/, async (ctx) => {
         });
         break;
       }
+
       case 'rewards.edit_open': {
         const rewardId = (payload as { data?: { rewardId?: string } }).data?.rewardId;
         if (!rewardId) {
@@ -1028,6 +1044,7 @@ bot.callbackQuery(/^[A-Za-z0-9_-]{8,12}$/, async (ctx) => {
         await renderRewardEditMenu(ctx, reward);
         break;
       }
+
       case 'rewards.edit_title': {
         const rewardId = (payload as { data?: { rewardId?: string } }).data?.rewardId;
         if (!rewardId) {
@@ -1047,6 +1064,7 @@ bot.callbackQuery(/^[A-Za-z0-9_-]{8,12}$/, async (ctx) => {
         });
         break;
       }
+
       case 'rewards.edit_description': {
         const rewardId = (payload as { data?: { rewardId?: string } }).data?.rewardId;
         if (!rewardId) {
@@ -1066,6 +1084,7 @@ bot.callbackQuery(/^[A-Za-z0-9_-]{8,12}$/, async (ctx) => {
         });
         break;
       }
+
       case 'rewards.edit_xp': {
         const rewardId = (payload as { data?: { rewardId?: string } }).data?.rewardId;
         if (!rewardId) {
@@ -1085,6 +1104,7 @@ bot.callbackQuery(/^[A-Za-z0-9_-]{8,12}$/, async (ctx) => {
         });
         break;
       }
+
       case 'rewards.toggle_active': {
         const rewardId = (payload as { data?: { rewardId?: string } }).data?.rewardId;
         if (!rewardId) {
@@ -1100,6 +1120,7 @@ bot.callbackQuery(/^[A-Za-z0-9_-]{8,12}$/, async (ctx) => {
         await renderRewardEditMenu(ctx, updated);
         break;
       }
+
       case 'rewards.delete': {
         const rewardId = (payload as { data?: { rewardId?: string } }).data?.rewardId;
         if (!rewardId) {
@@ -1126,6 +1147,7 @@ bot.callbackQuery(/^[A-Za-z0-9_-]{8,12}$/, async (ctx) => {
         });
         break;
       }
+
       case 'rewards.delete_confirm': {
         const rewardId = (payload as { data?: { rewardId?: string } }).data?.rewardId;
         if (!rewardId) {
@@ -1142,6 +1164,7 @@ bot.callbackQuery(/^[A-Za-z0-9_-]{8,12}$/, async (ctx) => {
         await renderRewardStoreEditorRoot(ctx);
         break;
       }
+
       case 'rewards.confirm': {
         const rewardId = (payload as { data?: { rewardId?: string } }).data?.rewardId;
         if (!rewardId) {
@@ -1152,7 +1175,11 @@ bot.callbackQuery(/^[A-Za-z0-9_-]{8,12}$/, async (ctx) => {
         const reward = await getRewardById(rewardId);
         if (!reward) {
           const kb = await buildRewardCenterKeyboard(ctx);
-          await renderScreen(ctx, { titleKey: '🎁 Reward Center', bodyLines: ['Reward not found.'], inlineKeyboard: kb });
+          await renderScreen(ctx, {
+            titleKey: '🎁 Reward Center',
+            bodyLines: ['Reward not found.'],
+            inlineKeyboard: kb
+          });
           return;
         }
 
@@ -1176,6 +1203,7 @@ bot.callbackQuery(/^[A-Za-z0-9_-]{8,12}$/, async (ctx) => {
         break;
       }
 
+      // ===== Daily Report: status & navigation =====
       case 'dr.status': {
         const filter = (payload as { data?: { filter?: 'all' | 'not_filled' | 'filled' } }).data?.filter ?? 'all';
         await renderDailyStatusWithFilter(ctx, filter);
@@ -1187,6 +1215,7 @@ bot.callbackQuery(/^[A-Za-z0-9_-]{8,12}$/, async (ctx) => {
       case 'dr.pick_item':
         await renderDailyStatusWithFilter(ctx, 'all');
         break;
+
       case 'dr.item': {
         const itemId = (payload as { data?: { itemId?: string } }).data?.itemId;
         if (!itemId) {
@@ -1202,6 +1231,8 @@ bot.callbackQuery(/^[A-Za-z0-9_-]{8,12}$/, async (ctx) => {
         await promptForItem(ctx, reportDay.id, item);
         break;
       }
+
+      // ===== Time picker callbacks =====
       case 'dr.time_set_hour': {
         const data = (payload as { data?: { reportDayId?: string; itemId?: string; hour12?: number } }).data;
         const reportDayId = data?.reportDayId;
@@ -1226,6 +1257,7 @@ bot.callbackQuery(/^[A-Za-z0-9_-]{8,12}$/, async (ctx) => {
         await renderTimePicker(ctx, reportDayId, item, nextDraft);
         break;
       }
+
       case 'dr.time_set_mtens': {
         const data = (payload as { data?: { reportDayId?: string; itemId?: string; minuteTens?: number } }).data;
         const reportDayId = data?.reportDayId;
@@ -1250,6 +1282,7 @@ bot.callbackQuery(/^[A-Za-z0-9_-]{8,12}$/, async (ctx) => {
         await renderTimePicker(ctx, reportDayId, item, nextDraft);
         break;
       }
+
       case 'dr.time_set_mones': {
         const data = (payload as { data?: { reportDayId?: string; itemId?: string; minuteOnes?: number } }).data;
         const reportDayId = data?.reportDayId;
@@ -1274,6 +1307,7 @@ bot.callbackQuery(/^[A-Za-z0-9_-]{8,12}$/, async (ctx) => {
         await renderTimePicker(ctx, reportDayId, item, nextDraft);
         break;
       }
+
       case 'dr.time_set_ampm': {
         const data = (payload as { data?: { reportDayId?: string; itemId?: string; ampm?: 'AM' | 'PM' } }).data;
         const reportDayId = data?.reportDayId;
@@ -1298,6 +1332,7 @@ bot.callbackQuery(/^[A-Za-z0-9_-]{8,12}$/, async (ctx) => {
         await renderTimePicker(ctx, reportDayId, item, nextDraft);
         break;
       }
+
       case 'dr.time_save': {
         const data = (payload as { data?: { reportDayId?: string; itemId?: string } }).data;
         const reportDayId = data?.reportDayId;
@@ -1319,6 +1354,134 @@ bot.callbackQuery(/^[A-Za-z0-9_-]{8,12}$/, async (ctx) => {
         }
         break;
       }
+
+      // ===== Numeric picker callbacks =====
+      case 'dr.num_delta': {
+        const data = (payload as { data?: { reportDayId?: string; itemId?: string; delta?: number } }).data;
+        const reportDayId = data?.reportDayId;
+        const itemId = data?.itemId;
+        const delta = data?.delta ?? 0;
+        if (!reportDayId || !itemId) {
+          await renderDailyStatusWithFilter(ctx, 'all');
+          return;
+        }
+        const telegramId = String(ctx.from?.id ?? '');
+        const state = userStates.get(telegramId);
+        if (!state?.numericDraft || state.numericDraft.reportDayId !== reportDayId || state.numericDraft.itemId !== itemId) {
+          await renderDailyStatusWithFilter(ctx, 'all');
+          return;
+        }
+        const current = state.numericDraft.value ?? 0;
+        const next = Math.max(0, current + delta);
+
+        userStates.set(telegramId, {
+          ...state,
+          numericDraft: { reportDayId, itemId, value: next }
+        });
+
+        const { items } = await ensureReportContext(ctx);
+        const item = items.find((i) => i.id === itemId);
+        if (!item) {
+          await renderDailyStatusWithFilter(ctx, 'all');
+          return;
+        }
+
+        await renderNumericInput(ctx, reportDayId, item, next);
+        break;
+      }
+
+      case 'dr.num_save': {
+        const data = (payload as { data?: { reportDayId?: string; itemId?: string } }).data;
+        const reportDayId = data?.reportDayId;
+        const itemId = data?.itemId;
+        if (!reportDayId || !itemId) {
+          await renderDailyStatusWithFilter(ctx, 'all');
+          return;
+        }
+        const telegramId = String(ctx.from?.id ?? '');
+        const state = userStates.get(telegramId);
+        const draft = state?.numericDraft;
+        if (!draft || draft.reportDayId !== reportDayId || draft.itemId !== itemId) {
+          await renderDailyStatusWithFilter(ctx, 'all');
+          return;
+        }
+
+        await handleSaveValue(ctx, String(draft.value));
+
+        const updated = userStates.get(telegramId);
+        if (updated) {
+          delete updated.numericDraft;
+          userStates.set(telegramId, updated);
+        }
+        break;
+      }
+
+      case 'dr.templates': {
+        const back = await makeActionButton(ctx, { label: '⬅️ Back', action: 'dr.back' });
+        await renderScreen(ctx, {
+          titleKey: 'Daily Report',
+          bodyLines: ['Templates coming soon.'],
+          inlineKeyboard: new InlineKeyboard().text(back.text, back.callback_data)
+        });
+        break;
+      }
+
+      case 'dr.history': {
+        const back = await makeActionButton(ctx, { label: '⬅️ Back', action: 'dr.back' });
+        await renderScreen(ctx, {
+          titleKey: 'Daily Report',
+          bodyLines: ['History coming soon.'],
+          inlineKeyboard: new InlineKeyboard().text(back.text, back.callback_data)
+        });
+        break;
+      }
+
+      case 'dr.lock': {
+        const back = await makeActionButton(ctx, { label: '⬅️ Back', action: 'dr.back' });
+        await renderScreen(ctx, {
+          titleKey: 'Daily Report',
+          bodyLines: ['Submit/Lock coming soon.'],
+          inlineKeyboard: new InlineKeyboard().text(back.text, back.callback_data)
+        });
+        break;
+      }
+
+      case 'dr.skip': {
+        const reportDayId = (payload as { data?: { reportDayId?: string } }).data?.reportDayId;
+        const itemId = (payload as { data?: { itemId?: string } }).data?.itemId;
+        if (!reportDayId || !itemId) {
+          await renderDailyStatusWithFilter(ctx, 'all');
+          return;
+        }
+        const { reportDay, items } = await ensureReportContext(ctx);
+        if (reportDay.id !== reportDayId) {
+          await renderDailyStatusWithFilter(ctx, 'all');
+          return;
+        }
+        const item = items.find((i) => i.id === itemId);
+        if (!item) {
+          const kb = await buildDailyReportKeyboard(ctx, reportDay.id);
+          await renderScreen(ctx, {
+            titleKey: t('screens.daily_report.title'),
+            bodyLines: [t('screens.daily_report.item_not_found')],
+            inlineKeyboard: kb
+          });
+          return;
+        }
+        await saveValue({ reportDayId, item, valueJson: { skipped: true }, userId: reportDay.user_id });
+        await renderDailyStatusWithFilter(ctx, 'all');
+        break;
+      }
+
+      case 'dr.menu':
+        await renderDailyReportRoot(ctx);
+        break;
+
+      case 'dr.back':
+        await renderDashboard(ctx);
+        break;
+
+      // ===== Settings: Speed / Ping Test =====
       case 'settings.speed_test': {
         const startHandler = Date.now();
         const { user } = await ensureUserAndSettings(ctx);
@@ -1355,121 +1518,14 @@ bot.callbackQuery(/^[A-Za-z0-9_-]{8,12}$/, async (ctx) => {
           bodyLines: lines,
           inlineKeyboard: kb
         });
-
-        const { items } = await ensureReportContext(ctx);
-        const item = items.find((i) => i.id === itemId);
-        if (!item) {
-          await renderDailyStatusWithFilter(ctx, 'all');
-          return;
-        }
-
-        await renderNumericInput(ctx, reportDayId, item, next);
         break;
       }
-      case 'dr.num_delta': {
-        const data = (payload as { data?: { reportDayId?: string; itemId?: string; delta?: number } }).data;
-        const reportDayId = data?.reportDayId;
-        const itemId = data?.itemId;
-        const delta = data?.delta ?? 0;
-        if (!reportDayId || !itemId) {
-          await renderDailyStatusWithFilter(ctx, 'all');
-          return;
-        }
-        const telegramId = String(ctx.from?.id ?? '');
-        const state = userStates.get(telegramId);
-        if (!state?.numericDraft || state.numericDraft.reportDayId !== reportDayId || state.numericDraft.itemId !== itemId) {
-          await renderDailyStatusWithFilter(ctx, 'all');
-          return;
-        }
-        const current = state.numericDraft.value ?? 0;
-        const next = Math.max(0, current + delta);
 
-        userStates.set(telegramId, {
-          ...state,
-          numericDraft: { reportDayId, itemId, value: next }
-        });
-
-        const { items } = await ensureReportContext(ctx);
-        const item = items.find((i) => i.id === itemId);
-        if (!item) {
-          await renderDailyStatusWithFilter(ctx, 'all');
-          return;
-        }
-
-        await renderNumericInput(ctx, reportDayId, item, next);
-        break;
-      }
-      case 'dr.num_save': {
-        const data = (payload as { data?: { reportDayId?: string; itemId?: string } }).data;
-        const reportDayId = data?.reportDayId;
-        const itemId = data?.itemId;
-        if (!reportDayId || !itemId) {
-          await renderDailyStatusWithFilter(ctx, 'all');
-          return;
-        }
-        const telegramId = String(ctx.from?.id ?? '');
-        const state = userStates.get(telegramId);
-        const draft = state?.numericDraft;
-        if (!draft || draft.reportDayId !== reportDayId || draft.itemId !== itemId) {
-          await renderDailyStatusWithFilter(ctx, 'all');
-          return;
-        }
-
-        await handleSaveValue(ctx, String(draft.value));
-
-        const updated = userStates.get(telegramId);
-        if (updated) {
-          delete updated.numericDraft;
-          userStates.set(telegramId, updated);
-        }
-        break;
-      }
-      case 'dr.templates': {
-        const back = await makeActionButton(ctx, { label: '⬅️ Back', action: 'dr.back' });
-        await renderScreen(ctx, { titleKey: 'Daily Report', bodyLines: ['Templates coming soon.'], inlineKeyboard: new InlineKeyboard().text(back.text, back.callback_data) });
-        break;
-      }
-      case 'dr.history': {
-        const back = await makeActionButton(ctx, { label: '⬅️ Back', action: 'dr.back' });
-        await renderScreen(ctx, { titleKey: 'Daily Report', bodyLines: ['History coming soon.'], inlineKeyboard: new InlineKeyboard().text(back.text, back.callback_data) });
-        break;
-      }
-      case 'dr.lock': {
-        const back = await makeActionButton(ctx, { label: '⬅️ Back', action: 'dr.back' });
-        await renderScreen(ctx, { titleKey: 'Daily Report', bodyLines: ['Submit/Lock coming soon.'], inlineKeyboard: new InlineKeyboard().text(back.text, back.callback_data) });
-        break;
-      }
-      case 'dr.skip': {
-        const reportDayId = (payload as { data?: { reportDayId?: string } }).data?.reportDayId;
-        const itemId = (payload as { data?: { itemId?: string } }).data?.itemId;
-        if (!reportDayId || !itemId) {
-          await renderDailyStatusWithFilter(ctx, 'all');
-          return;
-        }
-        const { reportDay, items } = await ensureReportContext(ctx);
-        if (reportDay.id !== reportDayId) {
-          await renderDailyStatusWithFilter(ctx, 'all');
-          return;
-        }
-        const item = items.find((i) => i.id === itemId);
-        if (!item) {
-          const kb = await buildDailyReportKeyboard(ctx, reportDay.id);
-          await renderScreen(ctx, { titleKey: t('screens.daily_report.title'), bodyLines: [t('screens.daily_report.item_not_found')], inlineKeyboard: kb });
-          return;
-        }
-        await saveValue({ reportDayId, item, valueJson: { skipped: true }, userId: reportDay.user_id });
-        await renderDailyStatusWithFilter(ctx, 'all');
-        break;
-      }
-      case 'dr.menu':
-        await renderDailyReportRoot(ctx);
-        break;
-      case 'dr.back':
-        await renderDashboard(ctx);
-        break;
-
+      // ===== Error reports =====
       case 'error.send_report': {
-        const errorCode = (payload as { errorCode?: string; data?: { errorCode?: string } }).errorCode ?? (payload as { data?: { errorCode?: string } }).data?.errorCode;
+        const errorCode =
+          (payload as { errorCode?: string; data?: { errorCode?: string } }).errorCode ??
+          (payload as { data?: { errorCode?: string } }).data?.errorCode;
         if (!errorCode) {
           await ctx.answerCallbackQuery({ text: 'Report not found or expired.', show_alert: true });
           return;
@@ -1488,7 +1544,16 @@ bot.callbackQuery(/^[A-Za-z0-9_-]{8,12}$/, async (ctx) => {
                   .map((ev: any) => `• ${ev.event_name ?? 'event'}${ev.screen ? ` @ ${ev.screen}` : ''}`)
                   .join('\n')
               : 'No events captured.';
-          const message = ['*Error report*', `Code: ${report.error_code}`, `Trace: ${report.trace_id}`, `Created: ${report.created_at}`, `User: ${report.user_id}`, '', 'Recent events:', events].join('\n');
+          const message = [
+            '*Error report*',
+            `Code: ${report.error_code}`,
+            `Trace: ${report.trace_id}`,
+            `Created: ${report.created_at}`,
+            `User: ${report.user_id}`,
+            '',
+            'Recent events:',
+            events
+          ].join('\n');
           await ctx.api.sendMessage(targetId, message, { parse_mode: 'Markdown' });
         }
         await ctx.answerCallbackQuery({ text: 'Error report sent. Thank you.', show_alert: true });
@@ -1509,259 +1574,6 @@ bot.callbackQuery(/^[A-Za-z0-9_-]{8,12}$/, async (ctx) => {
     console.error({ scope: 'callback_tokens', event: 'consume_failure', error });
     await ctx.answerCallbackQuery({ text: 'Unexpected error. Please try again.', show_alert: true });
   }
-});
-
-bot.on('message:text', async (ctx: Context) => {
-  if (!ctx.from || !ctx.message || typeof ctx.message.text !== 'string') return;
-
-  const text = ctx.message.text.trim();
-  const stateKey = String(ctx.from.id);
-  const state = userStates.get(stateKey) ?? {};
-
-  // 1) Daily Report text input (existing behavior)
-  if (state.awaitingValue) {
-    await handleSaveValue(ctx, text);
-    return;
-  }
-
-  // 2) Settings: add routine (label step)
-  if (state.settingsRoutine?.step === 'label') {
-    const nextState: ReminderlessState = {
-      ...state,
-      settingsRoutine: { step: 'xp', label: text }
-    };
-    userStates.set(stateKey, nextState);
-
-    const backBtn = await makeActionButton(ctx, { label: '⬅️ Back', action: 'nav.settings' });
-    const kb = new InlineKeyboard().text(backBtn.text, backBtn.callback_data);
-
-    await renderScreen(ctx, {
-      titleKey: 'Settings',
-      bodyLines: ['Enter XP value for this routine (integer).'],
-      inlineKeyboard: kb
-    });
-
-    return;
-  }
-
-  // 3) Settings: add routine (xp step)
-  if (state.settingsRoutine?.step === 'xp') {
-    const xp = Number(text);
-    if (!Number.isInteger(xp)) {
-      const backBtn = await makeActionButton(ctx, { label: '⬅️ Back', action: 'nav.settings' });
-      const kb = new InlineKeyboard().text(backBtn.text, backBtn.callback_data);
-
-      await renderScreen(ctx, {
-        titleKey: 'Settings',
-        bodyLines: ['Please enter a number for XP value.'],
-        inlineKeyboard: kb
-      });
-
-      return;
-    }
-
-    const label = state.settingsRoutine.label ?? 'Routine';
-    const { user } = await ensureUserAndSettings(ctx);
-    const template = await ensureDefaultTemplate(user.id);
-    await ensureDefaultItems(user.id);
-
-    await upsertItem({
-      templateId: template.id,
-      label,
-      itemKey: `routine_${Date.now()}`,
-      itemType: 'boolean',
-      category: 'routine',
-      xpMode: 'fixed',
-      xpValue: xp,
-      optionsJson: {},
-      sortOrder: Date.now() % 100000
-    });
-
-    const nextState: ReminderlessState = {
-      ...state,
-      settingsRoutine: undefined
-    };
-    userStates.set(stateKey, nextState);
-
-    await renderSettingsRoot(ctx);
-    return;
-  }
-
-  // 4) Reward Store editing flow
-  if (state.rewardEdit) {
-    const rewardEdit = state.rewardEdit;
-
-    // TITLE step
-    if (rewardEdit.step === 'title') {
-      if (rewardEdit.mode === 'create') {
-        const nextState: ReminderlessState = {
-          ...state,
-          rewardEdit: {
-            ...rewardEdit,
-            step: 'description',
-            draft: {
-              ...rewardEdit.draft,
-              title: text
-            }
-          }
-        };
-        userStates.set(stateKey, nextState);
-
-        const cancelBtn = await makeActionButton(ctx, { label: '⬅️ Cancel', action: 'rewards.edit_root' });
-        const kb = new InlineKeyboard().text(cancelBtn.text, cancelBtn.callback_data);
-
-        await renderScreen(ctx, {
-          titleKey: 'Add Reward',
-          bodyLines: ['Send reward description as text (or "-" to skip).'],
-          inlineKeyboard: kb
-        });
-
-        return;
-      } else {
-        // mode === 'edit'
-        if (!rewardEdit.rewardId) {
-          // invalid state, clear and go back
-          const nextState: ReminderlessState = { ...state, rewardEdit: undefined };
-          userStates.set(stateKey, nextState);
-          await renderRewardStoreEditorRoot(ctx);
-          return;
-        }
-
-        const updated = await updateReward({
-          rewardId: rewardEdit.rewardId,
-          patch: { title: text }
-        });
-
-        const nextState: ReminderlessState = { ...state, rewardEdit: undefined };
-        userStates.set(stateKey, nextState);
-
-        await renderRewardEditMenu(ctx, updated);
-        return;
-      }
-    }
-
-    // DESCRIPTION step
-    if (rewardEdit.step === 'description') {
-      const desc = text === '-' ? null : text;
-
-      if (rewardEdit.mode === 'create') {
-        const nextState: ReminderlessState = {
-          ...state,
-          rewardEdit: {
-            ...rewardEdit,
-            step: 'xp',
-            draft: {
-              ...rewardEdit.draft,
-              description: desc
-            }
-          }
-        };
-        userStates.set(stateKey, nextState);
-
-        const cancelBtn = await makeActionButton(ctx, { label: '⬅️ Cancel', action: 'rewards.edit_root' });
-        const kb = new InlineKeyboard().text(cancelBtn.text, cancelBtn.callback_data);
-
-        await renderScreen(ctx, {
-          titleKey: 'Add Reward',
-          bodyLines: ['Send XP cost as a positive integer.'],
-          inlineKeyboard: kb
-        });
-
-        return;
-      } else {
-        // mode === 'edit'
-        if (!rewardEdit.rewardId) {
-          const nextState: ReminderlessState = { ...state, rewardEdit: undefined };
-          userStates.set(stateKey, nextState);
-          await renderRewardStoreEditorRoot(ctx);
-          return;
-        }
-
-        const updated = await updateReward({
-          rewardId: rewardEdit.rewardId,
-          patch: { description: desc }
-        });
-
-        const nextState: ReminderlessState = { ...state, rewardEdit: undefined };
-        userStates.set(stateKey, nextState);
-
-        await renderRewardEditMenu(ctx, updated);
-        return;
-      }
-    }
-
-    // XP step
-    if (rewardEdit.step === 'xp') {
-      const xp = Number(text);
-      if (!Number.isInteger(xp) || xp <= 0) {
-        const titleKey = rewardEdit.mode === 'create' ? 'Add Reward' : 'Edit Reward';
-        const cancelAction = rewardEdit.mode === 'create' ? 'rewards.edit_root' : 'rewards.edit_open';
-        const cancelData: any = rewardEdit.mode === 'create' ? {} : { rewardId: rewardEdit.rewardId };
-
-        const cancelBtn = await makeActionButton(ctx, {
-          label: '⬅️ Cancel',
-          action: cancelAction,
-          data: cancelData
-        });
-        const kb = new InlineKeyboard().text(cancelBtn.text, cancelBtn.callback_data);
-
-        await renderScreen(ctx, {
-          titleKey,
-          bodyLines: ['Please send a positive integer for XP cost.'],
-          inlineKeyboard: kb
-        });
-
-        return;
-      }
-
-      if (rewardEdit.mode === 'create') {
-        const { user } = await ensureUserAndSettings(ctx);
-        const title = rewardEdit.draft.title ?? 'Reward';
-        const description = rewardEdit.draft.description ?? null;
-
-        await createReward({
-          userId: user.id,
-          title,
-          description,
-          xpCost: xp
-        });
-
-        const nextState: ReminderlessState = { ...state, rewardEdit: undefined };
-        userStates.set(stateKey, nextState);
-
-        await renderRewardStoreEditorRoot(ctx);
-        return;
-      } else {
-        // mode === 'edit'
-        if (!rewardEdit.rewardId) {
-          const nextState: ReminderlessState = { ...state, rewardEdit: undefined };
-          userStates.set(stateKey, nextState);
-          await renderRewardStoreEditorRoot(ctx);
-          return;
-        }
-
-        const updated = await updateReward({
-          rewardId: rewardEdit.rewardId,
-          patch: { xpCost: xp }
-        });
-
-        const nextState: ReminderlessState = { ...state, rewardEdit: undefined };
-        userStates.set(stateKey, nextState);
-
-        await renderRewardEditMenu(ctx, updated);
-        return;
-      }
-    }
-
-    // Any other unexpected rewardEdit step: clear and go back
-    const nextState: ReminderlessState = { ...state, rewardEdit: undefined };
-    userStates.set(stateKey, nextState);
-    await renderRewardStoreEditorRoot(ctx);
-    return;
-  }
-
-  // No special state: do nothing for free text (bot is button-driven)
-  return;
 });
 
 bot.catch((err: BotError<Context>) => {
