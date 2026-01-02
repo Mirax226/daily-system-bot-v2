@@ -1,0 +1,71 @@
+{
+  "screens": {
+    "dashboard": {
+      "greeting": "سلام!",
+      "time": "زمان فعلی: {date} | {time}",
+      "welcome_new": [
+        "به مرکز بهره‌وری خوش آمدید!",
+        "می‌توانید:",
+        "• فرم گزارش روزانه را تنظیم کنید.",
+        "• امتیاز XP کسب و خرج کنید.",
+        "• گزارش‌ها و نمودارها را ببینید.",
+        "• یادآورها را مدیریت کنید (به‌زودی)."
+      ],
+      "welcome_back": "خوش آمدید! از منوی زیر ادامه دهید.",
+      "xp_balance": "موجودی XP: {xp}",
+      "today_items": "امروز: {completed}/{total} مورد",
+      "streak": "رکورد متوالی: {streak} روز"
+    },
+    "daily_report": {
+      "title": "گزارش روزانه",
+      "root_header": "گزارش روزانه برای {date}",
+      "template_line": "قالب: {template}",
+      "completion_line": "تکمیل: {completed}/{total}",
+      "status_header": "وضعیت تکمیل:",
+      "filter_all": "همه",
+      "filter_not_filled": "ناقص",
+      "filter_filled": "تکمیل",
+      "all_done": "همه آیتم‌های امروز تکمیل شده‌اند.",
+      "session_expired": "نشست آن آیتم منقضی شد. دوباره انتخاب کنید.",
+      "item_not_found": "آیتم پیدا نشد.",
+      "saved": "ذخیره شد.",
+      "invalid_time": "زمان را به صورت HH:MM وارد کنید (مثال: 06:30).",
+      "invalid_duration": "مدت را به دقیقه وارد کنید (مثال: 90).",
+      "invalid_number": "یک مقدار عددی وارد کنید.",
+      "save_failed": "ذخیره مقدار انجام نشد. دوباره تلاش کنید.",
+      "numeric_title": "مقدار را برای {label} تنظیم کنید",
+      "numeric_current": "مقدار فعلی: {value}",
+      "numeric_hint": "از دکمه‌ها برای تنظیم مقدار استفاده کنید یا عدد ارسال کنید.",
+      "numeric_save": "💾 ذخیره",
+      "numeric_skip": "⏭ رد کردن",
+      "time_title": "زمان {label} را تنظیم کنید",
+      "time_current": "زمان فعلی: {value}",
+      "time_hint": "از دکمه‌های زیر ساعت، دقیقه و AM/PM را انتخاب کنید.",
+      "time_save": "💾 ذخیره زمان",
+      "lock_confirm_title": "قفل/ثبت این روز؟",
+      "lock_confirm_body": "با قفل کردن، امکان ویرایش مقادیر امروز از بین می‌رود.",
+      "already_locked": "این روز قفل شده و دیگر قابل ویرایش نیست.",
+      "lock_success": "روز قفل شد. دیگر نمی‌توان ویرایش کرد.",
+      "templates_title": "قالب‌های گزارش روزانه",
+      "template_delete_confirm": "حذف قالب \"{title}\"؟",
+      "history_title": "تاریخچه گزارش روزانه",
+      "history_range": "بازه: {range}"
+    }
+  },
+  "buttons": {
+    "reload": "بارگذاری دوباره",
+    "back": "بازگشت",
+    "send_report": "ارسال گزارش",
+    "dr_today_status": "📋 وضعیت امروز",
+    "dr_fill_next": "✏️ آیتم بعدی",
+    "dr_fill_specific": "🧩 انتخاب آیتم",
+    "dr_templates": "🗂 قالب‌ها",
+    "dr_history": "🕘 تاریخچه",
+    "dr_lock": "✅ ثبت / قفل",
+    "back": "⬅️ بازگشت"
+  },
+  "errors": {
+    "unexpected": "خطای غیرمنتظره رخ داد و قابل گزارش نبود.",
+    "with_code": "خطا رخ داد. کد پیگیری: {code}"
+  }
+}
