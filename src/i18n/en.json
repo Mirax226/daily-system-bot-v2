@@ -1,0 +1,63 @@
+{
+  "screens": {
+    "dashboard": {
+      "greeting": "Hello!",
+      "time": "Current time: {date} | {time}",
+      "welcome_new": [
+        "Welcome to your productivity hub!",
+        "You can:",
+        "• Configure your daily report form.",
+        "• Earn and spend XP in the Reward Center.",
+        "• Review reports and charts.",
+        "• Manage reminders (coming back soon)."
+      ],
+      "welcome_back": "Welcome back! Use the menu below to continue.",
+      "xp_balance": "XP Balance: {xp}",
+      "today_items": "Today: {completed}/{total} items",
+      "streak": "Current streak: {streak} days"
+    },
+    "daily_report": {
+      "title": "Daily Report",
+      "root_header": "Daily Report for {date}",
+      "template_line": "Template: {template}",
+      "completion_line": "Completion: {completed}/{total}",
+      "status_header": "Completion Status:",
+      "filter_all": "All",
+      "filter_not_filled": "Not filled",
+      "filter_filled": "Filled",
+      "all_done": "All items are completed for today.",
+      "session_expired": "Session expired for that item. Please pick it again.",
+      "item_not_found": "Item not found.",
+      "saved": "Saved.",
+      "invalid_time": "Please enter time as HH:MM (for example: 06:30).",
+      "invalid_duration": "Please enter duration in minutes (for example: 90).",
+      "invalid_number": "Please enter a numeric value.",
+      "save_failed": "Could not save the value. Please try again.",
+      "numeric_title": "Set value for {label}",
+      "numeric_current": "Current value: {value}",
+      "numeric_hint": "Use the buttons below to adjust the value, or send a number as text.",
+      "numeric_save": "💾 Save",
+      "numeric_skip": "⏭ Skip",
+      "time_title": "Set time for {label}",
+      "time_current": "Current time: {value}",
+      "time_hint": "Use the buttons below to choose the hour, minutes, and AM/PM.",
+      "time_save": "💾 Save time"
+    }
+  },
+  "buttons": {
+    "reload": "Reload",
+    "back": "Back",
+    "send_report": "Send report",
+    "dr_today_status": "📋 Today Status",
+    "dr_fill_next": "✏️ Fill Next",
+    "dr_fill_specific": "🧩 Fill Specific Item",
+    "dr_templates": "🗂 Templates",
+    "dr_history": "🕘 History",
+    "dr_lock": "✅ Submit / Lock",
+    "back": "⬅️ Back"
+  },
+  "errors": {
+    "unexpected": "An unexpected error occurred and could not be reported.",
+    "with_code": "An error occurred. Tracking code: {code}"
+  }
+}
