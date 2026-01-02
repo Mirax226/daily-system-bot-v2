@@ -1203,6 +1203,142 @@ const renderYesterdayMenu = async (ctx: Context): Promise<void> => {
   });
 };
 
+const renderTemplatesScreen = async (ctx: Context): Promise<void> => {
+  const { user, settings } = await ensureUserAndSettings(ctx);
+  await ensureDefaultTemplate(user.id);
+  const templates = await listUserTemplates(user.id);
+  const activeTemplateId = (settings.settings_json as { active_template_id?: string } | null)?.active_template_id ?? templates[0]?.id ?? null;
+
+  const lines: string[] = [t('screens.daily_report.templates_title'), ''];
+  if (!templates.length) {
+    lines.push('No templates found.');
+  } else {
+    templates.forEach((tpl) => {
+      const prefix = tpl.id === activeTemplateId ? '⭐' : '•';
+      lines.push(`${prefix} ${tpl.title} (${tpl.itemCount} items)`);
+    });
+  }
+
+  const kb = new InlineKeyboard();
+  for (const tpl of templates) {
+    const setActiveBtn = await makeActionButton(ctx, { label: 'Set Active', action: 'dr.template_set_active', data: { templateId: tpl.id } });
+    const detailsBtn = await makeActionButton(ctx, { label: 'Details', action: 'dr.template_details', data: { templateId: tpl.id } });
+    kb.text(setActiveBtn.text, setActiveBtn.callback_data).text(detailsBtn.text, detailsBtn.callback_data).row();
+  }
+
+  const newBtn = await makeActionButton(ctx, { label: '➕ New Template', action: 'dr.template_new' });
+  const backBtn = await makeActionButton(ctx, { label: '⬅️ Back', action: 'dr.menu' });
+  kb.text(newBtn.text, newBtn.callback_data).row().text(backBtn.text, backBtn.callback_data);
+
+  await renderScreen(ctx, {
+    titleKey: t('screens.daily_report.title'),
+    bodyLines: lines,
+    inlineKeyboard: kb
+  });
+};
+
+const renderTemplateDetails = async (ctx: Context, templateId: string): Promise<void> => {
+  const { user } = await ensureUserAndSettings(ctx);
+  const template = await getTemplateById(templateId);
+  if (!template || template.user_id !== user.id) {
+    await renderTemplatesScreen(ctx);
+    return;
+  }
+  const items = await listItems(template.id);
+  const lines = [template.title, `${items.length} items`];
+  const preview = items.slice(0, 5);
+  if (preview.length) {
+    lines.push('', ...preview.map((i) => `• ${i.label}`));
+  }
+
+  const duplicateBtn = await makeActionButton(ctx, { label: '✏️ Duplicate', action: 'dr.template_duplicate', data: { templateId } });
+  const deleteBtn = await makeActionButton(ctx, { label: '🗑 Delete', action: 'dr.template_delete_confirm', data: { templateId } });
+  const backBtn = await makeActionButton(ctx, { label: '⬅️ Back', action: 'dr.templates' });
+
+  const kb = new InlineKeyboard().text(duplicateBtn.text, duplicateBtn.callback_data).row().text(deleteBtn.text, deleteBtn.callback_data).row().text(backBtn.text, backBtn.callback_data);
+
+  await renderScreen(ctx, {
+    titleKey: t('screens.daily_report.title'),
+    bodyLines: lines,
+    inlineKeyboard: kb
+  });
+};
+
+const renderHistory = async (ctx: Context, range: '7d' | '30d' = '7d'): Promise<void> => {
+  const { user } = await ensureUserAndSettings(ctx);
+  const days = await listRecentReportDays({ userId: user.id, range });
+
+  const lines: string[] = [t('screens.daily_report.history_title'), t('screens.daily_report.history_range', { range: range === '7d' ? '7 days' : '30 days' }), ''];
+  if (!days.length) {
+    lines.push('No reports found in this range.');
+  } else {
+    days.forEach((entry) => {
+      let icon = '⚠️';
+      if (entry.total > 0 && entry.completed === entry.total) icon = '✅';
+      else if (entry.completed === 0) icon = '⬜️';
+      lines.push(`${icon} ${entry.day.local_date} — ${entry.completed}/${entry.total}`);
+    });
+  }
+
+  const kb = new InlineKeyboard();
+  const last7 = await makeActionButton(ctx, { label: 'Last 7 days', action: 'dr.history', data: { range: '7d' as const } });
+  const last30 = await makeActionButton(ctx, { label: 'Last 30 days', action: 'dr.history', data: { range: '30d' as const } });
+  kb.text(last7.text, last7.callback_data).text(last30.text, last30.callback_data).row();
+
+  for (const entry of days) {
+    const labelIcon = entry.total > 0 && entry.completed === entry.total ? '✅' : entry.completed === 0 ? '⬜️' : '⚠️';
+    const btn = await makeActionButton(ctx, {
+      label: `${labelIcon} ${entry.day.local_date} — ${entry.completed}/${entry.total}`,
+      action: 'dr.history_day',
+      data: { reportDayId: entry.day.id, range }
+    });
+    kb.text(btn.text, btn.callback_data).row();
+  }
+
+  const backBtn = await makeActionButton(ctx, { label: '⬅️ Back', action: 'dr.menu' });
+  kb.text(backBtn.text, backBtn.callback_data);
+
+  await renderScreen(ctx, {
+    titleKey: t('screens.daily_report.title'),
+    bodyLines: lines,
+    inlineKeyboard: kb
+  });
+};
+
+const renderHistoryDay = async (ctx: Context, reportDayId: string, range: '7d' | '30d' = '7d'): Promise<void> => {
+  const { user } = await ensureUserAndSettings(ctx);
+  const reportDay = await getReportDayById(reportDayId);
+  if (!reportDay || reportDay.user_id !== user.id) {
+    await renderHistory(ctx, range);
+    return;
+  }
+  const items = await listItems(reportDay.template_id);
+  const statuses = await listCompletionStatus(reportDay.id, items);
+  const completed = statuses.filter((s) => s.filled).length;
+  const lines: string[] = [reportDay.local_date, `Completion: ${completed}/${statuses.length}`, ''];
+  statuses.forEach((status) => {
+    const icon = status.filled ? '✅' : status.skipped ? '⏭' : '⬜️';
+    lines.push(`${icon} ${status.item.label}`);
+  });
+
+  const exportBtn = await makeActionButton(ctx, { label: '📤 Export (coming soon)', action: 'noop' });
+  const backHistoryBtn = await makeActionButton(ctx, { label: '⬅️ Back to history', action: 'dr.history', data: { range } });
+  const backBtn = await makeActionButton(ctx, { label: '⬅️ Back', action: 'dr.menu' });
+
+  const kb = new InlineKeyboard()
+    .text(exportBtn.text, exportBtn.callback_data)
+    .row()
+    .text(backHistoryBtn.text, backHistoryBtn.callback_data)
+    .row()
+    .text(backBtn.text, backBtn.callback_data);
+
+  await renderScreen(ctx, {
+    titleKey: t('screens.daily_report.title'),
+    bodyLines: lines,
+    inlineKeyboard: kb
+  });
+};
+
 const renderDailyStatusWithFilter = async (ctx: Context, filter: 'all' | 'not_filled' | 'filled' = 'all'): Promise<void> => {
   const { reportDay, items } = await ensureReportContext(ctx);
   const statuses = await listCompletionStatus(reportDay.id, items);
