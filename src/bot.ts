@@ -802,8 +802,9 @@ const handleSaveValue = async (ctx: Context, text: string): Promise<void> => {
 };
 
 const renderSettingsRoot = async (ctx: Context): Promise<void> => {
+  const speedBtn = await makeActionButton(ctx, { label: '⚡ Speed / Ping Test', action: 'settings.speed_test' });
   const backBtn = await makeActionButton(ctx, { label: '⬅️ Back', action: 'nav.dashboard' });
-  const kb = new InlineKeyboard().text(backBtn.text, backBtn.callback_data);
+  const kb = new InlineKeyboard().text(speedBtn.text, speedBtn.callback_data).row().text(backBtn.text, backBtn.callback_data);
   await renderScreen(ctx, { titleKey: 'Settings', bodyLines: ['Choose an option:'], inlineKeyboard: kb });
 };
 
@@ -1112,6 +1113,44 @@ bot.callbackQuery(/^[A-Za-z0-9_-]{8,12}$/, async (ctx) => {
           delete updated.timeDraft;
           userStates.set(telegramId, updated);
         }
+        break;
+      }
+      case 'settings.speed_test': {
+        const startHandler = Date.now();
+        const { user } = await ensureUserAndSettings(ctx);
+
+        const supabaseStart = Date.now();
+        await getOrCreateUserSettings(user.id);
+        const supabaseMs = Date.now() - supabaseStart;
+
+        const chatId = ctx.chat?.id;
+        let telegramMs = 0;
+        if (chatId) {
+          const telegramStart = Date.now();
+          await ctx.api.sendChatAction(chatId, 'typing');
+          telegramMs = Date.now() - telegramStart;
+        }
+
+        const handlerMs = Date.now() - startHandler;
+
+        const lines = [
+          'Speed / Ping Test',
+          '',
+          `Supabase (user settings query): ~${supabaseMs} ms`,
+          `Telegram API (sendChatAction): ~${telegramMs} ms`,
+          `End-to-end handler: ~${handlerMs} ms`,
+          '',
+          'These values are approximate and averaged over a single attempt.'
+        ];
+
+        const backBtn = await makeActionButton(ctx, { label: t('buttons.back'), action: 'nav.settings' });
+        const kb = new InlineKeyboard().text(backBtn.text, backBtn.callback_data);
+
+        await renderScreen(ctx, {
+          titleKey: 'Speed / Ping Test',
+          bodyLines: lines,
+          inlineKeyboard: kb
+        });
         break;
       }
       case 'dr.num_delta': {
