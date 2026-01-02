@@ -41,7 +41,15 @@
       "time_title": "Set time for {label}",
       "time_current": "Current time: {value}",
       "time_hint": "Use the buttons below to choose the hour, minutes, and AM/PM.",
-      "time_save": "💾 Save time"
+      "time_save": "💾 Save time",
+      "lock_confirm_title": "Submit / Lock this day?",
+      "lock_confirm_body": "Locking will prevent further edits to today’s values.",
+      "already_locked": "This day is locked. You can no longer edit values for this date.",
+      "lock_success": "Day locked. Entries can no longer be edited.",
+      "templates_title": "Daily Report Templates",
+      "template_delete_confirm": "Delete template \"{title}\"?",
+      "history_title": "Daily Report History",
+      "history_range": "Range: {range}"
     }
   },
   "buttons": {

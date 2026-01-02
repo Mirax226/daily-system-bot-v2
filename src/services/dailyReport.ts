@@ -132,3 +132,77 @@ export async function saveValue(
 
   return valueRow;
 }
+
+export type ReportDayRowWithCompletion = { day: ReportDayRow; completed: number; total: number; skipped: number };
+
+const formatDate = (d: Date): string => d.toISOString().slice(0, 10);
+
+export async function listRecentReportDays(
+  params: { userId: string; range: '7d' | '30d' },
+  client: Client = getSupabaseClient()
+): Promise<ReportDayRowWithCompletion[]> {
+  const days = params.range === '30d' ? 30 : 7;
+  const start = new Date();
+  start.setDate(start.getDate() - (days - 1));
+  const startDate = formatDate(start);
+
+  const { data, error } = await client
+    .from(REPORT_DAYS_TABLE)
+    .select('*')
+    .eq('user_id', params.userId)
+    .gte('local_date', startDate)
+    .order('local_date', { ascending: false });
+
+  if (error) {
+    console.error({ scope: 'daily_report', event: 'recent_days_error', params, error });
+    throw new Error(`Failed to list recent report days: ${error.message}`);
+  }
+
+  const daysList = (data as ReportDayRow[]) ?? [];
+  const result: ReportDayRowWithCompletion[] = [];
+
+  for (const day of daysList) {
+    const { data: itemsData, error: itemsError } = await client
+      .from('report_items')
+      .select('*')
+      .eq('template_id', day.template_id)
+      .eq('enabled', true)
+      .order('sort_order', { ascending: true });
+
+    if (itemsError) {
+      console.error({ scope: 'daily_report', event: 'recent_items_error', dayId: day.id, error: itemsError });
+      continue;
+    }
+
+    const items = (itemsData as ReportItemRow[]) ?? [];
+    const statuses = await listCompletionStatus(day.id, items, client);
+    const completed = statuses.filter((s) => s.filled).length;
+    const skipped = statuses.filter((s) => s.skipped).length;
+    result.push({ day, completed, skipped, total: statuses.length });
+  }
+
+  return result;
+}
+
+export async function getReportDayById(reportDayId: string, client: Client = getSupabaseClient()): Promise<ReportDayRow | null> {
+  const { data, error } = await client.from(REPORT_DAYS_TABLE).select('*').eq('id', reportDayId).maybeSingle();
+
+  if (error) {
+    console.error({ scope: 'daily_report', event: 'day_get_error', reportDayId, error });
+    throw new Error(`Failed to load report day: ${error.message}`);
+  }
+
+  return (data as ReportDayRow | null) ?? null;
+}
+
+export async function lockReportDay(reportDayId: string, client: Client = getSupabaseClient()): Promise<ReportDayRow> {
+  const { data, error } = await client.from(REPORT_DAYS_TABLE).update({ locked: true }).eq('id', reportDayId).select('*').maybeSingle();
+  if (error) {
+    console.error({ scope: 'daily_report', event: 'lock_error', reportDayId, error });
+    throw new Error(`Failed to lock report day: ${error.message}`);
+  }
+  if (!data) {
+    throw new Error('Report day not found');
+  }
+  return data as ReportDayRow;
+}

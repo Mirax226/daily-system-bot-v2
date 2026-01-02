@@ -373,6 +373,7 @@ export type Database = {
           id: string;
           user_id: string;
           onboarded: boolean;
+          settings_json: Record<string, unknown> | null;
           created_at: string;
           updated_at: string;
         };
@@ -380,6 +381,7 @@ export type Database = {
           id?: string;
           user_id: string;
           onboarded?: boolean;
+          settings_json?: Record<string, unknown> | null;
           created_at?: string;
           updated_at?: string;
         };
@@ -387,6 +389,7 @@ export type Database = {
           id?: string;
           user_id?: string;
           onboarded?: boolean;
+          settings_json?: Record<string, unknown> | null;
           created_at?: string;
           updated_at?: string;
         };
@@ -478,6 +481,7 @@ export type Database = {
           template_id: string;
           local_date: string;
           status: string | null;
+          locked: boolean;
           created_at_utc: string;
           updated_at_utc: string;
         };
@@ -487,6 +491,7 @@ export type Database = {
           template_id: string;
           local_date: string;
           status?: string | null;
+          locked?: boolean;
           created_at_utc?: string;
           updated_at_utc?: string;
         };
@@ -496,6 +501,7 @@ export type Database = {
           template_id?: string;
           local_date?: string;
           status?: string | null;
+          locked?: boolean;
           created_at_utc?: string;
           updated_at_utc?: string;
         };

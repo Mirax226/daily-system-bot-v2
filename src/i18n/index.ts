@@ -1,9 +1,11 @@
 import en from './en.json';
+import fa from './fa.json';
 
 type Messages = typeof en;
 
 const messages = {
-  en
+  en,
+  fa
 };
 
 export function t(key: string, params?: Record<string, string | number>, locale: keyof typeof messages = 'en'): string {
