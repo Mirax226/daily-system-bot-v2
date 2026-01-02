@@ -263,21 +263,3 @@ export async function autoLockIfCompleted(
   }
   return reportDay;
 }
-
-export async function listReportDaysByRange(
-  params: { userId: string; startDate: string; endDate: string },
-  client: Client = getSupabaseClient()
-): Promise<ReportDayRow[]> {
-  const { data, error } = await client
-    .from(REPORT_DAYS_TABLE)
-    .select('*')
-    .eq('user_id', params.userId)
-    .gte('local_date', params.startDate)
-    .lte('local_date', params.endDate)
-    .order('local_date', { ascending: false });
-  if (error) {
-    console.error({ scope: 'daily_report', event: 'list_range_error', params, error });
-    throw new Error(`Failed to list report days: ${error.message}`);
-  }
-  return (data as ReportDayRow[]) ?? [];
-}
