@@ -1,31 +1,32 @@
 import { Keyboard } from 'grammy';
 import type { Context } from 'grammy';
 import type { ReplyKeyboardMarkup } from 'grammy/types';
+import { t } from '../i18n';
 
 export const buildMainMenuKeyboard = (options: { aiEnabled: boolean }): ReplyKeyboardMarkup => {
   const kb = new Keyboard()
-    .text('🏠 Dashboard')
+    .text(t('buttons.nav_dashboard'))
     .row()
-    .text('🧾 Daily Report')
-    .text('📘 Reportcar')
+    .text(t('buttons.nav_daily_report'))
+    .text(t('buttons.nav_reportcar'))
     .row()
-    .text('✅ Tasks / Routines')
-    .text('📋 To-Do List')
+    .text(t('buttons.nav_tasks'))
+    .text(t('buttons.nav_todo'))
     .row()
-    .text('🗓 Planning')
-    .text('🧭 My Day')
+    .text(t('buttons.nav_planning'))
+    .text(t('buttons.nav_my_day'))
     .row()
-    .text('📝 Free Text')
-    .text('⏰ Reminders')
+    .text(t('buttons.nav_free_text'))
+    .text(t('buttons.nav_reminders'))
     .row()
-    .text('🎁 Reward Center')
-    .text('📊 Reports')
+    .text(t('buttons.nav_rewards'))
+    .text(t('buttons.nav_reports'))
     .row()
-    .text('📅 Calendar & Events')
-    .text('⚙️ Settings');
+    .text(t('buttons.nav_calendar'))
+    .text(t('buttons.nav_settings'));
 
   if (options.aiEnabled) {
-    kb.row().text('🤖 AI');
+    kb.row().text(t('buttons.nav_ai'));
   }
 
   return kb.resized();
@@ -36,5 +37,5 @@ export const aiEnabledForUser = (settingsJson: Record<string, unknown> | null | 
 
 export const sendMainMenu = async (ctx: Context, aiEnabled: boolean): Promise<void> => {
   const keyboard = buildMainMenuKeyboard({ aiEnabled });
-  await ctx.reply('Main menu', { reply_markup: keyboard });
+  await ctx.reply(t('screens.main_menu.title'), { reply_markup: keyboard });
 };
