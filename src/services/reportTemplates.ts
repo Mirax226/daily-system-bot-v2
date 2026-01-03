@@ -16,6 +16,7 @@ const defaultItems = (templateId: string): Omit<ReportItemRow, 'id' | 'created_a
     category: 'sleep',
     xp_mode: 'fixed',
     xp_value: 5,
+    xp_max_per_day: null,
     options_json: {},
     sort_order: 10,
     enabled: true
@@ -28,6 +29,7 @@ const defaultItems = (templateId: string): Omit<ReportItemRow, 'id' | 'created_a
     category: 'sleep',
     xp_mode: 'fixed',
     xp_value: 5,
+    xp_max_per_day: null,
     options_json: {},
     sort_order: 20,
     enabled: true
@@ -40,6 +42,7 @@ const defaultItems = (templateId: string): Omit<ReportItemRow, 'id' | 'created_a
     category: 'routine',
     xp_mode: 'fixed',
     xp_value: 10,
+    xp_max_per_day: null,
     options_json: {},
     sort_order: 30,
     enabled: true
@@ -48,10 +51,11 @@ const defaultItems = (templateId: string): Omit<ReportItemRow, 'id' | 'created_a
     template_id: templateId,
     label: 'Study Session (minutes)',
     item_key: 'study_minutes',
-    item_type: 'number',
+    item_type: 'duration_minutes',
     category: 'study',
-    xp_mode: 'time',
+    xp_mode: 'per_minute',
     xp_value: 1,
+    xp_max_per_day: null,
     options_json: { study_mode: 'minutes' },
     sort_order: 40,
     enabled: true
@@ -157,6 +161,7 @@ type ReportItemPatch = Partial<{
   category: string | null;
   xp_mode: string | null;
   xp_value: number | null;
+  xp_max_per_day: number | null;
   options_json: Record<string, unknown>;
   sort_order: number;
   enabled: boolean;
@@ -221,6 +226,7 @@ export async function upsertItem(
     category?: string | null;
     xpMode?: string | null;
     xpValue?: number | null;
+    xpMaxPerDay?: number | null;
     optionsJson?: Record<string, unknown>;
     sortOrder?: number;
   },
@@ -234,6 +240,7 @@ export async function upsertItem(
     category: params.category ?? null,
     xp_mode: params.xpMode ?? null,
     xp_value: params.xpValue ?? null,
+    xp_max_per_day: params.xpMaxPerDay ?? null,
     options_json: params.optionsJson ?? {},
     sort_order: params.sortOrder ?? 0,
     enabled: true
@@ -260,6 +267,24 @@ export async function getTemplateById(templateId: string, client: Client = getSu
     throw new Error(`Failed to load report template: ${error.message}`);
   }
   return (data as ReportTemplateRow | null) ?? null;
+}
+
+export async function updateTemplateTitle(
+  params: { templateId: string; userId: string; title: string },
+  client: Client = getSupabaseClient()
+): Promise<ReportTemplateRow> {
+  const { data, error } = await client
+    .from(REPORT_TEMPLATES_TABLE)
+    .update({ title: params.title, updated_at: new Date().toISOString() })
+    .eq('id', params.templateId)
+    .eq('user_id', params.userId)
+    .select('*')
+    .maybeSingle();
+  if (error || !data) {
+    console.error({ scope: 'report_templates', event: 'template_title_update_error', params, error });
+    throw new Error(`Failed to rename template: ${error?.message}`);
+  }
+  return data as ReportTemplateRow;
 }
 
 export type TemplateWithCount = ReportTemplateRow & { itemCount: number };
@@ -367,6 +392,7 @@ export async function duplicateTemplate(
     category: item.category,
     xp_mode: item.xp_mode,
     xp_value: item.xp_value,
+    xp_max_per_day: (item as ReportItemRow & { xp_max_per_day?: number | null }).xp_max_per_day ?? null,
     options_json: item.options_json ?? {},
     sort_order: item.sort_order,
     enabled: item.enabled

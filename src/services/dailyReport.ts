@@ -52,15 +52,40 @@ export async function listCompletionStatus(
   });
 }
 
-const computeTimeXp = (item: ReportItemRow, valueJson: Record<string, unknown> | null): number => {
-  if (!valueJson || item.xp_mode !== 'time') return 0;
-  const minutes = Number((valueJson as { minutes?: number }).minutes ?? 0);
-  if (Number.isNaN(minutes) || minutes <= 0) return 0;
-  const perMinute = item.xp_value ?? 0;
-  return perMinute * minutes;
+const shouldApplyXp = (existing: ReportValueRow | null): boolean => !existing || existing.xp_delta_applied === false;
+
+const resolveXpMode = (xpMode?: string | null): 'fixed' | 'per_minute' | 'none' => {
+  if (xpMode === 'fixed') return 'fixed';
+  if (xpMode === 'per_minute' || xpMode === 'time') return 'per_minute';
+  return 'none';
 };
 
-const shouldApplyXp = (existing: ReportValueRow | null): boolean => !existing || existing.xp_delta_applied === false;
+const extractMinutes = (item: ReportItemRow, valueJson: Record<string, unknown> | null): number => {
+  if (!valueJson) return 0;
+  if (item.item_type === 'duration_minutes') {
+    const minutes = Number((valueJson as { minutes?: number; value?: number }).minutes ?? (valueJson as { value?: number }).value ?? 0);
+    return Number.isFinite(minutes) ? Math.max(0, minutes) : 0;
+  }
+  if (item.item_type === 'time_hhmm') return 0;
+  const minutesFromJson = Number((valueJson as { minutes?: number }).minutes ?? 0);
+  if (Number.isFinite(minutesFromJson) && minutesFromJson > 0) return minutesFromJson;
+  return 0;
+};
+
+const computeXpDelta = (item: ReportItemRow, valueJson: Record<string, unknown> | null): { delta: number; minutes: number } => {
+  const xpMode = resolveXpMode(item.xp_mode);
+  if (xpMode === 'none') return { delta: 0, minutes: 0 };
+  if (xpMode === 'fixed') {
+    return { delta: item.xp_value ?? 0, minutes: 0 };
+  }
+  const minutes = extractMinutes(item, valueJson);
+  const perMinute = item.xp_value ?? 0;
+  const raw = minutes * perMinute;
+  const capped =
+    item.xp_max_per_day != null && item.xp_max_per_day > 0 ? Math.min(raw, item.xp_max_per_day) : raw;
+  const delta = Math.max(0, Math.floor(capped));
+  return { delta, minutes };
+};
 
 export async function saveValue(
   params: {
@@ -104,21 +129,21 @@ export async function saveValue(
   const valueRow = data as ReportValueRow;
 
   if (shouldApplyXp(existing ?? null)) {
-    let delta = 0;
-    if (params.item.xp_mode === 'fixed') {
-      delta = params.item.xp_value ?? 0;
-    } else if (params.item.xp_mode === 'time') {
-      delta = computeTimeXp(params.item, params.valueJson);
-    }
-
+    const { delta, minutes } = computeXpDelta(params.item, params.valueJson);
     if (delta !== 0) {
       try {
         await addXpDelta({
           userId: params.userId,
           delta,
           reason: `report:${params.reportDayId}:${params.item.id}`,
-          refType: 'report_item',
-          refId: params.item.id
+          refType: 'daily_report',
+          refId: params.item.id,
+          metadata: {
+            source_type: 'daily_report',
+            item_id: params.item.id,
+            xp_mode: resolveXpMode(params.item.xp_mode),
+            minutes
+          }
         });
         await client
           .from(REPORT_VALUES_TABLE)
