@@ -312,6 +312,7 @@ export type Database = {
           reason: string;
           ref_type: string | null;
           ref_id: string | null;
+          metadata_json: Record<string, unknown>;
           created_at_utc: string;
         };
         Insert: {
@@ -321,6 +322,7 @@ export type Database = {
           reason: string;
           ref_type?: string | null;
           ref_id?: string | null;
+          metadata_json?: Record<string, unknown>;
           created_at_utc?: string;
         };
         Update: {
@@ -330,6 +332,7 @@ export type Database = {
           reason?: string;
           ref_type?: string | null;
           ref_id?: string | null;
+          metadata_json?: Record<string, unknown>;
           created_at_utc?: string;
         };
         Relationships: [];
@@ -436,6 +439,7 @@ export type Database = {
           category: string | null;
           xp_mode: string | null;
           xp_value: number | null;
+          xp_max_per_day: number | null;
           options_json: Record<string, unknown>;
           sort_order: number;
           enabled: boolean;
@@ -451,6 +455,7 @@ export type Database = {
           category?: string | null;
           xp_mode?: string | null;
           xp_value?: number | null;
+          xp_max_per_day?: number | null;
           options_json?: Record<string, unknown>;
           sort_order?: number;
           enabled?: boolean;
@@ -466,6 +471,7 @@ export type Database = {
           category?: string | null;
           xp_mode?: string | null;
           xp_value?: number | null;
+          xp_max_per_day?: number | null;
           options_json?: Record<string, unknown>;
           sort_order?: number;
           enabled?: boolean;
@@ -534,6 +540,51 @@ export type Database = {
           xp_delta_applied?: boolean;
           created_at_utc?: string;
           updated_at_utc?: string;
+        };
+        Relationships: [];
+      };
+      routines: {
+        Row: {
+          id: string;
+          user_id: string;
+          title: string;
+          description: string | null;
+          routine_type: string;
+          xp_mode: string;
+          xp_value: number | null;
+          xp_max_per_day: number | null;
+          is_active: boolean;
+          sort_order: number;
+          created_at: string;
+          updated_at: string;
+        };
+        Insert: {
+          id?: string;
+          user_id: string;
+          title: string;
+          description?: string | null;
+          routine_type: string;
+          xp_mode?: string;
+          xp_value?: number | null;
+          xp_max_per_day?: number | null;
+          is_active?: boolean;
+          sort_order?: number;
+          created_at?: string;
+          updated_at?: string;
+        };
+        Update: {
+          id?: string;
+          user_id?: string;
+          title?: string;
+          description?: string | null;
+          routine_type?: string;
+          xp_mode?: string;
+          xp_value?: number | null;
+          xp_max_per_day?: number | null;
+          is_active?: boolean;
+          sort_order?: number;
+          created_at?: string;
+          updated_at?: string;
         };
         Relationships: [];
       };
@@ -626,6 +677,7 @@ export type DailyReportUpdate = Database['public']['Tables']['daily_reports']['U
 export type RewardRow = Database['public']['Tables']['rewards']['Row'];
 export type RewardPurchaseRow = Database['public']['Tables']['reward_purchases']['Row'];
 export type XpLedgerRow = Database['public']['Tables']['xp_ledger']['Row'];
+export type RoutineRow = Database['public']['Tables']['routines']['Row'];
 export type UserSettingsRow = Database['public']['Tables']['user_settings']['Row'];
 export type CallbackTokenRow = Database['public']['Tables']['callback_tokens']['Row'];
 export type ReportTemplateRow = Database['public']['Tables']['report_templates']['Row'];

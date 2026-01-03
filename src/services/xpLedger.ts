@@ -14,7 +14,7 @@ const handleMissing = (error: PostgrestError | null, context: Record<string, unk
 };
 
 export async function addXpDelta(
-  params: { userId: string; delta: number; reason: string; refType?: string | null; refId?: string | null },
+  params: { userId: string; delta: number; reason: string; refType?: string | null; refId?: string | null; metadata?: Record<string, unknown> | null },
   client: Client = getSupabaseClient()
 ): Promise<void> {
   const payload: Database['public']['Tables']['xp_ledger']['Insert'] = {
@@ -22,7 +22,8 @@ export async function addXpDelta(
     delta: params.delta,
     reason: params.reason,
     ref_type: params.refType ?? null,
-    ref_id: params.refId ?? null
+    ref_id: params.refId ?? null,
+    metadata_json: params.metadata ?? {}
   };
 
   const { error } = await client.from(XP_LEDGER_TABLE).insert(payload);
