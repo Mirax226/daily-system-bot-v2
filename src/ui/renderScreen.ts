@@ -2,10 +2,12 @@ import { InlineKeyboard } from 'grammy';
 import type { Context } from 'grammy';
 import { ensureUser } from '../services/users';
 import { getOrCreateUserSettings } from '../services/userSettings';
+import { t } from '../i18n';
 
 export type RenderScreenParams = {
-  titleKey: string;
-  bodyLines: string[];
+  titleKey?: string;
+  title?: string;
+  bodyLines?: string[];
   inlineKeyboard?: InlineKeyboard;
 };
 
@@ -20,7 +22,23 @@ export const ensureUserAndSettings = async (ctx: Context) => {
 
 export const renderScreen = async (ctx: Context, params: RenderScreenParams): Promise<void> => {
   await ensureUserAndSettings(ctx);
-  const text = [params.titleKey, '', ...params.bodyLines].join('\n');
+
+  const resolvedTitle =
+    params.title ??
+    (params.titleKey && (params.titleKey.startsWith('screens.') || params.titleKey.startsWith('errors.'))
+      ? t(params.titleKey)
+      : params.titleKey) ??
+    '';
+
+  const resolvedLines =
+    params.bodyLines?.map((line) => {
+      if (typeof line === 'string' && (line.startsWith('screens.') || line.startsWith('errors.'))) {
+        return t(line);
+      }
+      return line;
+    }) ?? [];
+
+  const text = [resolvedTitle, '', ...resolvedLines].join('\n');
   const replyMarkup = params.inlineKeyboard;
 
   if (ctx.callbackQuery?.message) {

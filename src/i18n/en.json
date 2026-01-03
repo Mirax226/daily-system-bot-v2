@@ -55,20 +55,139 @@
       "history_range": "Range: {range}",
       "today_locked_flag": "Today is locked (read-only).",
       "yesterday_title": "Yesterday's report ({date})",
-      "yesterday_closed": "Yesterday has been closed. Remaining items were skipped."
-    }
+      "yesterday_closed": "Yesterday has been closed. Remaining items were skipped.",
+      "day_locked": "This day is locked.",
+      "none_filled": "No filled items to show.",
+      "none_pending": "No pending items to show.",
+      "send_value_as_text": "Or send a value as text.",
+      "set_value_for": "Set value for {label}",
+      "today_locked_note": "Today is locked (read-only)."
+    },
+    "settings": {
+      "title": "Settings",
+      "choose_option": "Choose an option:",
+      "default_routine_label": "Routine",
+      "enter_xp_for_routine": "Enter XP value for this routine:",
+      "invalid_xp": "Please enter a valid XP number.",
+      "speed_title": "Speed test",
+      "speed_supabase": "Supabase: {ms} ms",
+      "speed_telegram": "Telegram: {ms} ms",
+      "speed_handler": "Handler total: {ms} ms",
+      "speed_note": "These timings are approximate. Run again to compare."
+    },
+    "reports": {
+      "title": "Reports",
+      "choose_category": "Choose a category:",
+      "xp_title": "XP Summary",
+      "xp_earned": "Earned: {earned}",
+      "xp_spent": "Spent: {spent}",
+      "xp_net": "Net: {net}"
+    },
+    "rewards": {
+      "title": "Reward Center",
+      "balance": "XP Balance: {xp}",
+      "choose_option": "Choose an option:",
+      "choose_reward": "Choose a reward to purchase:",
+      "edit_store_title": "Reward Store",
+      "edit_store_empty": "No rewards yet.",
+      "edit_store_list_header": "Rewards:",
+      "edit_store_hint": "Select a reward to edit.",
+      "edit_title": "Edit reward",
+      "editing": "Editing {title} ({xp} XP)",
+      "status_line": "Status: {status}",
+      "empty": "No rewards available.",
+      "purchased": "Purchased {title} for {xp} XP.",
+      "new_balance": "New balance: {xp} XP",
+      "add_title": "Add reward",
+      "ask_title": "Send a title for the reward.",
+      "ask_description": "Send a description (or type /skip to leave blank).",
+      "ask_new_title": "Send the new title.",
+      "ask_new_description": "Send the new description (or type /skip to clear).",
+      "ask_new_xp": "Send the new XP cost.",
+      "ask_xp_cost": "Send the XP cost for this reward.",
+      "confirm_delete": "Delete \"{title}\"?",
+      "delete_title": "Delete reward",
+      "invalid_xp_cost": "Please enter a valid XP cost."
+    },
+    "reportcar": {
+      "title": "Reportcar",
+      "coming_soon": "Reportcar is coming soon."
+    },
+    "tasks": {
+      "title": "Tasks / Routines",
+      "coming_soon": "Tasks are coming soon."
+    },
+    "todo": {
+      "title": "To-Do List",
+      "coming_soon": "To-Do List is coming soon."
+    },
+    "planning": {
+      "title": "Planning",
+      "coming_soon": "Planning is coming soon."
+    },
+    "my_day": {
+      "title": "My Day",
+      "coming_soon": "My Day is coming soon."
+    },
+    "free_text": {
+      "title": "Free Text",
+      "coming_soon": "Free Text is coming soon."
+    },
+    "reminders": {
+      "title": "Reminders",
+      "coming_soon": "Reminders are coming soon."
+    },
+    "calendar": {
+      "title": "Calendar & Events",
+      "coming_soon": "Calendar & Events are coming soon."
+    },
+    "ai": {
+      "title": "AI",
+      "coming_soon": "AI features are coming soon."
+    },
+    "history": {
+      "title": "Daily Report History",
+      "range": "Range: {start} - {end}",
+      "none": "No history found.",
+      "day_title": "Daily Report ({date})"
+    },
+    "templates": {
+      "title": "Daily Report Templates",
+      "none": "No templates yet.",
+      "details_title": "Template details",
+      "new_coming_soon": "Template creation is coming soon.",
+      "default_title": "Default Template"
+    },
+    "error_report": {
+      "sent": "Thanks! Your report was sent."
+    },
+    "debug_inline": {
+      "title": "Inline debug screen",
+      "success": "Inline is working!"
+    },
+    "main_menu": {
+      "title": "Main menu"
+    },
+    "coming_soon_generic": "Coming soon: {feature}"
   },
   "buttons": {
+    "nav_dashboard": "🏠 Dashboard",
     "nav_daily_report": "🧾 Daily Report",
     "nav_reportcar": "📘 Reportcar",
     "nav_tasks": "✅ Tasks / Routines",
+    "nav_todo": "📋 To-Do List",
+    "nav_planning": "🗓 Planning",
+    "nav_my_day": "🧭 My Day",
+    "nav_free_text": "📝 Free Text",
     "nav_reminders": "⏰ Reminders",
     "nav_rewards": "🎁 Reward Center",
     "nav_reports": "📊 Reports",
+    "nav_calendar": "📅 Calendar & Events",
     "nav_settings": "⚙️ Settings",
-    "reload": "Reload",
-    "back": "Back",
-    "send_report": "Send report",
+    "nav_ai": "🤖 AI",
+    "reload": "🔄 Reload",
+    "back": "⬅️ Back",
+    "send_report": "📨 Send report",
     "dr_today_status": "📋 Today Status",
     "dr_fill_next": "✏️ Fill Next",
     "dr_fill_specific": "🧩 Fill Specific Item",
@@ -76,11 +195,52 @@
     "dr_history": "🕘 History",
     "dr_lock": "🔒 Lock day",
     "dr_unlock": "🔓 Unlock day",
-    "dr_yesterday_catchup": "Complete yesterday",
-    "back": "⬅️ Back"
+    "dr_yesterday_catchup": "📅 Complete yesterday",
+    "dr_fill_yesterday": "📅 Fill yesterday",
+    "dr_open_date": "Open day",
+    "skip": "⏭ Skip",
+    "cancel": "Cancel",
+    "am": "AM",
+    "pm": "PM",
+    "templates_new": "➕ New template",
+    "templates_set_active": "Set active",
+    "templates_duplicate": "Duplicate",
+    "templates_delete": "Delete",
+    "rewards_buy": "🛒 Buy rewards",
+    "rewards_edit_store": "🛠 Edit store",
+    "rewards_edit_title": "✏️ Edit title",
+    "rewards_edit_description": "Edit description",
+    "rewards_edit_xp": "Edit XP cost",
+    "rewards_activate": "Activate",
+    "rewards_deactivate": "Deactivate",
+    "rewards_delete": "Delete reward",
+    "rewards_add": "➕ Add reward",
+    "reports_xp": "📊 XP Summary",
+    "reports_sleep": "😴 Sleep",
+    "reports_study": "📚 Study",
+    "reports_tasks": "🧩 Non-study tasks",
+    "reports_chart": "📈 Study chart",
+    "settings_speed_test": "⚡ Speed / Ping Test",
+    "yes_delete": "Yes, delete",
+    "debug_inline": "Test button"
   },
   "errors": {
     "unexpected": "An unexpected error occurred and could not be reported.",
-    "with_code": "An error occurred. Tracking code: {code}"
+    "with_code": "An error occurred. Tracking code: {code}",
+    "unexpected_try_again": "An unexpected error occurred. Please try again.",
+    "action_expired": "This action expired. Please try again.",
+    "dashboard_unavailable": "Dashboard is unavailable. Please try again.",
+    "item_not_found": "Item not found.",
+    "report_not_found": "Report not found.",
+    "reward_not_found": "Reward not found.",
+    "rewards_unavailable": "Rewards are unavailable right now.",
+    "session_expired_start_over": "Session expired. Please start over.",
+    "error_title": "Error"
+  },
+  "common": {
+    "active": "Active",
+    "inactive": "Inactive",
+    "status": "Status",
+    "title": "Title"
   }
 }
