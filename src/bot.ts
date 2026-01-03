@@ -856,7 +856,7 @@ const renderDailyStatusWithFilter = async (ctx: Context, reportDayId: string, fi
     kb.text(btn.text, btn.callback_data).row();
   }
 
-  const backBtn = await makeActionButton(ctx, { label: t('buttons.back'), action: 'dr.menu', data: { reportDayId: reportDay.id } });
+  const backBtn = await makeActionButton(ctx, { label: t('buttons.back'), action: 'dr.menu' });
   kb.text(backBtn.text, backBtn.callback_data);
 
   await renderScreen(ctx, { titleKey: t('screens.daily_report.title'), bodyLines: lines, inlineKeyboard: kb });
@@ -1164,6 +1164,9 @@ bot.callbackQuery(/^[A-Za-z0-9_-]{8,12}$/, async (ctx) => {
         return;
       case 'nav.daily_report':
         await renderDailyReportRoot(ctx);
+        return;
+      case 'dr.back':
+        await renderDashboard(ctx);
         return;
       case 'nav.reportcar':
         await renderReportcar(ctx);
