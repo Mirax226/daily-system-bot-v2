@@ -29,8 +29,7 @@ import {
   setActiveTemplate,
   deleteTemplate,
   duplicateTemplate,
-  getTemplateById,
-  createUserTemplate
+  getTemplateById
 } from './services/reportTemplates';
 
 import {
@@ -40,7 +39,7 @@ import {
   saveValue,
   lockReportDay,
   unlockReportDay,
-  listReportDaysByRange
+  listRecentReportDays
 } from './services/dailyReport';
 
 import { consumeCallbackToken } from './services/callbackTokens';
@@ -83,10 +82,6 @@ type ReminderlessState = {
     rewardId?: string;
     step: 'title' | 'description' | 'xp' | 'confirm_delete';
     draft: { title?: string; description?: string | null; xpCost?: number };
-  };
-
-  templateCreate?: {
-    step: 'title';
   };
 };
 
@@ -883,46 +878,36 @@ const renderDailyStatusWithFilter = async (ctx: Context, reportDayId: string, fi
 
 const renderTemplatesScreen = async (ctx: Context, flashLine?: string): Promise<void> => {
   const { user, settings } = await ensureUserAndSettings(ctx);
-  const defaultTemplate = await ensureDefaultTemplate(user.id);
+  await ensureDefaultTemplate(user.id);
   const templates = await listUserTemplates(user.id);
   const settingsJson = (settings.settings_json ?? {}) as { active_template_id?: string | null };
-  const activeTemplateId = settingsJson.active_template_id ?? defaultTemplate.id;
-  const resolvedActiveId = templates.some((tpl) => tpl.id === activeTemplateId) ? activeTemplateId : defaultTemplate.id;
-  const templatesWithStatus = templates.map((tpl) => ({ ...tpl, isActive: tpl.id === resolvedActiveId }));
+  const fallbackTemplateId = templates[0]?.id ?? null;
+  const activeTemplateId = settingsJson.active_template_id ?? fallbackTemplateId;
+  const resolvedActiveId = templates.some((tpl) => tpl.id === activeTemplateId) ? activeTemplateId : fallbackTemplateId;
 
   const lines: string[] = [t('screens.daily_report.templates_title')];
-  if (flashLine) {
-    lines.push(flashLine);
-  }
-  if (templates.length) {
-    lines.push('');
-  }
-
-  if (templates.length <= 1) {
+  if (flashLine) lines.push(flashLine);
+  if (templates.length === 0) {
     lines.push(t('screens.daily_report.templates_empty'));
   } else {
-    lines.push(t('screens.daily_report.templates_list_header'));
-    templatesWithStatus.forEach((tpl) => {
-      lines.push(
-        t('screens.daily_report.templates_item_line', {
-          title: tpl.title ?? t('screens.templates.default_title'),
-          count: tpl.itemCount ?? 0,
-          active: tpl.isActive ? t('screens.daily_report.templates_item_active_suffix') : ''
-        })
-      );
+    templates.forEach((tpl) => {
+      const isActive = tpl.id === resolvedActiveId;
+      const prefix = isActive ? '⭐' : '•';
+      const title = tpl.title ?? t('screens.templates.default_title');
+      lines.push(`${prefix} ${title} (${tpl.itemCount ?? 0} items)`);
     });
   }
 
   const kb = new InlineKeyboard();
 
-  for (const tpl of templatesWithStatus) {
-    const label = `${tpl.title ?? t('screens.templates.default_title')}${tpl.isActive ? t('screens.daily_report.templates_item_active_suffix') : ''}`;
-    const btn = await makeActionButton(ctx, { label, action: 'dr.template_details', data: { templateId: tpl.id } });
-    kb.text(btn.text, btn.callback_data).row();
+  for (const tpl of templates) {
+    const setActiveBtn = await makeActionButton(ctx, { label: t('buttons.dr_template_set_active'), action: 'dr.template_set_active', data: { templateId: tpl.id } });
+    const detailsBtn = await makeActionButton(ctx, { label: t('buttons.dr_template_details'), action: 'dr.template_details', data: { templateId: tpl.id } });
+    kb.text(setActiveBtn.text, setActiveBtn.callback_data).text(detailsBtn.text, detailsBtn.callback_data).row();
   }
 
-  const newBtn = await makeActionButton(ctx, { label: t('buttons.dr_templates_new'), action: 'dr.template_new' });
-  const backBtn = await makeActionButton(ctx, { label: t('buttons.back'), action: 'dr.back' });
+  const newBtn = await makeActionButton(ctx, { label: t('buttons.dr_template_new'), action: 'dr.template_new' });
+  const backBtn = await makeActionButton(ctx, { label: t('buttons.back'), action: 'dr.menu' });
 
   kb.text(newBtn.text, newBtn.callback_data).row();
   kb.text(backBtn.text, backBtn.callback_data);
@@ -930,53 +915,28 @@ const renderTemplatesScreen = async (ctx: Context, flashLine?: string): Promise<
   await renderScreen(ctx, { titleKey: t('screens.daily_report.templates_title'), bodyLines: lines, inlineKeyboard: kb });
 };
 
-const renderTemplateDetailsScreen = async (ctx: Context, templateId: string, flashLine?: string): Promise<void> => {
-  const { user, settings } = await ensureUserAndSettings(ctx);
+const renderTemplateDetails = async (ctx: Context, templateId: string): Promise<void> => {
+  const { user } = await ensureUserAndSettings(ctx);
   const tpl = await getTemplateById(templateId);
   if (!tpl || tpl.user_id !== user.id) {
     await renderTemplatesScreen(ctx);
     return;
   }
 
-  const defaultTemplate = await ensureDefaultTemplate(user.id);
-  const settingsJson = (settings.settings_json ?? {}) as { active_template_id?: string | null };
-  let activeTemplateId = settingsJson.active_template_id ?? defaultTemplate.id;
-  if (activeTemplateId !== defaultTemplate.id) {
-    const activeTemplate = await getTemplateById(activeTemplateId);
-    if (!activeTemplate || activeTemplate.user_id !== user.id) {
-      activeTemplateId = defaultTemplate.id;
-    }
-  }
-  const isActive = activeTemplateId === tpl.id;
   const items = await listItems(templateId);
+  const preview = items.slice(0, 5);
 
-  const lines: string[] = [t('screens.daily_report.templates_title')];
-  if (flashLine) lines.push(flashLine);
-
-  lines.push(
-    '',
-    t('screens.daily_report.template_details_header', { title: tpl.title ?? t('screens.templates.default_title') }),
-    t('screens.daily_report.template_details_items_line', { count: items.length })
-  );
-
-  if (isActive) {
-    lines.push(t('screens.daily_report.template_details_active_flag'));
+  const lines: string[] = [tpl.title ?? t('screens.templates.default_title'), `${items.length} items`];
+  if (preview.length) {
+    lines.push('');
+    preview.forEach((item) => lines.push(`• ${item.label}`));
   }
-
-  if (items.length) {
-    lines.push('', ...items.slice(0, 5).map((i) => `• ${i.label}`));
-  }
-
   lines.push('', t('screens.daily_report.templates_edit_coming_soon'));
 
   const kb = new InlineKeyboard();
 
-  if (!isActive) {
-    const setActiveBtn = await makeActionButton(ctx, { label: t('buttons.dr_templates_set_active'), action: 'dr.template_set_active', data: { templateId } });
-    kb.text(setActiveBtn.text, setActiveBtn.callback_data).row();
-  }
-  const dupBtn = await makeActionButton(ctx, { label: t('buttons.dr_templates_duplicate'), action: 'dr.template_duplicate', data: { templateId } });
-  const delBtn = await makeActionButton(ctx, { label: t('buttons.dr_templates_delete'), action: 'dr.template_delete_confirm', data: { templateId } });
+  const dupBtn = await makeActionButton(ctx, { label: t('buttons.dr_template_duplicate'), action: 'dr.template_duplicate', data: { templateId } });
+  const delBtn = await makeActionButton(ctx, { label: t('buttons.dr_template_delete'), action: 'dr.template_delete_confirm', data: { templateId } });
   const backBtn = await makeActionButton(ctx, { label: t('buttons.back'), action: 'dr.templates' });
 
   kb.text(dupBtn.text, dupBtn.callback_data).row();
@@ -994,13 +954,9 @@ const renderTemplateDeleteConfirm = async (ctx: Context, templateId: string): Pr
     return;
   }
 
-  const lines: string[] = [
-    t('screens.daily_report.templates_title'),
-    '',
-    t('screens.daily_report.template_delete_confirm', { title: tpl.title ?? t('screens.templates.default_title') })
-  ];
+  const lines: string[] = [t('screens.daily_report.templates_title'), '', t('screens.daily_report.template_delete_confirm', { title: tpl.title ?? t('screens.templates.default_title') })];
 
-  const confirmBtn = await makeActionButton(ctx, { label: t('buttons.yes_delete'), action: 'dr.template_delete', data: { templateId } });
+  const confirmBtn = await makeActionButton(ctx, { label: t('buttons.dr_template_delete'), action: 'dr.template_delete', data: { templateId } });
   const backBtn = await makeActionButton(ctx, { label: t('buttons.back'), action: 'dr.template_details', data: { templateId } });
 
   const kb = new InlineKeyboard().text(confirmBtn.text, confirmBtn.callback_data).row().text(backBtn.text, backBtn.callback_data);
@@ -1008,49 +964,34 @@ const renderTemplateDeleteConfirm = async (ctx: Context, templateId: string): Pr
   await renderScreen(ctx, { titleKey: t('screens.daily_report.templates_title'), bodyLines: lines, inlineKeyboard: kb });
 };
 
-const renderTemplateNewTitlePrompt = async (ctx: Context, errorLine?: string): Promise<void> => {
-  const lines: string[] = [t('screens.daily_report.templates_title')];
-  if (errorLine) lines.push(errorLine);
-  lines.push('', t('screens.daily_report.templates_new_prompt_title'));
-
-  const backBtn = await makeActionButton(ctx, { label: t('buttons.back'), action: 'dr.templates' });
-  const kb = new InlineKeyboard().text(backBtn.text, backBtn.callback_data);
-
-  await renderScreen(ctx, { titleKey: t('screens.daily_report.templates_title'), bodyLines: lines, inlineKeyboard: kb });
-};
-
-const renderHistory = async (ctx: Context): Promise<void> => {
+const renderHistory = async (ctx: Context, range: '7d' | '30d' = '7d'): Promise<void> => {
   const { user } = await ensureUserAndSettings(ctx);
-  const local = formatLocalTime(user.timezone ?? config.defaultTimezone);
+  const days = await listRecentReportDays({ userId: user.id, range });
 
-  // Show last 14 days by default.
-  const end = local.date;
-  const [yy, mm, dd] = end.split('-').map((x) => Number(x));
-  const dt = new Date(Date.UTC(yy, mm - 1, dd));
-  dt.setUTCDate(dt.getUTCDate() - 13);
-  const start = `${dt.getUTCFullYear()}-${String(dt.getUTCMonth() + 1).padStart(2, '0')}-${String(dt.getUTCDate()).padStart(2, '0')}`;
-
-  const days = await listReportDaysByRange({ userId: user.id, startLocalDate: start, endLocalDate: end });
-
-  const lines: string[] = [t('screens.history.title'), '', t('screens.history.range', { start, end })];
-
-  const kb = new InlineKeyboard();
+  const lines: string[] = [
+    t('screens.daily_report.history_title'),
+    t('screens.daily_report.history_range', { range: range === '7d' ? t('buttons.dr_history_7d') : t('buttons.dr_history_30d') }),
+    ''
+  ];
 
   if (!days.length) {
-    lines.push('', t('screens.history.none'));
+    lines.push(t('screens.daily_report.history_no_results'));
   } else {
-    lines.push('');
-    for (const day of days) {
-      const label = `${day.local_date}${day.locked ? ` 🔒` : ''}`;
-      const btn = await makeActionButton(ctx, { label, action: 'hist.open', data: { localDate: day.local_date } });
-      kb.text(btn.text, btn.callback_data).row();
+    for (const entry of days) {
+      const suffix = entry.day.locked ? ' (locked)' : '';
+      lines.push(`• ${entry.day.local_date}${suffix}`);
     }
   }
 
+  const kb = new InlineKeyboard();
+  const range7Btn = await makeActionButton(ctx, { label: t('buttons.dr_history_7d'), action: 'dr.history_7d' });
+  const range30Btn = await makeActionButton(ctx, { label: t('buttons.dr_history_30d'), action: 'dr.history_30d' });
   const backBtn = await makeActionButton(ctx, { label: t('buttons.back'), action: 'dr.menu' });
+
+  kb.text(range7Btn.text, range7Btn.callback_data).text(range30Btn.text, range30Btn.callback_data).row();
   kb.text(backBtn.text, backBtn.callback_data);
 
-  await renderScreen(ctx, { titleKey: t('screens.history.title'), bodyLines: lines, inlineKeyboard: kb });
+  await renderScreen(ctx, { titleKey: t('screens.daily_report.history_title'), bodyLines: lines, inlineKeyboard: kb });
 };
 
 const renderHistoryDay = async (ctx: Context, localDate: string): Promise<void> => {
@@ -1772,13 +1713,6 @@ bot.callbackQuery(/^[A-Za-z0-9_-]{8,12}$/, async (ctx) => {
       }
 
       case 'dr.templates': {
-        const telegramId = String(ctx.from?.id ?? '');
-        const existing = userStates.get(telegramId);
-        if (existing?.templateCreate) {
-          const nextState = { ...existing };
-          delete nextState.templateCreate;
-          userStates.set(telegramId, nextState);
-        }
         await renderTemplatesScreen(ctx);
         return;
       }
@@ -1789,7 +1723,7 @@ bot.callbackQuery(/^[A-Za-z0-9_-]{8,12}$/, async (ctx) => {
           await renderTemplatesScreen(ctx);
           return;
         }
-        await renderTemplateDetailsScreen(ctx, templateId);
+        await renderTemplateDetails(ctx, templateId);
         return;
       }
 
@@ -1799,15 +1733,19 @@ bot.callbackQuery(/^[A-Za-z0-9_-]{8,12}$/, async (ctx) => {
           await renderTemplatesScreen(ctx);
           return;
         }
-        const { user: u } = await ensureUserAndSettings(ctx);
-        const tpl = await getTemplateById(templateId);
-        if (!tpl || tpl.user_id !== u.id) {
-          await renderTemplatesScreen(ctx);
-          return;
+        try {
+          const { user: u } = await ensureUserAndSettings(ctx);
+          const tpl = await getTemplateById(templateId);
+          if (!tpl || tpl.user_id !== u.id) {
+            await renderTemplatesScreen(ctx);
+            return;
+          }
+          await setActiveTemplate({ userId: u.id, templateId });
+          clearReportContextCache();
+        } catch (error) {
+          console.error({ scope: 'daily_report', event: 'template_set_active_failed', error, templateId });
         }
-        await setActiveTemplate(u.id, templateId);
-        clearReportContextCache();
-        await renderTemplateDetailsScreen(ctx, templateId, t('screens.daily_report.templates_set_active_success'));
+        await renderTemplatesScreen(ctx);
         return;
       }
 
@@ -1817,15 +1755,20 @@ bot.callbackQuery(/^[A-Za-z0-9_-]{8,12}$/, async (ctx) => {
           await renderTemplatesScreen(ctx);
           return;
         }
-        const { user: u } = await ensureUserAndSettings(ctx);
-        await duplicateTemplate({
-          userId: u.id,
-          templateId,
-          copySuffix: t('screens.daily_report.templates_copy_suffix'),
-          copyBaseTitle: t('screens.templates.default_title')
-        });
-        clearReportContextCache();
-        await renderTemplatesScreen(ctx, t('screens.daily_report.templates_duplicate_success'));
+        try {
+          const { user: u } = await ensureUserAndSettings(ctx);
+          const tpl = await getTemplateById(templateId);
+          if (!tpl || tpl.user_id !== u.id) {
+            await renderTemplatesScreen(ctx);
+            return;
+          }
+          const newTitle = `Copy of ${tpl.title ?? t('screens.templates.default_title')}`;
+          await duplicateTemplate({ userId: u.id, sourceTemplateId: templateId, newTitle });
+          clearReportContextCache();
+        } catch (error) {
+          console.error({ scope: 'daily_report', event: 'template_duplicate_failed', error, templateId });
+        }
+        await renderTemplatesScreen(ctx);
         return;
       }
 
@@ -1845,46 +1788,72 @@ bot.callbackQuery(/^[A-Za-z0-9_-]{8,12}$/, async (ctx) => {
           await renderTemplatesScreen(ctx);
           return;
         }
-        const { user: u, settings } = await ensureUserAndSettings(ctx);
-        const defaultTemplate = await ensureDefaultTemplate(u.id);
-        const settingsJson = (settings.settings_json ?? {}) as { active_template_id?: string | null };
-        const activeTemplateId = settingsJson.active_template_id ?? defaultTemplate.id;
+        try {
+          const { user: u, settings } = await ensureUserAndSettings(ctx);
+          const tpl = await getTemplateById(templateId);
+          if (!tpl || tpl.user_id !== u.id) {
+            await renderTemplatesScreen(ctx);
+            return;
+          }
 
-        const tpl = await getTemplateById(templateId);
-        if (!tpl || tpl.user_id !== u.id) {
+          const settingsJson = (settings.settings_json ?? {}) as { active_template_id?: string | null };
+          const activeTemplateId = settingsJson.active_template_id ?? null;
+
+          await deleteTemplate({ userId: u.id, templateId });
+          clearReportContextCache();
+
+          if (activeTemplateId === templateId) {
+            const remaining = await listUserTemplates(u.id);
+            if (remaining.length > 0) {
+              await setActiveTemplate({ userId: u.id, templateId: remaining[0].id });
+            } else {
+              const fallback = await ensureDefaultTemplate(u.id);
+              await setActiveTemplate({ userId: u.id, templateId: fallback.id });
+            }
+          }
+
+          await renderTemplatesScreen(ctx, t('screens.daily_report.templates_delete_success'));
+        } catch (error) {
+          console.error({ scope: 'daily_report', event: 'template_delete_failed', error, templateId });
           await renderTemplatesScreen(ctx);
-          return;
         }
-
-        const templates = await listUserTemplates(u.id);
-        const resolvedActiveId = templates.some((t) => t.id === activeTemplateId) ? activeTemplateId : defaultTemplate.id;
-
-        if (tpl.id === resolvedActiveId) {
-          await renderTemplateDetailsScreen(ctx, tpl.id, t('screens.daily_report.templates_delete_active_forbidden'));
-          return;
-        }
-
-        if (templates.length <= 1) {
-          await renderTemplateDetailsScreen(ctx, tpl.id, t('screens.daily_report.templates_delete_last_forbidden'));
-          return;
-        }
-
-        await deleteTemplate({ userId: u.id, templateId });
-        clearReportContextCache();
-        await renderTemplatesScreen(ctx, t('screens.daily_report.templates_delete_success'));
         return;
       }
 
       case 'dr.template_new': {
-        const telegramId = String(ctx.from?.id ?? '');
-        const existing = userStates.get(telegramId) ?? {};
-        userStates.set(telegramId, { ...existing, templateCreate: { step: 'title' } });
-        await renderTemplateNewTitlePrompt(ctx);
+        try {
+          const { user: u, settings } = await ensureUserAndSettings(ctx);
+          await ensureDefaultTemplate(u.id);
+          const templates = await listUserTemplates(u.id);
+          if (!templates.length) {
+            await renderTemplatesScreen(ctx);
+            return;
+          }
+          const settingsJson = (settings.settings_json ?? {}) as { active_template_id?: string | null };
+          const activeTemplateId = settingsJson.active_template_id ?? null;
+          const sourceTemplate = activeTemplateId ? templates.find((t) => t.id === activeTemplateId) ?? templates[0] : templates[0];
+          const newTitle = `Copy of ${sourceTemplate.title ?? t('screens.templates.default_title')}`;
+          await duplicateTemplate({ userId: u.id, sourceTemplateId: sourceTemplate.id, newTitle });
+          clearReportContextCache();
+        } catch (error) {
+          console.error({ scope: 'daily_report', event: 'template_new_failed', error });
+        }
+        await renderTemplatesScreen(ctx);
         return;
       }
 
       case 'dr.history': {
-        await renderHistory(ctx);
+        await renderHistory(ctx, '7d');
+        return;
+      }
+
+      case 'dr.history_7d': {
+        await renderHistory(ctx, '7d');
+        return;
+      }
+
+      case 'dr.history_30d': {
+        await renderHistory(ctx, '30d');
         return;
       }
 
@@ -1956,20 +1925,6 @@ bot.on('message:text', async (ctx: Context) => {
   // 1) Daily Report free text input (when explicitly requested)
   if (state.awaitingValue) {
     await handleSaveValue(ctx, text);
-    return;
-  }
-
-  if (state.templateCreate?.step === 'title') {
-    if (!text) {
-      await renderTemplateNewTitlePrompt(ctx, t('screens.daily_report.templates_new_invalid_title'));
-      return;
-    }
-    const { user } = await ensureUserAndSettings(ctx);
-    await createUserTemplate({ userId: user.id, title: text });
-    const nextState = { ...state };
-    delete nextState.templateCreate;
-    userStates.set(stateKey, nextState);
-    await renderTemplatesScreen(ctx, t('screens.daily_report.templates_new_created', { title: text }));
     return;
   }
 

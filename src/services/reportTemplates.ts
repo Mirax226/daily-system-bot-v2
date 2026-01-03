@@ -208,16 +208,16 @@ export async function listUserTemplates(userId: string, client: Client = getSupa
   return templates.map((t) => ({ ...t, itemCount: counts.get(t.id) ?? 0 }));
 }
 
-export async function setActiveTemplate(userId: string, templateId: string, client: Client = getSupabaseClient()): Promise<void> {
-  const settings = await getOrCreateUserSettings(userId, client);
+export async function setActiveTemplate(params: { userId: string; templateId: string }, client: Client = getSupabaseClient()): Promise<void> {
+  const settings = await getOrCreateUserSettings(params.userId, client);
   const currentJson = (settings.settings_json as Record<string, unknown> | null) ?? {};
-  const nextSettingsJson = { ...currentJson, active_template_id: templateId };
+  const nextSettingsJson = { ...currentJson, active_template_id: params.templateId };
   const { error } = await client
     .from('user_settings')
     .update({ settings_json: nextSettingsJson, updated_at: new Date().toISOString() })
     .eq('id', settings.id);
   if (error) {
-    console.error({ scope: 'report_templates', event: 'set_active_error', userId, templateId, error });
+    console.error({ scope: 'report_templates', event: 'set_active_error', params, error });
     throw new Error(`Failed to set active template: ${error.message}`);
   }
 }
@@ -244,17 +244,18 @@ export async function createUserTemplate(
 }
 
 export async function duplicateTemplate(
-  params: { userId: string; templateId: string; copySuffix?: string; copyBaseTitle?: string },
+  params: { userId: string; sourceTemplateId: string; newTitle?: string; copySuffix?: string; copyBaseTitle?: string },
   client: Client = getSupabaseClient()
 ): Promise<ReportTemplateRow> {
-  const existing = await getTemplateById(params.templateId, client);
+  const existing = await getTemplateById(params.sourceTemplateId, client);
   if (!existing || existing.user_id !== params.userId) {
     throw new Error('Template not found');
   }
 
   const suffix = params.copySuffix ?? ' (copy)';
   const baseTitle = existing.title ?? params.copyBaseTitle ?? 'Template';
-  const newTemplatePayload = { user_id: params.userId, title: `${baseTitle}${suffix}` };
+  const title = params.newTitle ?? `${baseTitle}${suffix}`;
+  const newTemplatePayload = { user_id: params.userId, title };
   const { data: inserted, error: insertError } = await client.from(REPORT_TEMPLATES_TABLE).insert(newTemplatePayload).select('*').single();
   if (insertError || !inserted) {
     console.error({ scope: 'report_templates', event: 'duplicate_insert_error', params, error: insertError });
@@ -265,7 +266,7 @@ export async function duplicateTemplate(
   const { data: items, error: itemsError } = await client
     .from(REPORT_ITEMS_TABLE)
     .select('*')
-    .eq('template_id', params.templateId)
+    .eq('template_id', params.sourceTemplateId)
     .order('sort_order', { ascending: true });
   if (itemsError) {
     console.error({ scope: 'report_templates', event: 'duplicate_items_error', params, error: itemsError });
