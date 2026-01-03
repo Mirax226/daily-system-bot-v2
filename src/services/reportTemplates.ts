@@ -230,8 +230,21 @@ export async function deleteTemplate(params: { userId: string; templateId: strin
   }
 }
 
+export async function createUserTemplate(
+  params: { userId: string; title: string },
+  client: Client = getSupabaseClient()
+): Promise<ReportTemplateRow> {
+  const payload = { user_id: params.userId, title: params.title };
+  const { data, error } = await client.from(REPORT_TEMPLATES_TABLE).insert(payload).select('*').single();
+  if (error || !data) {
+    console.error({ scope: 'report_templates', event: 'create_error', params, error });
+    throw new Error(`Failed to create template: ${error?.message}`);
+  }
+  return data as ReportTemplateRow;
+}
+
 export async function duplicateTemplate(
-  params: { userId: string; templateId: string },
+  params: { userId: string; templateId: string; copySuffix?: string; copyBaseTitle?: string },
   client: Client = getSupabaseClient()
 ): Promise<ReportTemplateRow> {
   const existing = await getTemplateById(params.templateId, client);
@@ -239,7 +252,9 @@ export async function duplicateTemplate(
     throw new Error('Template not found');
   }
 
-  const newTemplatePayload = { user_id: params.userId, title: `Copy of ${existing.title}` };
+  const suffix = params.copySuffix ?? ' (copy)';
+  const baseTitle = existing.title ?? params.copyBaseTitle ?? 'Template';
+  const newTemplatePayload = { user_id: params.userId, title: `${baseTitle}${suffix}` };
   const { data: inserted, error: insertError } = await client.from(REPORT_TEMPLATES_TABLE).insert(newTemplatePayload).select('*').single();
   if (insertError || !inserted) {
     console.error({ scope: 'report_templates', event: 'duplicate_insert_error', params, error: insertError });
