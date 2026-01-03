@@ -126,6 +126,92 @@ export async function listItems(templateId: string, client: Client = getSupabase
   return (data as ReportItemRow[]) ?? [];
 }
 
+export async function listAllItems(templateId: string, client: Client = getSupabaseClient()): Promise<ReportItemRow[]> {
+  const { data, error } = await client
+    .from(REPORT_ITEMS_TABLE)
+    .select('*')
+    .eq('template_id', templateId)
+    .order('sort_order', { ascending: true });
+
+  if (error) {
+    console.error({ scope: 'report_templates', event: 'items_list_all_error', templateId, error });
+    throw new Error(`Failed to list all report items: ${error.message}`);
+  }
+
+  return (data as ReportItemRow[]) ?? [];
+}
+
+export async function getItemById(id: string, client: Client = getSupabaseClient()): Promise<ReportItemRow | null> {
+  const { data, error } = await client.from(REPORT_ITEMS_TABLE).select('*').eq('id', id).maybeSingle();
+  if (error) {
+    console.error({ scope: 'report_templates', event: 'item_get_error', id, error });
+    throw new Error(`Failed to load report item: ${error.message}`);
+  }
+  return (data as ReportItemRow | null) ?? null;
+}
+
+type ReportItemPatch = Partial<{
+  label: string;
+  item_key: string;
+  item_type: string;
+  category: string | null;
+  xp_mode: string | null;
+  xp_value: number | null;
+  options_json: Record<string, unknown>;
+  sort_order: number;
+  enabled: boolean;
+}>;
+
+export async function updateItem(id: string, patch: ReportItemPatch, client: Client = getSupabaseClient()): Promise<ReportItemRow> {
+  const { data, error } = await client.from(REPORT_ITEMS_TABLE).update(patch).eq('id', id).select('*').single();
+  if (error || !data) {
+    console.error({ scope: 'report_templates', event: 'item_update_error', id, patch, error });
+    throw new Error(`Failed to update report item: ${error?.message}`);
+  }
+  return data as ReportItemRow;
+}
+
+export async function setItemEnabled(id: string, enabled: boolean, client: Client = getSupabaseClient()): Promise<void> {
+  const { error } = await client.from(REPORT_ITEMS_TABLE).update({ enabled }).eq('id', id);
+  if (error) {
+    console.error({ scope: 'report_templates', event: 'item_set_enabled_error', id, enabled, error });
+    throw new Error(`Failed to toggle report item: ${error.message}`);
+  }
+}
+
+export async function moveItem(
+  templateId: string,
+  id: string,
+  direction: 'up' | 'down',
+  client: Client = getSupabaseClient()
+): Promise<void> {
+  const items = await listAllItems(templateId, client);
+  const idx = items.findIndex((i) => i.id === id);
+  if (idx === -1) return;
+  const swapIdx = direction === 'up' ? idx - 1 : idx + 1;
+  if (swapIdx < 0 || swapIdx >= items.length) return;
+  const current = items[idx];
+  const swap = items[swapIdx];
+  const { error: updateCurrentError } = await client.from(REPORT_ITEMS_TABLE).update({ sort_order: swap.sort_order }).eq('id', current.id);
+  if (updateCurrentError) {
+    console.error({ scope: 'report_templates', event: 'item_move_update_error', id, direction, error: updateCurrentError });
+    throw new Error(`Failed to move report item: ${updateCurrentError.message}`);
+  }
+  const { error: updateSwapError } = await client.from(REPORT_ITEMS_TABLE).update({ sort_order: current.sort_order }).eq('id', swap.id);
+  if (updateSwapError) {
+    console.error({ scope: 'report_templates', event: 'item_move_update_error', id: swap.id, direction, error: updateSwapError });
+    throw new Error(`Failed to move report item: ${updateSwapError.message}`);
+  }
+}
+
+export async function deleteItem(id: string, client: Client = getSupabaseClient()): Promise<void> {
+  const { error } = await client.from(REPORT_ITEMS_TABLE).delete().eq('id', id);
+  if (error) {
+    console.error({ scope: 'report_templates', event: 'item_delete_error', id, error });
+    throw new Error(`Failed to delete report item: ${error.message}`);
+  }
+}
+
 export async function upsertItem(
   params: {
     templateId: string;
