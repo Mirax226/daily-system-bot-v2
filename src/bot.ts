@@ -25,11 +25,18 @@ import {
   ensureDefaultTemplate,
   upsertItem,
   listItems,
+  listAllItems,
   listUserTemplates,
   setActiveTemplate,
   deleteTemplate,
   duplicateTemplate,
-  getTemplateById
+  getTemplateById,
+  getItemById,
+  updateItem,
+  setItemEnabled,
+  moveItem,
+  deleteItem,
+  createUserTemplate
 } from './services/reportTemplates';
 
 import {
@@ -61,6 +68,22 @@ export const bot = new Bot<Context>(config.telegram.botToken);
  * Per-user in-memory state (ephemeral).
  * IMPORTANT: Render free-tier can restart; state should be considered best-effort.
  */
+type TemplateItemFlow = {
+  mode: 'create' | 'edit';
+  templateId: string;
+  itemId?: string;
+  step: 'label' | 'key' | 'type' | 'category' | 'xp_mode' | 'xp_value';
+  draft: {
+    label?: string;
+    itemKey?: string;
+    itemType?: string;
+    category?: string | null;
+    xpMode?: string | null;
+    xpValue?: number | null;
+    optionsJson?: Record<string, unknown> | null;
+  };
+};
+
 type ReminderlessState = {
   awaitingValue?: { reportDayId: string; itemId: string };
 
@@ -83,6 +106,8 @@ type ReminderlessState = {
     step: 'title' | 'description' | 'xp' | 'confirm_delete';
     draft: { title?: string; description?: string | null; xpCost?: number };
   };
+
+  templateItemFlow?: TemplateItemFlow;
 };
 
 const userStates = new Map<string, ReminderlessState>();
@@ -91,6 +116,17 @@ const userStates = new Map<string, ReminderlessState>();
 const reportContextCache = new Map<string, { reportDay: ReportDayRow; items: ReportItemRow[] }>();
 const clearReportContextCache = (): void => {
   reportContextCache.clear();
+};
+const clearTemplateItemFlow = (telegramId: string): void => {
+  const st = { ...(userStates.get(telegramId) || {}) };
+  delete st.templateItemFlow;
+  userStates.set(telegramId, st);
+};
+
+const setTemplateItemFlow = (telegramId: string, flow: TemplateItemFlow): void => {
+  const st = { ...(userStates.get(telegramId) || {}) };
+  st.templateItemFlow = flow;
+  userStates.set(telegramId, st);
 };
 
 const greetings = ['👋 Hey there!', '🙌 Welcome!', '🚀 Ready to plan your day?', '🌟 Let’s make today productive!', '💪 Keep going!'];
@@ -876,6 +912,151 @@ const renderDailyStatusWithFilter = async (ctx: Context, reportDayId: string, fi
   await renderScreen(ctx, { titleKey: t('screens.daily_report.title'), bodyLines: lines, inlineKeyboard: kb });
 };
 
+const slugifyItemKey = (input: string): string =>
+  input
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9_\s]/g, '')
+    .replace(/\s+/g, '_')
+    .replace(/_+/g, '_')
+    .replace(/^_+|_+$/g, '');
+
+const generateUniqueItemKey = async (templateId: string, label: string): Promise<string> => {
+  const base = slugifyItemKey(label) || 'item';
+  const existing = await listAllItems(templateId);
+  const existingKeys = new Set(existing.map((i) => i.item_key));
+  let candidate = base;
+  let counter = 2;
+  while (existingKeys.has(candidate)) {
+    candidate = `${base}_${counter}`;
+    counter += 1;
+  }
+  return candidate;
+};
+
+const buildTypeKeyboard = async (ctx: Context, params: { templateId: string; itemId?: string; backAction?: string; backData?: Record<string, unknown> }) => {
+  const kb = new InlineKeyboard();
+  const types = ['boolean', 'number', 'time_hhmm', 'duration_minutes', 'text'];
+  for (const type of types) {
+    const btn = await makeActionButton(ctx, { label: type, action: 'dr.template_item_select_type', data: { templateId: params.templateId, itemId: params.itemId, itemType: type } });
+    kb.text(btn.text, btn.callback_data).row();
+  }
+  const backAction = params.backAction ?? 'dr.template_edit';
+  const backBtn = await makeActionButton(ctx, { label: t('buttons.back'), action: backAction, data: params.backData ?? { templateId: params.templateId } });
+  kb.text(backBtn.text, backBtn.callback_data);
+  return kb;
+};
+
+const buildCategoryKeyboard = async (ctx: Context, params: { templateId: string; itemId?: string; backAction?: string; backData?: Record<string, unknown> }) => {
+  const categories = ['sleep', 'routine', 'study', 'tasks', 'other', 'none'];
+  const kb = new InlineKeyboard();
+  for (const category of categories) {
+    const btn = await makeActionButton(ctx, {
+      label: category,
+      action: 'dr.template_item_select_category',
+      data: { templateId: params.templateId, itemId: params.itemId, category }
+    });
+    kb.text(btn.text, btn.callback_data).row();
+  }
+  const backAction = params.backAction ?? 'dr.template_edit';
+  const backBtn = await makeActionButton(ctx, { label: t('buttons.back'), action: backAction, data: params.backData ?? { templateId: params.templateId } });
+  kb.text(backBtn.text, backBtn.callback_data);
+  return kb;
+};
+
+const buildXpModeKeyboard = async (ctx: Context, params: { templateId: string; itemId?: string; backAction?: string; backData?: Record<string, unknown> }) => {
+  const modes = [
+    { key: 'none', label: t('screens.daily_report.ask_xp_mode_none') ?? 'No XP' },
+    { key: 'fixed', label: t('screens.daily_report.ask_xp_mode_fixed') ?? 'Fixed XP' },
+    { key: 'time', label: t('screens.daily_report.ask_xp_mode_time') ?? 'Time-based (per minute)' }
+  ];
+  const kb = new InlineKeyboard();
+  for (const mode of modes) {
+    const btn = await makeActionButton(ctx, { label: mode.label, action: 'dr.template_item_select_xp_mode', data: { templateId: params.templateId, itemId: params.itemId, xpMode: mode.key } });
+    kb.text(btn.text, btn.callback_data).row();
+  }
+  const backAction = params.backAction ?? 'dr.template_edit';
+  const backBtn = await makeActionButton(ctx, { label: t('buttons.back'), action: backAction, data: params.backData ?? { templateId: params.templateId } });
+  kb.text(backBtn.text, backBtn.callback_data);
+  return kb;
+};
+
+const promptLabelInput = async (ctx: Context, params: { templateId: string; backToItemId?: string }) => {
+  const backAction = params.backToItemId ? 'dr.template_item_menu' : 'dr.template_edit';
+  const backData = params.backToItemId ? { templateId: params.templateId, itemId: params.backToItemId } : { templateId: params.templateId };
+  const backBtn = await makeActionButton(ctx, { label: t('buttons.back'), action: backAction, data: backData });
+  const kb = new InlineKeyboard().text(backBtn.text, backBtn.callback_data);
+  await renderScreen(ctx, {
+    titleKey: t('screens.daily_report.template_builder_title'),
+    bodyLines: [t('screens.daily_report.ask_label')],
+    inlineKeyboard: kb
+  });
+};
+
+const promptKeyInput = async (ctx: Context, params: { templateId: string; itemId: string }) => {
+  const backBtn = await makeActionButton(ctx, { label: t('buttons.back'), action: 'dr.template_item_menu', data: { templateId: params.templateId, itemId: params.itemId } });
+  const kb = new InlineKeyboard().text(backBtn.text, backBtn.callback_data);
+  await renderScreen(ctx, {
+    titleKey: t('screens.daily_report.template_builder_title'),
+    bodyLines: [t('screens.daily_report.ask_key')],
+    inlineKeyboard: kb
+  });
+};
+
+const promptTypeSelection = async (ctx: Context, params: { templateId: string; itemId?: string; backToItem?: boolean }) => {
+  const kb = await buildTypeKeyboard(ctx, {
+    templateId: params.templateId,
+    itemId: params.itemId,
+    backAction: params.backToItem ? 'dr.template_item_menu' : 'dr.template_edit',
+    backData: params.backToItem ? { templateId: params.templateId, itemId: params.itemId } : { templateId: params.templateId }
+  });
+  await renderScreen(ctx, {
+    titleKey: t('screens.daily_report.template_builder_title'),
+    bodyLines: [t('screens.daily_report.ask_type')],
+    inlineKeyboard: kb
+  });
+};
+
+const promptCategorySelection = async (ctx: Context, params: { templateId: string; itemId?: string; backToItem?: boolean }) => {
+  const kb = await buildCategoryKeyboard(ctx, {
+    templateId: params.templateId,
+    itemId: params.itemId,
+    backAction: params.backToItem ? 'dr.template_item_menu' : 'dr.template_edit',
+    backData: params.backToItem ? { templateId: params.templateId, itemId: params.itemId } : { templateId: params.templateId }
+  });
+  await renderScreen(ctx, {
+    titleKey: t('screens.daily_report.template_builder_title'),
+    bodyLines: [t('screens.daily_report.ask_category')],
+    inlineKeyboard: kb
+  });
+};
+
+const promptXpModeSelection = async (ctx: Context, params: { templateId: string; itemId?: string; backToItem?: boolean }) => {
+  const kb = await buildXpModeKeyboard(ctx, {
+    templateId: params.templateId,
+    itemId: params.itemId,
+    backAction: params.backToItem ? 'dr.template_item_menu' : 'dr.template_edit',
+    backData: params.backToItem ? { templateId: params.templateId, itemId: params.itemId } : { templateId: params.templateId }
+  });
+  await renderScreen(ctx, {
+    titleKey: t('screens.daily_report.template_builder_title'),
+    bodyLines: [t('screens.daily_report.ask_xp_mode')],
+    inlineKeyboard: kb
+  });
+};
+
+const promptXpValueInput = async (ctx: Context, params: { templateId: string; itemId?: string; backToItem?: boolean }) => {
+  const backAction = params.backToItem ? 'dr.template_item_menu' : 'dr.template_edit';
+  const backData = params.backToItem ? { templateId: params.templateId, itemId: params.itemId } : { templateId: params.templateId };
+  const backBtn = await makeActionButton(ctx, { label: t('buttons.back'), action: backAction, data: backData });
+  const kb = new InlineKeyboard().text(backBtn.text, backBtn.callback_data);
+  await renderScreen(ctx, {
+    titleKey: t('screens.daily_report.template_builder_title'),
+    bodyLines: [t('screens.daily_report.ask_xp_value')],
+    inlineKeyboard: kb
+  });
+};
+
 const renderTemplatesScreen = async (ctx: Context, flashLine?: string): Promise<void> => {
   const { user, settings } = await ensureUserAndSettings(ctx);
   await ensureDefaultTemplate(user.id);
@@ -901,9 +1082,10 @@ const renderTemplatesScreen = async (ctx: Context, flashLine?: string): Promise<
   const kb = new InlineKeyboard();
 
   for (const tpl of templates) {
-    const setActiveBtn = await makeActionButton(ctx, { label: t('buttons.dr_template_set_active'), action: 'dr.template_set_active', data: { templateId: tpl.id } });
-    const detailsBtn = await makeActionButton(ctx, { label: t('buttons.dr_template_details'), action: 'dr.template_details', data: { templateId: tpl.id } });
-    kb.text(setActiveBtn.text, setActiveBtn.callback_data).text(detailsBtn.text, detailsBtn.callback_data).row();
+    const setActiveBtn = await makeActionButton(ctx, { label: t('buttons.tpl_set_active'), action: 'dr.template_set_active', data: { templateId: tpl.id } });
+    const editBtn = await makeActionButton(ctx, { label: t('buttons.tpl_edit_form'), action: 'dr.template_edit', data: { templateId: tpl.id } });
+    const moreBtn = await makeActionButton(ctx, { label: t('buttons.tpl_more'), action: 'dr.template_actions', data: { templateId: tpl.id } });
+    kb.text(setActiveBtn.text, setActiveBtn.callback_data).text(editBtn.text, editBtn.callback_data).text(moreBtn.text, moreBtn.callback_data).row();
   }
 
   const newBtn = await makeActionButton(ctx, { label: t('buttons.dr_template_new'), action: 'dr.template_new' });
@@ -915,7 +1097,7 @@ const renderTemplatesScreen = async (ctx: Context, flashLine?: string): Promise<
   await renderScreen(ctx, { titleKey: t('screens.daily_report.templates_title'), bodyLines: lines, inlineKeyboard: kb });
 };
 
-const renderTemplateDetails = async (ctx: Context, templateId: string): Promise<void> => {
+const renderTemplateActions = async (ctx: Context, templateId: string): Promise<void> => {
   const { user } = await ensureUserAndSettings(ctx);
   const tpl = await getTemplateById(templateId);
   if (!tpl || tpl.user_id !== user.id) {
@@ -923,27 +1105,132 @@ const renderTemplateDetails = async (ctx: Context, templateId: string): Promise<
     return;
   }
 
-  const items = await listItems(templateId);
-  const preview = items.slice(0, 5);
-
-  const lines: string[] = [tpl.title ?? t('screens.templates.default_title'), `${items.length} items`];
-  if (preview.length) {
-    lines.push('');
-    preview.forEach((item) => lines.push(`• ${item.label}`));
-  }
-  lines.push('', t('screens.daily_report.templates_edit_coming_soon'));
+  const items = await listAllItems(templateId);
+  const lines: string[] = [
+    t('screens.daily_report.template_action_title'),
+    tpl.title ?? t('screens.templates.default_title'),
+    t('screens.daily_report.template_details_items_line', { count: items.length })
+  ];
 
   const kb = new InlineKeyboard();
+  const editBtn = await makeActionButton(ctx, { label: t('buttons.tpl_actions_edit'), action: 'dr.template_edit', data: { templateId } });
+  const dupBtn = await makeActionButton(ctx, { label: t('buttons.tpl_actions_duplicate'), action: 'dr.template_duplicate', data: { templateId } });
+  const delBtn = await makeActionButton(ctx, { label: t('buttons.tpl_actions_delete'), action: 'dr.template_delete_confirm', data: { templateId } });
+  const backBtn = await makeActionButton(ctx, { label: t('buttons.tpl_actions_back'), action: 'dr.templates' });
 
-  const dupBtn = await makeActionButton(ctx, { label: t('buttons.dr_template_duplicate'), action: 'dr.template_duplicate', data: { templateId } });
-  const delBtn = await makeActionButton(ctx, { label: t('buttons.dr_template_delete'), action: 'dr.template_delete_confirm', data: { templateId } });
-  const backBtn = await makeActionButton(ctx, { label: t('buttons.back'), action: 'dr.templates' });
-
+  kb.text(editBtn.text, editBtn.callback_data).row();
   kb.text(dupBtn.text, dupBtn.callback_data).row();
   kb.text(delBtn.text, delBtn.callback_data).row();
   kb.text(backBtn.text, backBtn.callback_data);
 
   await renderScreen(ctx, { titleKey: t('screens.daily_report.templates_title'), bodyLines: lines, inlineKeyboard: kb });
+};
+
+const renderTemplateEdit = async (ctx: Context, templateId: string, flashLine?: string): Promise<void> => {
+  const { user } = await ensureUserAndSettings(ctx);
+  const tpl = await getTemplateById(templateId);
+  if (!tpl || tpl.user_id !== user.id) {
+    await renderTemplatesScreen(ctx);
+    return;
+  }
+  const telegramId = String(ctx.from?.id ?? '');
+  clearTemplateItemFlow(telegramId);
+
+  const items = await listAllItems(templateId);
+
+  const lines: string[] = [
+    t('screens.daily_report.template_builder_title'),
+    t('screens.daily_report.template_items_header', { title: tpl.title ?? t('screens.templates.default_title') }),
+    t('screens.daily_report.template_items_count', { count: items.length })
+  ];
+  if (flashLine) lines.push(flashLine);
+  if (items.length === 0) {
+    lines.push(t('screens.daily_report.template_items_empty'));
+  } else {
+    items.forEach((item, idx) => {
+      const statusIcon = item.enabled ? '✅' : '🚫';
+      const xpVal = item.xp_value ?? 0;
+      lines.push(`[${idx + 1}] ${statusIcon} ${item.label} (${item.item_type}, XP: ${xpVal})`);
+    });
+  }
+
+  const kb = new InlineKeyboard();
+
+  for (const [idx, item] of items.entries()) {
+    const btn = await makeActionButton(ctx, { label: `[${idx + 1}] ${item.label}`, action: 'dr.template_item_menu', data: { templateId, itemId: item.id } });
+    kb.text(btn.text, btn.callback_data).row();
+  }
+
+  const addBtn = await makeActionButton(ctx, { label: t('buttons.tpl_add_item'), action: 'dr.template_item_add', data: { templateId } });
+  const backBtn = await makeActionButton(ctx, { label: t('buttons.back'), action: 'dr.templates' });
+  kb.text(addBtn.text, addBtn.callback_data).row();
+  kb.text(backBtn.text, backBtn.callback_data);
+
+  await renderScreen(ctx, { titleKey: t('screens.daily_report.template_builder_title'), bodyLines: lines, inlineKeyboard: kb });
+};
+
+const renderTemplateItemMenu = async (ctx: Context, templateId: string, itemId: string, flashLine?: string): Promise<void> => {
+  const { user } = await ensureUserAndSettings(ctx);
+  const tpl = await getTemplateById(templateId);
+  const item = await getItemById(itemId);
+  if (!tpl || tpl.user_id !== user.id || !item || item.template_id !== tpl.id) {
+    await renderTemplatesScreen(ctx);
+    return;
+  }
+
+  const xpMode = item.xp_mode ?? 'none';
+  const xpValue = item.xp_value ?? 0;
+  const lines: string[] = [
+    t('screens.daily_report.item_menu_title'),
+    t('screens.daily_report.item_menu_summary', {
+      label: item.label,
+      type: item.item_type,
+      category: item.category ?? '-',
+      xpMode,
+      xpValue,
+      enabled: item.enabled ? t('common.active') : t('common.inactive')
+    })
+  ];
+  if (flashLine) lines.push(flashLine);
+
+  const kb = new InlineKeyboard();
+  const editLabelBtn = await makeActionButton(ctx, { label: t('buttons.tpl_item_edit_label'), action: 'dr.template_item_edit_label', data: { templateId, itemId } });
+  const editKeyBtn = await makeActionButton(ctx, { label: t('buttons.tpl_item_edit_key'), action: 'dr.template_item_edit_key', data: { templateId, itemId } });
+  const editTypeBtn = await makeActionButton(ctx, { label: t('buttons.tpl_item_edit_type'), action: 'dr.template_item_edit_type', data: { templateId, itemId } });
+  const editCategoryBtn = await makeActionButton(ctx, { label: t('buttons.tpl_item_edit_category'), action: 'dr.template_item_edit_category', data: { templateId, itemId } });
+  const editXpBtn = await makeActionButton(ctx, { label: t('buttons.tpl_item_edit_xp'), action: 'dr.template_item_edit_xp', data: { templateId, itemId } });
+  const toggleBtn = await makeActionButton(ctx, { label: t('buttons.tpl_item_toggle_enabled'), action: 'dr.template_item_toggle_enabled', data: { templateId, itemId } });
+  const moveUpBtn = await makeActionButton(ctx, { label: t('buttons.tpl_item_move_up'), action: 'dr.template_item_move_up', data: { templateId, itemId } });
+  const moveDownBtn = await makeActionButton(ctx, { label: t('buttons.tpl_item_move_down'), action: 'dr.template_item_move_down', data: { templateId, itemId } });
+  const delBtn = await makeActionButton(ctx, { label: t('buttons.tpl_item_delete'), action: 'dr.template_item_delete_confirm', data: { templateId, itemId } });
+  const backBtn = await makeActionButton(ctx, { label: t('buttons.back'), action: 'dr.template_edit', data: { templateId } });
+
+  kb.text(editLabelBtn.text, editLabelBtn.callback_data).text(editKeyBtn.text, editKeyBtn.callback_data).row();
+  kb.text(editTypeBtn.text, editTypeBtn.callback_data).text(editCategoryBtn.text, editCategoryBtn.callback_data).row();
+  kb.text(editXpBtn.text, editXpBtn.callback_data).row();
+  kb.text(toggleBtn.text, toggleBtn.callback_data).row();
+  kb.text(moveUpBtn.text, moveUpBtn.callback_data).text(moveDownBtn.text, moveDownBtn.callback_data).row();
+  kb.text(delBtn.text, delBtn.callback_data).row();
+  kb.text(backBtn.text, backBtn.callback_data);
+
+  await renderScreen(ctx, { titleKey: t('screens.daily_report.item_menu_title'), bodyLines: lines, inlineKeyboard: kb });
+};
+
+const renderTemplateItemDeleteConfirm = async (ctx: Context, templateId: string, itemId: string): Promise<void> => {
+  const { user } = await ensureUserAndSettings(ctx);
+  const tpl = await getTemplateById(templateId);
+  const item = await getItemById(itemId);
+  if (!tpl || tpl.user_id !== user.id || !item || item.template_id !== tpl.id) {
+    await renderTemplatesScreen(ctx);
+    return;
+  }
+
+  const lines: string[] = [t('screens.daily_report.item_delete_confirm')];
+  const yesBtn = await makeActionButton(ctx, { label: t('buttons.tpl_yes'), action: 'dr.template_item_delete', data: { templateId, itemId } });
+  const noBtn = await makeActionButton(ctx, { label: t('buttons.tpl_no'), action: 'dr.template_item_menu', data: { templateId, itemId } });
+  const kb = new InlineKeyboard().text(yesBtn.text, yesBtn.callback_data).row().text(noBtn.text, noBtn.callback_data);
+
+  await renderScreen(ctx, { titleKey: t('screens.daily_report.item_menu_title'), bodyLines: lines, inlineKeyboard: kb });
 };
 
 const renderTemplateDeleteConfirm = async (ctx: Context, templateId: string): Promise<void> => {
@@ -957,11 +1244,45 @@ const renderTemplateDeleteConfirm = async (ctx: Context, templateId: string): Pr
   const lines: string[] = [t('screens.daily_report.templates_title'), '', t('screens.daily_report.template_delete_confirm', { title: tpl.title ?? t('screens.templates.default_title') })];
 
   const confirmBtn = await makeActionButton(ctx, { label: t('buttons.dr_template_delete'), action: 'dr.template_delete', data: { templateId } });
-  const backBtn = await makeActionButton(ctx, { label: t('buttons.back'), action: 'dr.template_details', data: { templateId } });
+  const backBtn = await makeActionButton(ctx, { label: t('buttons.tpl_actions_back'), action: 'dr.template_actions', data: { templateId } });
 
   const kb = new InlineKeyboard().text(confirmBtn.text, confirmBtn.callback_data).row().text(backBtn.text, backBtn.callback_data);
 
   await renderScreen(ctx, { titleKey: t('screens.daily_report.templates_title'), bodyLines: lines, inlineKeyboard: kb });
+};
+
+const finalizeNewTemplateItem = async (ctx: Context, telegramId: string, flow: TemplateItemFlow): Promise<void> => {
+  try {
+    const items = await listAllItems(flow.templateId);
+    const maxSort = items.reduce((max, item) => Math.max(max, item.sort_order ?? 0), 0);
+    const sortOrder = (maxSort || items.length * 10) + 10;
+    const label = flow.draft.label ?? t('screens.daily_report.template_new_title');
+    const itemKey = flow.draft.itemKey ?? (await generateUniqueItemKey(flow.templateId, label));
+    const itemType = flow.draft.itemType ?? 'text';
+    const category = flow.draft.category && flow.draft.category !== 'none' ? flow.draft.category : null;
+    const xpMode = flow.draft.xpMode && flow.draft.xpMode !== 'none' ? flow.draft.xpMode : null;
+    const xpValue = xpMode ? flow.draft.xpValue ?? 0 : null;
+    const optionsJson = xpMode === 'time' ? flow.draft.optionsJson ?? { per: 'minute' } : {};
+
+    await upsertItem({
+      templateId: flow.templateId,
+      label,
+      itemKey,
+      itemType,
+      category,
+      xpMode,
+      xpValue,
+      optionsJson,
+      sortOrder
+    });
+    clearTemplateItemFlow(telegramId);
+    clearReportContextCache();
+    await renderTemplateEdit(ctx, flow.templateId, t('screens.daily_report.item_saved'));
+  } catch (error) {
+    console.error({ scope: 'daily_report', event: 'template_item_finalize_failed', error, flow });
+    clearTemplateItemFlow(telegramId);
+    await renderTemplateEdit(ctx, flow.templateId);
+  }
 };
 
 const renderHistory = async (ctx: Context, range: '7d' | '30d' = '7d'): Promise<void> => {
@@ -1717,13 +2038,24 @@ bot.callbackQuery(/^[A-Za-z0-9_-]{8,12}$/, async (ctx) => {
         return;
       }
 
-      case 'dr.template_details': {
+      case 'dr.template_details':
+      case 'dr.template_actions': {
         const templateId = (payload as { data?: { templateId?: string } }).data?.templateId;
         if (!templateId) {
           await renderTemplatesScreen(ctx);
           return;
         }
-        await renderTemplateDetails(ctx, templateId);
+        await renderTemplateActions(ctx, templateId);
+        return;
+      }
+
+      case 'dr.template_edit': {
+        const templateId = (payload as { data?: { templateId?: string } }).data?.templateId;
+        if (!templateId) {
+          await renderTemplatesScreen(ctx);
+          return;
+        }
+        await renderTemplateEdit(ctx, templateId);
         return;
       }
 
@@ -1763,8 +2095,10 @@ bot.callbackQuery(/^[A-Za-z0-9_-]{8,12}$/, async (ctx) => {
             return;
           }
           const newTitle = `Copy of ${tpl.title ?? t('screens.templates.default_title')}`;
-          await duplicateTemplate({ userId: u.id, sourceTemplateId: templateId, newTitle });
+          const duplicated = await duplicateTemplate({ userId: u.id, sourceTemplateId: templateId, newTitle });
           clearReportContextCache();
+          await renderTemplateEdit(ctx, duplicated.id, t('screens.daily_report.templates_duplicate_success'));
+          return;
         } catch (error) {
           console.error({ scope: 'daily_report', event: 'template_duplicate_failed', error, templateId });
         }
@@ -1778,7 +2112,7 @@ bot.callbackQuery(/^[A-Za-z0-9_-]{8,12}$/, async (ctx) => {
           await renderTemplatesScreen(ctx);
           return;
         }
-        await renderTemplateDeleteConfirm(ctx, templateId);
+          await renderTemplateDeleteConfirm(ctx, templateId);
         return;
       }
 
@@ -1822,23 +2156,353 @@ bot.callbackQuery(/^[A-Za-z0-9_-]{8,12}$/, async (ctx) => {
 
       case 'dr.template_new': {
         try {
-          const { user: u, settings } = await ensureUserAndSettings(ctx);
-          await ensureDefaultTemplate(u.id);
-          const templates = await listUserTemplates(u.id);
-          if (!templates.length) {
-            await renderTemplatesScreen(ctx);
-            return;
-          }
-          const settingsJson = (settings.settings_json ?? {}) as { active_template_id?: string | null };
-          const activeTemplateId = settingsJson.active_template_id ?? null;
-          const sourceTemplate = activeTemplateId ? templates.find((t) => t.id === activeTemplateId) ?? templates[0] : templates[0];
-          const newTitle = `Copy of ${sourceTemplate.title ?? t('screens.templates.default_title')}`;
-          await duplicateTemplate({ userId: u.id, sourceTemplateId: sourceTemplate.id, newTitle });
+          const { user: u } = await ensureUserAndSettings(ctx);
+          const newTemplate = await createUserTemplate({ userId: u.id, title: t('screens.daily_report.template_new_title') });
           clearReportContextCache();
+          await renderTemplateEdit(ctx, newTemplate.id);
+          return;
         } catch (error) {
           console.error({ scope: 'daily_report', event: 'template_new_failed', error });
         }
         await renderTemplatesScreen(ctx);
+        return;
+      }
+
+      case 'dr.template_item_menu': {
+        const data = (payload as { data?: { templateId?: string; itemId?: string } }).data;
+        if (!data?.templateId || !data.itemId) {
+          await renderTemplatesScreen(ctx);
+          return;
+        }
+        await renderTemplateItemMenu(ctx, data.templateId, data.itemId);
+        return;
+      }
+
+      case 'dr.template_item_add': {
+        const templateId = (payload as { data?: { templateId?: string } }).data?.templateId;
+        if (!templateId) {
+          await renderTemplatesScreen(ctx);
+          return;
+        }
+        const { user: u } = await ensureUserAndSettings(ctx);
+        const tpl = await getTemplateById(templateId);
+        if (!tpl || tpl.user_id !== u.id) {
+          await renderTemplatesScreen(ctx);
+          return;
+        }
+        const telegramId = String(ctx.from?.id ?? '');
+        clearTemplateItemFlow(telegramId);
+        setTemplateItemFlow(telegramId, { mode: 'create', templateId, step: 'label', draft: {} });
+        await promptLabelInput(ctx, { templateId });
+        return;
+      }
+
+      case 'dr.template_item_edit_label': {
+        const data = (payload as { data?: { templateId?: string; itemId?: string } }).data;
+        if (!data?.templateId || !data.itemId) {
+          await renderTemplatesScreen(ctx);
+          return;
+        }
+        const { user: u } = await ensureUserAndSettings(ctx);
+        const item = await getItemById(data.itemId);
+        const tpl = await getTemplateById(data.templateId);
+        if (!item || !tpl || tpl.user_id !== u.id || item.template_id !== tpl.id) {
+          await renderTemplatesScreen(ctx);
+          return;
+        }
+        const telegramId = String(ctx.from?.id ?? '');
+        clearTemplateItemFlow(telegramId);
+        setTemplateItemFlow(telegramId, { mode: 'edit', templateId: data.templateId, itemId: data.itemId, step: 'label', draft: { label: item.label } });
+        await promptLabelInput(ctx, { templateId: data.templateId, backToItemId: data.itemId });
+        return;
+      }
+
+      case 'dr.template_item_edit_key': {
+        const data = (payload as { data?: { templateId?: string; itemId?: string } }).data;
+        if (!data?.templateId || !data.itemId) {
+          await renderTemplatesScreen(ctx);
+          return;
+        }
+        const { user: u } = await ensureUserAndSettings(ctx);
+        const item = await getItemById(data.itemId);
+        const tpl = await getTemplateById(data.templateId);
+        if (!item || !tpl || tpl.user_id !== u.id || item.template_id !== tpl.id) {
+          await renderTemplatesScreen(ctx);
+          return;
+        }
+        const telegramId = String(ctx.from?.id ?? '');
+        clearTemplateItemFlow(telegramId);
+        setTemplateItemFlow(telegramId, { mode: 'edit', templateId: data.templateId, itemId: data.itemId, step: 'key', draft: { itemKey: item.item_key } });
+        await promptKeyInput(ctx, { templateId: data.templateId, itemId: data.itemId });
+        return;
+      }
+
+      case 'dr.template_item_edit_type': {
+        const data = (payload as { data?: { templateId?: string; itemId?: string } }).data;
+        if (!data?.templateId || !data.itemId) {
+          await renderTemplatesScreen(ctx);
+          return;
+        }
+        const { user: u } = await ensureUserAndSettings(ctx);
+        const item = await getItemById(data.itemId);
+        const tpl = await getTemplateById(data.templateId);
+        if (!item || !tpl || tpl.user_id !== u.id || item.template_id !== tpl.id) {
+          await renderTemplatesScreen(ctx);
+          return;
+        }
+        const telegramId = String(ctx.from?.id ?? '');
+        clearTemplateItemFlow(telegramId);
+        setTemplateItemFlow(telegramId, {
+          mode: 'edit',
+          templateId: data.templateId,
+          itemId: data.itemId,
+          step: 'type',
+          draft: { itemType: item.item_type }
+        });
+        await promptTypeSelection(ctx, { templateId: data.templateId, itemId: data.itemId, backToItem: true });
+        return;
+      }
+
+      case 'dr.template_item_select_type': {
+        const data = (payload as { data?: { templateId?: string; itemId?: string; itemType?: string } }).data;
+        if (!data?.templateId || !data.itemType) {
+          await renderTemplatesScreen(ctx);
+          return;
+        }
+        const telegramId = String(ctx.from?.id ?? '');
+        const state = userStates.get(telegramId)?.templateItemFlow;
+        if (state && state.mode === 'create' && state.templateId === data.templateId && state.step === 'type') {
+          setTemplateItemFlow(telegramId, { ...state, draft: { ...state.draft, itemType: data.itemType }, step: 'category' });
+          await promptCategorySelection(ctx, { templateId: data.templateId });
+          return;
+        }
+        if (data.itemId) {
+          const { user: u } = await ensureUserAndSettings(ctx);
+          const tpl = await getTemplateById(data.templateId);
+          const item = await getItemById(data.itemId);
+          if (!tpl || tpl.user_id !== u.id || !item || item.template_id !== tpl.id) {
+            await renderTemplatesScreen(ctx);
+            return;
+          }
+          await updateItem(data.itemId, { item_type: data.itemType });
+          clearTemplateItemFlow(telegramId);
+          clearReportContextCache();
+          await renderTemplateItemMenu(ctx, data.templateId, data.itemId, t('screens.daily_report.item_saved'));
+          return;
+        }
+        await renderTemplateEdit(ctx, data.templateId);
+        return;
+      }
+
+      case 'dr.template_item_edit_category': {
+        const data = (payload as { data?: { templateId?: string; itemId?: string } }).data;
+        if (!data?.templateId || !data.itemId) {
+          await renderTemplatesScreen(ctx);
+          return;
+        }
+        const { user: u } = await ensureUserAndSettings(ctx);
+        const tpl = await getTemplateById(data.templateId);
+        const item = await getItemById(data.itemId);
+        if (!tpl || tpl.user_id !== u.id || !item || item.template_id !== tpl.id) {
+          await renderTemplatesScreen(ctx);
+          return;
+        }
+        await promptCategorySelection(ctx, { templateId: data.templateId, itemId: data.itemId, backToItem: true });
+        return;
+      }
+
+      case 'dr.template_item_select_category': {
+        const data = (payload as { data?: { templateId?: string; itemId?: string; category?: string } }).data;
+        if (!data?.templateId || !data.category) {
+          await renderTemplatesScreen(ctx);
+          return;
+        }
+        const telegramId = String(ctx.from?.id ?? '');
+        const state = userStates.get(telegramId)?.templateItemFlow;
+        if (state && state.mode === 'create' && state.templateId === data.templateId) {
+          const category = data.category === 'none' ? null : data.category;
+          setTemplateItemFlow(telegramId, { ...state, draft: { ...state.draft, category }, step: 'xp_mode' });
+          await promptXpModeSelection(ctx, { templateId: data.templateId });
+          return;
+        }
+        if (data.itemId) {
+          const { user: u } = await ensureUserAndSettings(ctx);
+          const tpl = await getTemplateById(data.templateId);
+          const item = await getItemById(data.itemId);
+          if (!tpl || tpl.user_id !== u.id || !item || item.template_id !== tpl.id) {
+            await renderTemplatesScreen(ctx);
+            return;
+          }
+          const category = data.category === 'none' ? null : data.category;
+          await updateItem(data.itemId, { category });
+          clearTemplateItemFlow(telegramId);
+          clearReportContextCache();
+          await renderTemplateItemMenu(ctx, data.templateId, data.itemId, t('screens.daily_report.item_saved'));
+          return;
+        }
+        await renderTemplateEdit(ctx, data.templateId);
+        return;
+      }
+
+      case 'dr.template_item_edit_xp': {
+        const data = (payload as { data?: { templateId?: string; itemId?: string } }).data;
+        if (!data?.templateId || !data.itemId) {
+          await renderTemplatesScreen(ctx);
+          return;
+        }
+        const { user: u } = await ensureUserAndSettings(ctx);
+        const tpl = await getTemplateById(data.templateId);
+        const item = await getItemById(data.itemId);
+        if (!tpl || tpl.user_id !== u.id || !item || item.template_id !== tpl.id) {
+          await renderTemplatesScreen(ctx);
+          return;
+        }
+        const telegramId = String(ctx.from?.id ?? '');
+        clearTemplateItemFlow(telegramId);
+        setTemplateItemFlow(telegramId, {
+          mode: 'edit',
+          templateId: data.templateId,
+          itemId: data.itemId,
+          step: 'xp_mode',
+          draft: { xpMode: item.xp_mode ?? 'none', xpValue: item.xp_value ?? 0, optionsJson: item.options_json ?? {} }
+        });
+        await promptXpModeSelection(ctx, { templateId: data.templateId, itemId: data.itemId, backToItem: true });
+        return;
+      }
+
+      case 'dr.template_item_select_xp_mode': {
+        const data = (payload as { data?: { templateId?: string; itemId?: string; xpMode?: string } }).data;
+        if (!data?.templateId || !data.xpMode) {
+          await renderTemplatesScreen(ctx);
+          return;
+        }
+        const telegramId = String(ctx.from?.id ?? '');
+        const state = userStates.get(telegramId)?.templateItemFlow;
+        const chosenMode = data.xpMode;
+        const nextDraft = { ...(state?.draft ?? {}), xpMode: chosenMode, optionsJson: chosenMode === 'time' ? { per: 'minute' } : {} };
+
+        if (state && state.mode === 'create' && state.templateId === data.templateId) {
+          if (chosenMode === 'none') {
+            setTemplateItemFlow(telegramId, { ...state, draft: { ...nextDraft, xpValue: null }, step: 'xp_mode' });
+            await finalizeNewTemplateItem(ctx, telegramId, { ...state, draft: { ...nextDraft, xpValue: null } });
+            return;
+          }
+          setTemplateItemFlow(telegramId, { ...state, draft: nextDraft, step: 'xp_value' });
+          await promptXpValueInput(ctx, { templateId: data.templateId });
+          return;
+        }
+
+        if (data.itemId) {
+          const { user: u } = await ensureUserAndSettings(ctx);
+          const tpl = await getTemplateById(data.templateId);
+          const item = await getItemById(data.itemId);
+          if (!tpl || tpl.user_id !== u.id || !item || item.template_id !== tpl.id) {
+            await renderTemplatesScreen(ctx);
+            return;
+          }
+
+          if (chosenMode === 'none') {
+            await updateItem(data.itemId, { xp_mode: null, xp_value: null, options_json: {} });
+            clearTemplateItemFlow(telegramId);
+            clearReportContextCache();
+            await renderTemplateItemMenu(ctx, data.templateId, data.itemId, t('screens.daily_report.item_saved'));
+            return;
+          }
+
+          setTemplateItemFlow(telegramId, {
+            mode: 'edit',
+            templateId: data.templateId,
+            itemId: data.itemId,
+            step: 'xp_value',
+            draft: nextDraft
+          });
+          await promptXpValueInput(ctx, { templateId: data.templateId, itemId: data.itemId, backToItem: true });
+          return;
+        }
+        await renderTemplateEdit(ctx, data.templateId);
+        return;
+      }
+
+      case 'dr.template_item_toggle_enabled': {
+        const data = (payload as { data?: { templateId?: string; itemId?: string } }).data;
+        if (!data?.templateId || !data.itemId) {
+          await renderTemplatesScreen(ctx);
+          return;
+        }
+        try {
+          const { user: u } = await ensureUserAndSettings(ctx);
+          const tpl = await getTemplateById(data.templateId);
+          const item = await getItemById(data.itemId);
+          if (!tpl || tpl.user_id !== u.id || !item || item.template_id !== tpl.id) {
+            await renderTemplatesScreen(ctx);
+            return;
+          }
+          await setItemEnabled(item.id, !item.enabled);
+          clearReportContextCache();
+          await renderTemplateItemMenu(ctx, data.templateId, data.itemId, t('screens.daily_report.item_saved'));
+        } catch (error) {
+          console.error({ scope: 'daily_report', event: 'template_item_toggle_failed', error, data });
+          await renderTemplateEdit(ctx, data.templateId);
+        }
+        return;
+      }
+
+      case 'dr.template_item_move_up':
+      case 'dr.template_item_move_down': {
+        const data = (payload as { data?: { templateId?: string; itemId?: string } }).data;
+        if (!data?.templateId || !data.itemId) {
+          await renderTemplatesScreen(ctx);
+          return;
+        }
+        const direction = action === 'dr.template_item_move_up' ? 'up' : 'down';
+        try {
+          const { user: u } = await ensureUserAndSettings(ctx);
+          const tpl = await getTemplateById(data.templateId);
+          const item = await getItemById(data.itemId);
+          if (!tpl || tpl.user_id !== u.id || !item || item.template_id !== tpl.id) {
+            await renderTemplatesScreen(ctx);
+            return;
+          }
+          await moveItem(data.templateId, data.itemId, direction);
+          clearReportContextCache();
+        } catch (error) {
+          console.error({ scope: 'daily_report', event: 'template_item_move_failed', error, data, direction });
+        }
+        await renderTemplateEdit(ctx, data.templateId);
+        return;
+      }
+
+      case 'dr.template_item_delete_confirm': {
+        const data = (payload as { data?: { templateId?: string; itemId?: string } }).data;
+        if (!data?.templateId || !data.itemId) {
+          await renderTemplatesScreen(ctx);
+          return;
+        }
+        await renderTemplateItemDeleteConfirm(ctx, data.templateId, data.itemId);
+        return;
+      }
+
+      case 'dr.template_item_delete': {
+        const data = (payload as { data?: { templateId?: string; itemId?: string } }).data;
+        if (!data?.templateId || !data.itemId) {
+          await renderTemplatesScreen(ctx);
+          return;
+        }
+        try {
+          const { user: u } = await ensureUserAndSettings(ctx);
+          const tpl = await getTemplateById(data.templateId);
+          const item = await getItemById(data.itemId);
+          if (!tpl || tpl.user_id !== u.id || !item || item.template_id !== tpl.id) {
+            await renderTemplatesScreen(ctx);
+            return;
+          }
+          await deleteItem(data.itemId);
+          clearReportContextCache();
+          await renderTemplateEdit(ctx, data.templateId, t('screens.daily_report.item_deleted'));
+        } catch (error) {
+          console.error({ scope: 'daily_report', event: 'template_item_delete_failed', error, data });
+          await renderTemplateEdit(ctx, data.templateId);
+        }
         return;
       }
 
@@ -1965,6 +2629,91 @@ bot.on('message:text', async (ctx: Context) => {
     userStates.set(stateKey, { ...state, settingsRoutine: undefined });
     await renderSettingsRoot(ctx);
     return;
+  }
+
+  const templateFlow = state.templateItemFlow;
+  if (templateFlow) {
+    const telegramId = stateKey;
+    try {
+      if (templateFlow.step === 'label') {
+        if (!text) {
+          await promptLabelInput(ctx, { templateId: templateFlow.templateId, backToItemId: templateFlow.itemId });
+          return;
+        }
+        if (templateFlow.mode === 'create') {
+          const itemKey = await generateUniqueItemKey(templateFlow.templateId, text);
+          setTemplateItemFlow(telegramId, { ...templateFlow, draft: { ...templateFlow.draft, label: text, itemKey }, step: 'type' });
+          await promptTypeSelection(ctx, { templateId: templateFlow.templateId });
+          return;
+        }
+        if (!templateFlow.itemId) {
+          clearTemplateItemFlow(telegramId);
+          await renderTemplatesScreen(ctx);
+          return;
+        }
+        await updateItem(templateFlow.itemId, { label: text });
+        clearTemplateItemFlow(telegramId);
+        clearReportContextCache();
+        await renderTemplateItemMenu(ctx, templateFlow.templateId, templateFlow.itemId, t('screens.daily_report.item_saved'));
+        return;
+      }
+
+      if (templateFlow.step === 'key') {
+        const cleanedKey = slugifyItemKey(text);
+        if (!cleanedKey) {
+          await promptKeyInput(ctx, { templateId: templateFlow.templateId, itemId: templateFlow.itemId as string });
+          return;
+        }
+        const items = await listAllItems(templateFlow.templateId);
+        const duplicate = items.some((i) => i.item_key === cleanedKey && i.id !== templateFlow.itemId);
+        if (duplicate) {
+          await ctx.reply(t('screens.daily_report.duplicate_key'));
+          return;
+        }
+        if (!templateFlow.itemId) {
+          clearTemplateItemFlow(telegramId);
+          await renderTemplateEdit(ctx, templateFlow.templateId);
+          return;
+        }
+        await updateItem(templateFlow.itemId, { item_key: cleanedKey });
+        clearTemplateItemFlow(telegramId);
+        clearReportContextCache();
+        await renderTemplateItemMenu(ctx, templateFlow.templateId, templateFlow.itemId, t('screens.daily_report.item_saved'));
+        return;
+      }
+
+      if (templateFlow.step === 'xp_value') {
+        const xpVal = Number(text);
+        if (!Number.isInteger(xpVal)) {
+          await ctx.reply(t('screens.daily_report.invalid_number'));
+          return;
+        }
+        if (templateFlow.mode === 'create') {
+          const draft = { ...templateFlow.draft, xpValue: xpVal };
+          setTemplateItemFlow(telegramId, { ...templateFlow, draft, step: 'xp_value' });
+          await finalizeNewTemplateItem(ctx, telegramId, { ...templateFlow, draft });
+          return;
+        }
+        if (!templateFlow.itemId) {
+          clearTemplateItemFlow(telegramId);
+          await renderTemplateEdit(ctx, templateFlow.templateId);
+          return;
+        }
+        const xpMode = templateFlow.draft.xpMode && templateFlow.draft.xpMode !== 'none' ? templateFlow.draft.xpMode : null;
+        const xpValue = xpMode ? xpVal : null;
+        const optionsJson = xpMode === 'time' ? templateFlow.draft.optionsJson ?? { per: 'minute' } : {};
+        await updateItem(templateFlow.itemId, { xp_mode: xpMode, xp_value: xpValue, options_json: optionsJson });
+        clearTemplateItemFlow(telegramId);
+        clearReportContextCache();
+        await renderTemplateItemMenu(ctx, templateFlow.templateId, templateFlow.itemId, t('screens.daily_report.item_saved'));
+        return;
+      }
+    } catch (error) {
+      console.error({ scope: 'daily_report', event: 'template_flow_error', error, templateFlow });
+      clearTemplateItemFlow(telegramId);
+      await ctx.reply(t('errors.unexpected'));
+      return;
+    }
   }
 
   // 3) Reward Store edit flow
