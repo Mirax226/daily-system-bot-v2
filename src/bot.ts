@@ -251,7 +251,7 @@ const buildReportsMenuKeyboard = async (ctx: Context): Promise<InlineKeyboard> =
 
 const buildDailyReportKeyboard = async (ctx: Context, reportDay: ReportDayRow): Promise<InlineKeyboard> => {
   const statusBtn = await makeActionButton(ctx, { label: t('buttons.dr_today_status'), action: 'dr.status', data: { reportDayId: reportDay.id, filter: 'all' } });
-  const backBtn = await makeActionButton(ctx, { label: t('buttons.back'), action: 'dr.menu' });
+  const backBtn = await makeActionButton(ctx, { label: t('buttons.back'), action: 'dr.back' });
 
   // When locked: keep only Status + Back, plus Unlock.
   if (reportDay.locked) {
