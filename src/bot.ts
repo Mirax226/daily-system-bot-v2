@@ -161,7 +161,7 @@ const sendErrorNotice = async (ctx: Context, errorCode: string) => {
   const btn = await makeActionButton(ctx, { label: t('buttons.send_report'), action: 'error.send_report', data: { errorCode } });
   const kb = new InlineKeyboard().text(btn.text, btn.callback_data);
   await renderScreen(ctx, {
-    titleKey: 'Error',
+    titleKey: 'errors.error_title',
     bodyLines: [t('errors.with_code', { code: errorCode })],
     inlineKeyboard: kb
   });
@@ -505,7 +505,7 @@ const renderRewardEditMenu = async (ctx: Context, reward: RewardRow): Promise<vo
 
 const renderReportsMenu = async (ctx: Context): Promise<void> => {
   const kb = await buildReportsMenuKeyboard(ctx);
-  await renderScreen(ctx, { titleKey: t('screens.reports.title'), bodyLines: [t('screens.reports.choose_category')], inlineKeyboard: kb });
+  await renderScreen(ctx, { titleKey: 'screens.reports.title', bodyLines: ['screens.reports.choose_category'], inlineKeyboard: kb });
 };
 
 const renderXpSummary = async (ctx: Context): Promise<void> => {
@@ -513,13 +513,13 @@ const renderXpSummary = async (ctx: Context): Promise<void> => {
   const summary = await getXpSummary(user.id);
 
   const lines = [
-    t('screens.reports.xp_earned', { xp: summary.earned }),
-    t('screens.reports.xp_spent', { xp: summary.spent }),
-    t('screens.reports.xp_net', { xp: summary.net })
+    t('screens.reports.xp_earned', { earned: summary.earned }),
+    t('screens.reports.xp_spent', { spent: summary.spent }),
+    t('screens.reports.xp_net', { net: summary.net })
   ];
 
   const kb = await buildReportsMenuKeyboard(ctx);
-  await renderScreen(ctx, { titleKey: t('screens.reports.xp_title'), bodyLines: lines, inlineKeyboard: kb });
+  await renderScreen(ctx, { titleKey: 'screens.reports.xp_title', bodyLines: lines, inlineKeyboard: kb });
 };
 
 const renderReportcar = async (ctx: Context): Promise<void> => {
@@ -662,8 +662,8 @@ const renderTimePicker = async (
   }
   kb.row();
 
-  const amBtn = await makeActionButton(ctx, { label: 'AM', action: 'dr.time_set_ampm', data: { reportDayId, itemId: item.id, ampm: 'AM' } });
-  const pmBtn = await makeActionButton(ctx, { label: 'PM', action: 'dr.time_set_ampm', data: { reportDayId, itemId: item.id, ampm: 'PM' } });
+  const amBtn = await makeActionButton(ctx, { label: t('buttons.am'), action: 'dr.time_set_ampm', data: { reportDayId, itemId: item.id, ampm: 'AM' } });
+  const pmBtn = await makeActionButton(ctx, { label: t('buttons.pm'), action: 'dr.time_set_ampm', data: { reportDayId, itemId: item.id, ampm: 'PM' } });
   kb.text(amBtn.text, amBtn.callback_data).text(pmBtn.text, pmBtn.callback_data);
   kb.row();
 
@@ -763,7 +763,7 @@ const renderDailyReportRoot = async (ctx: Context, localDate?: string): Promise<
   const total = statuses.length;
 
   const template = await ensureDefaultTemplate(reportDay.user_id);
-  const templateName = template.title ?? 'Default Template';
+  const templateName = template.title ?? t('screens.templates.default_title');
 
   const bodyLines: string[] = [
     t('screens.daily_report.root_header', { date: reportDay.local_date }),
@@ -1091,7 +1091,7 @@ const renderSettingsRoot = async (ctx: Context): Promise<void> => {
   const speedBtn = await makeActionButton(ctx, { label: t('buttons.settings_speed_test'), action: 'settings.speed_test' });
   const backBtn = await makeActionButton(ctx, { label: t('buttons.back'), action: 'nav.dashboard' });
   const kb = new InlineKeyboard().text(speedBtn.text, speedBtn.callback_data).row().text(backBtn.text, backBtn.callback_data);
-  await renderScreen(ctx, { titleKey: t('screens.settings.title'), bodyLines: [t('screens.settings.choose_option')], inlineKeyboard: kb });
+  await renderScreen(ctx, { titleKey: 'screens.settings.title', bodyLines: ['screens.settings.choose_option'], inlineKeyboard: kb });
 };
 
 /* ===== Commands ===== */
@@ -1105,28 +1105,28 @@ bot.command('home', async (ctx: Context) => {
 });
 
 bot.command('debug_inline', async (ctx: Context) => {
-  const keyboard = new InlineKeyboard().text('Test button', 'dbg:test');
-  await ctx.reply('Inline debug screen', { reply_markup: keyboard });
+  const keyboard = new InlineKeyboard().text(t('buttons.debug_inline'), 'dbg:test');
+  await ctx.reply(t('screens.debug_inline.title'), { reply_markup: keyboard });
 });
 
 bot.callbackQuery('dbg:test', async (ctx) => {
-  await safeAnswerCallback(ctx, { text: 'Inline is working!' });
+  await safeAnswerCallback(ctx, { text: t('screens.debug_inline.success') });
 });
 
-bot.hears('🏠 Dashboard', renderDashboard);
-bot.hears('🧾 Daily Report', async (ctx: Context) => renderDailyReportRoot(ctx));
-bot.hears('📘 Reportcar', renderReportcar);
-bot.hears('✅ Tasks / Routines', renderTasks);
-bot.hears('📋 To-Do List', renderTodo);
-bot.hears('🗓 Planning', renderPlanning);
-bot.hears('🧭 My Day', renderMyDay);
-bot.hears('📝 Free Text', renderFreeText);
-bot.hears('⏰ Reminders', renderReminders);
-bot.hears('🎁 Reward Center', renderRewardCenter);
-bot.hears('📊 Reports', renderReportsMenu);
-bot.hears('📅 Calendar & Events', renderCalendarEvents);
-bot.hears('⚙️ Settings', renderSettingsRoot);
-bot.hears('🤖 AI', renderAI);
+bot.hears(t('buttons.nav_dashboard'), renderDashboard);
+bot.hears(t('buttons.nav_daily_report'), async (ctx: Context) => renderDailyReportRoot(ctx));
+bot.hears(t('buttons.nav_reportcar'), renderReportcar);
+bot.hears(t('buttons.nav_tasks'), renderTasks);
+bot.hears(t('buttons.nav_todo'), renderTodo);
+bot.hears(t('buttons.nav_planning'), renderPlanning);
+bot.hears(t('buttons.nav_my_day'), renderMyDay);
+bot.hears(t('buttons.nav_free_text'), renderFreeText);
+bot.hears(t('buttons.nav_reminders'), renderReminders);
+bot.hears(t('buttons.nav_rewards'), renderRewardCenter);
+bot.hears(t('buttons.nav_reports'), renderReportsMenu);
+bot.hears(t('buttons.nav_calendar'), renderCalendarEvents);
+bot.hears(t('buttons.nav_settings'), renderSettingsRoot);
+bot.hears(t('buttons.nav_ai'), renderAI);
 
 /**
  * Tokenized callback handler
@@ -1834,7 +1834,7 @@ bot.on('message:text', async (ctx: Context) => {
       return;
     }
 
-    const label = state.settingsRoutine.label ?? 'Routine';
+    const label = state.settingsRoutine.label ?? t('screens.settings.default_routine_label');
     const { user } = await ensureUserAndSettings(ctx);
     const template = await ensureDefaultTemplate(user.id);
     await ensureDefaultItems(user.id);
