@@ -1,4 +1,5 @@
 import { getSupabaseClient } from '../db';
+import { t } from '../i18n';
 import type { ReportItemRow, ReportTemplateRow } from '../types/supabase';
 import { getOrCreateUserSettings } from './userSettings';
 
@@ -77,7 +78,7 @@ export async function ensureDefaultTemplate(userId: string, client: Client = get
 
   if (data) return data as ReportTemplateRow;
 
-  const insertPayload = { user_id: userId, title: 'Daily Report' };
+  const insertPayload = { user_id: userId, title: t('screens.daily_report.title') };
   const { data: inserted, error: insertError } = await client.from(REPORT_TEMPLATES_TABLE).insert(insertPayload).select('*').single();
   if (insertError || !inserted) {
     console.error({ scope: 'report_templates', event: 'template_insert_error', userId, error: insertError });

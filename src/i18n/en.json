@@ -2,6 +2,11 @@
   "screens": {
     "dashboard": {
       "title": "Dashboard",
+      "greeting_1": "👋 Hey there!",
+      "greeting_2": "🙌 Welcome!",
+      "greeting_3": "🚀 Ready to plan your day?",
+      "greeting_4": "🌟 Let’s make today productive!",
+      "greeting_5": "💪 Keep going!",
       "greeting": "Hello!",
       "time": "Current time: {date} | {time}",
       "welcome_new": [
@@ -153,6 +158,12 @@
       "speed_telegram": "Telegram: {ms} ms",
       "speed_handler": "Handler total: {ms} ms",
       "speed_note": "These timings are approximate. Run again to compare."
+    },
+    "language": {
+      "choose_title": "Choose your language",
+      "choose_hint": "Pick a language to continue.",
+      "change_title": "Change language",
+      "change_hint": "Switch the interface language below."
     },
     "reports": {
       "title": "Reports",
@@ -366,6 +377,9 @@
     "nav_calendar": "📅 Calendar & Events",
     "nav_settings": "⚙️ Settings",
     "nav_ai": "🤖 AI",
+    "change_language": "Change language",
+    "language_en": "English 🇺🇸",
+    "language_fa": "فارسی 🇮🇷",
     "reload": "🔄 Reload",
     "back": "⬅️ Back",
     "send_report": "📨 Send report",

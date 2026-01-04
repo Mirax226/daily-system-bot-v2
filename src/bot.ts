@@ -5,7 +5,7 @@ import type { BotError, Context } from 'grammy';
 import { config } from './config';
 
 import { ensureUser } from './services/users';
-import { getOrCreateUserSettings, setUserOnboarded } from './services/userSettings';
+import { getOrCreateUserSettings, setUserLanguageCode, setUserOnboarded } from './services/userSettings';
 
 import {
   seedDefaultRewardsIfEmpty,
@@ -65,11 +65,11 @@ import { getRecentTelemetryEvents, isTelemetryEnabled, logTelemetryEvent } from 
 import { getErrorReportByCode, logErrorReport } from './services/errorReports';
 
 import { makeActionButton } from './ui/inlineButtons';
-import { renderScreen, ensureUserAndSettings as renderEnsureUserAndSettings } from './ui/renderScreen';
+import { renderScreen, ensureUserAndSettings as renderEnsureUserAndSettings, updateCachedUserContext } from './ui/renderScreen';
 import { aiEnabledForUser, sendMainMenu } from './ui/mainMenu';
 
 import { formatLocalTime } from './utils/time';
-import { t } from './i18n';
+import { resolveLocale, t, withLocale, type Locale } from './i18n';
 
 import type { ReportItemRow, ReportDayRow, RewardRow, RoutineRow, RoutineTaskRow } from './types/supabase';
 
@@ -397,8 +397,72 @@ const handleBuilderBackNavigation = async (ctx: Context, templateId: string): Pr
   await renderBuilderStep(ctx, templateId, prevStep, st?.templateItemFlow);
 };
 
-const greetings = ['👋 Hey there!', '🙌 Welcome!', '🚀 Ready to plan your day?', '🌟 Let’s make today productive!', '💪 Keep going!'];
-const chooseGreeting = (): string => greetings[Math.floor(Math.random() * greetings.length)];
+const greetingKeys = [
+  'screens.dashboard.greeting_1',
+  'screens.dashboard.greeting_2',
+  'screens.dashboard.greeting_3',
+  'screens.dashboard.greeting_4',
+  'screens.dashboard.greeting_5'
+];
+const chooseGreeting = (): string => {
+  const options = greetingKeys.map((key) => t(key));
+  const pick = Math.floor(Math.random() * options.length);
+  return options[pick] ?? t('screens.dashboard.greeting_1');
+};
+
+const LANGUAGE_OPTIONS: { code: Locale; labelKey: string }[] = [
+  { code: 'en', labelKey: 'buttons.language_en' },
+  { code: 'fa', labelKey: 'buttons.language_fa' }
+];
+
+type LanguageScreenOrigin = 'onboarding' | 'settings';
+
+const readStoredLanguageCode = (settingsJson: Record<string, unknown> | null | undefined): Locale | null => {
+  const code = (settingsJson as { language_code?: string | null } | null | undefined)?.language_code ?? null;
+  if (code === 'fa') return 'fa';
+  if (code === 'en') return 'en';
+  return null;
+};
+
+const renderLanguageSelection = async (ctx: Context, params: { origin: LanguageScreenOrigin; currentLocale: Locale }): Promise<void> => {
+  const kb = new InlineKeyboard();
+
+  for (const option of LANGUAGE_OPTIONS) {
+    const isActive = params.currentLocale === option.code;
+    const suffix = isActive ? ' ✅' : '';
+    const btn = await makeActionButton(ctx, {
+      label: `${t(option.labelKey)}${suffix}`,
+      action: 'language.set',
+      data: { language: option.code, origin: params.origin }
+    });
+    kb.text(btn.text, btn.callback_data).row();
+  }
+
+  if (params.origin === 'settings') {
+    const backBtn = await makeActionButton(ctx, { label: t('buttons.back'), action: 'nav.settings' });
+    kb.text(backBtn.text, backBtn.callback_data);
+  }
+
+  const titleKey = params.origin === 'onboarding' ? 'screens.language.choose_title' : 'screens.language.change_title';
+  const bodyKey = params.origin === 'onboarding' ? 'screens.language.choose_hint' : 'screens.language.change_hint';
+
+  await renderScreen(ctx, { titleKey, bodyLines: [bodyKey], inlineKeyboard: kb });
+};
+
+const applyLanguageSelection = async (ctx: Context, language: Locale, origin: LanguageScreenOrigin): Promise<void> => {
+  const { user } = await ensureUserAndSettings(ctx);
+  const updatedSettings = await setUserLanguageCode(user.id, language);
+  updateCachedUserContext(ctx, { settings: updatedSettings, locale: language });
+
+  await withLocale(language, async () => {
+    await sendMainMenu(ctx, aiEnabledForUser(user.settings_json as Record<string, unknown>));
+    if (origin === 'settings') {
+      await renderSettingsRoot(ctx);
+    } else {
+      await renderDashboard(ctx);
+    }
+  });
+};
 
 const isTooOldCallbackError = (error: unknown): error is GrammyError =>
   error instanceof GrammyError && error.error_code === 400 && error.description.toLowerCase().includes('query is too old');
@@ -443,8 +507,20 @@ const ensureUserAndSettings = async (ctx: Context) => {
   const username = ctx.from.username ?? null;
   const user = await ensureUser({ telegramId, username });
   const settings = await getOrCreateUserSettings(user.id);
-  return { user, settings };
+  const locale = resolveLocale(((settings.settings_json ?? {}) as { language_code?: string | null }).language_code ?? null);
+  return { user, settings, locale };
 };
+
+bot.use(async (ctx, next) => {
+  if (!ctx.from) {
+    await next();
+    return;
+  }
+  const { locale } = await ensureUserAndSettings(ctx);
+  await withLocale(locale, async () => {
+    await next();
+  });
+});
 
 const telemetryEnabledForUser = (userSettingsJson?: Record<string, unknown>) => isTelemetryEnabled(userSettingsJson);
 
@@ -1106,7 +1182,12 @@ const isLockedMessageLines = (reportDay: ReportDayRow): string[] => {
 
 const renderDashboard = async (ctx: Context): Promise<void> => {
   try {
-    const { user, settings } = await ensureUserAndSettings(ctx);
+    const { user, settings, locale } = await ensureUserAndSettings(ctx);
+    const storedLanguage = readStoredLanguageCode(settings.settings_json as Record<string, unknown>);
+    if (!storedLanguage) {
+      await renderLanguageSelection(ctx, { origin: 'onboarding', currentLocale: locale });
+      return;
+    }
     const isNew = !settings.onboarded;
 
     if (isNew) {
@@ -2970,15 +3051,27 @@ const handleSaveValue = async (ctx: Context, text: string): Promise<void> => {
 };
 
 const renderSettingsRoot = async (ctx: Context): Promise<void> => {
+  const changeLanguageBtn = await makeActionButton(ctx, { label: t('buttons.change_language'), action: 'settings.language' });
   const speedBtn = await makeActionButton(ctx, { label: t('buttons.settings_speed_test'), action: 'settings.speed_test' });
   const backBtn = await makeActionButton(ctx, { label: t('buttons.back'), action: 'nav.dashboard' });
-  const kb = new InlineKeyboard().text(speedBtn.text, speedBtn.callback_data).row().text(backBtn.text, backBtn.callback_data);
+  const kb = new InlineKeyboard()
+    .text(changeLanguageBtn.text, changeLanguageBtn.callback_data)
+    .row()
+    .text(speedBtn.text, speedBtn.callback_data)
+    .row()
+    .text(backBtn.text, backBtn.callback_data);
   await renderScreen(ctx, { titleKey: 'screens.settings.title', bodyLines: ['screens.settings.choose_option'], inlineKeyboard: kb });
 };
 
 /* ===== Commands ===== */
 
 bot.command('start', async (ctx: Context) => {
+  const { settings, locale } = await ensureUserAndSettings(ctx);
+  const storedLanguage = readStoredLanguageCode(settings.settings_json as Record<string, unknown>);
+  if (!storedLanguage) {
+    await renderLanguageSelection(ctx, { origin: 'onboarding', currentLocale: locale });
+    return;
+  }
   await renderDashboard(ctx);
 });
 
@@ -2995,20 +3088,24 @@ bot.callbackQuery('dbg:test', async (ctx) => {
   await safeAnswerCallback(ctx, { text: t('screens.debug_inline.success') });
 });
 
-bot.hears(t('buttons.nav_dashboard'), renderDashboard);
-bot.hears(t('buttons.nav_daily_report'), async (ctx: Context) => renderDailyReportRoot(ctx));
-bot.hears(t('buttons.nav_reportcar'), renderReportcar);
-bot.hears(t('buttons.nav_tasks'), renderTasks);
-bot.hears(t('buttons.nav_todo'), renderTodo);
-bot.hears(t('buttons.nav_planning'), renderPlanning);
-bot.hears(t('buttons.nav_my_day'), renderMyDay);
-bot.hears(t('buttons.nav_free_text'), renderFreeText);
-bot.hears(t('buttons.nav_reminders'), renderReminders);
-bot.hears(t('buttons.nav_rewards'), renderRewardCenter);
-bot.hears(t('buttons.nav_reports'), renderReportsMenu);
-bot.hears(t('buttons.nav_calendar'), renderCalendarEvents);
-bot.hears(t('buttons.nav_settings'), renderSettingsRoot);
-bot.hears(t('buttons.nav_ai'), renderAI);
+[
+  { key: 'buttons.nav_dashboard', handler: renderDashboard },
+  { key: 'buttons.nav_daily_report', handler: async (ctx: Context) => renderDailyReportRoot(ctx) },
+  { key: 'buttons.nav_reportcar', handler: renderReportcar },
+  { key: 'buttons.nav_tasks', handler: renderTasks },
+  { key: 'buttons.nav_todo', handler: renderTodo },
+  { key: 'buttons.nav_planning', handler: renderPlanning },
+  { key: 'buttons.nav_my_day', handler: renderMyDay },
+  { key: 'buttons.nav_free_text', handler: renderFreeText },
+  { key: 'buttons.nav_reminders', handler: renderReminders },
+  { key: 'buttons.nav_rewards', handler: renderRewardCenter },
+  { key: 'buttons.nav_reports', handler: renderReportsMenu },
+  { key: 'buttons.nav_calendar', handler: renderCalendarEvents },
+  { key: 'buttons.nav_settings', handler: renderSettingsRoot },
+  { key: 'buttons.nav_ai', handler: renderAI }
+].forEach(({ key, handler }) => {
+  bot.hears([t(key, undefined, 'en'), t(key, undefined, 'fa')], handler);
+});
 
 /**
  * Tokenized callback handler
@@ -3068,6 +3165,25 @@ bot.callbackQuery(/^[A-Za-z0-9_-]{8,12}$/, async (ctx) => {
       case 'nav.settings':
         await renderSettingsRoot(ctx);
         return;
+      case 'settings.language': {
+        const { settings, locale } = await ensureUserAndSettings(ctx);
+        await renderLanguageSelection(ctx, {
+          origin: 'settings',
+          currentLocale: readStoredLanguageCode(settings.settings_json as Record<string, unknown>) ?? locale
+        });
+        return;
+      }
+      case 'language.set': {
+        const data = (payload as { data?: { language?: Locale; origin?: LanguageScreenOrigin } }).data;
+        const language = data?.language;
+        const origin = data?.origin ?? 'onboarding';
+        if (!language) {
+          await renderDashboard(ctx);
+          return;
+        }
+        await applyLanguageSelection(ctx, language, origin);
+        return;
+      }
       case 'routines.root':
         await renderRoutinesRoot(ctx);
         return;
