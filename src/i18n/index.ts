@@ -1,3 +1,4 @@
+import { AsyncLocalStorage } from 'async_hooks';
 import en from './en.json';
 import fa from './fa.json';
 
@@ -8,7 +9,19 @@ const messages = {
   fa
 };
 
-export function t(key: string, params?: Record<string, string | number>, locale: keyof typeof messages = 'en'): string {
+export type Locale = keyof typeof messages;
+
+const localeStore = new AsyncLocalStorage<{ locale: Locale }>();
+
+const getStoredLocale = (): Locale | null => localeStore.getStore()?.locale ?? null;
+
+export const resolveLocale = (candidate?: string | null): Locale => (candidate === 'fa' ? 'fa' : 'en');
+
+export const withLocale = async <T>(locale: Locale, fn: () => Promise<T> | T): Promise<T> => {
+  return await localeStore.run({ locale }, fn);
+};
+
+export function t(key: string, params?: Record<string, string | number>, locale: Locale = getStoredLocale() ?? 'en'): string {
   const parts = key.split('.');
   let current: any = messages[locale];
 

@@ -1,11 +1,17 @@
 import type { PostgrestError, SupabaseClient } from '@supabase/supabase-js';
 import { getSupabaseClient } from '../db';
 import type { Database, UserSettingsRow } from '../types/supabase';
+import { resolveLocale, type Locale } from '../i18n';
 
 const USER_SETTINGS_TABLE = 'user_settings';
 
 const isMissing = (error: PostgrestError | null): boolean =>
   Boolean(error?.code === '42P01' || error?.message?.toLowerCase().includes('does not exist'));
+
+const mergeSettingsJson = (existing: Record<string, unknown> | null | undefined, patch: Record<string, unknown>): Record<string, unknown> => ({
+  ...(existing ?? {}),
+  ...patch
+});
 
 export async function getOrCreateUserSettings(
   userId: string,
@@ -33,6 +39,26 @@ export async function getOrCreateUserSettings(
   return inserted as UserSettingsRow;
 }
 
+export const updateUserSettingsJson = async (
+  userId: string,
+  patch: Record<string, unknown>,
+  client: SupabaseClient<Database> = getSupabaseClient()
+): Promise<UserSettingsRow> => {
+  const current = await getOrCreateUserSettings(userId, client);
+  const nextJson = mergeSettingsJson(current.settings_json as Record<string, unknown> | null | undefined, patch);
+  const { data, error } = await client
+    .from(USER_SETTINGS_TABLE)
+    .update({ settings_json: nextJson, updated_at: new Date().toISOString() })
+    .eq('user_id', userId)
+    .select('*')
+    .single();
+  if (error || !data) {
+    console.error({ scope: 'user_settings', event: 'update_json_error', userId, patch, error });
+    throw new Error(`Failed to update user settings: ${error?.message}`);
+  }
+  return data as UserSettingsRow;
+};
+
 export async function setUserOnboarded(
   userId: string,
   client: SupabaseClient<Database> = getSupabaseClient()
@@ -43,3 +69,14 @@ export async function setUserOnboarded(
     throw new Error(`Failed to update onboarding state: ${error.message}`);
   }
 }
+
+export const getLanguageFromSettings = (settings: UserSettingsRow): Locale =>
+  resolveLocale(((settings.settings_json ?? {}) as { language_code?: string | null }).language_code ?? null);
+
+export const setUserLanguageCode = async (
+  userId: string,
+  languageCode: Locale,
+  client: SupabaseClient<Database> = getSupabaseClient()
+): Promise<UserSettingsRow> => {
+  return updateUserSettingsJson(userId, { language_code: languageCode }, client);
+};
