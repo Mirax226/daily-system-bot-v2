@@ -56,11 +56,33 @@ const shouldApplyXp = (existing: ReportValueRow | null): boolean => !existing ||
 
 type XpMode = 'fixed' | 'per_minute' | 'per_number' | 'none';
 
+const extractRoutineMeta = (
+  item: ReportItemRow
+): { source: 'routine' | 'routine_task' | 'daily_report'; routineId?: string; routineTaskId?: string } => {
+  const opts = (item.options_json ?? {}) as { routine_id?: string; routine_task_id?: string; routine_role?: string };
+  if (opts.routine_role === 'parent') {
+    return { source: 'routine', routineId: opts.routine_id };
+  }
+  if (opts.routine_role === 'task' || opts.routine_task_id) {
+    return { source: 'routine_task', routineId: opts.routine_id, routineTaskId: opts.routine_task_id };
+  }
+  return { source: 'daily_report' };
+};
+
 const resolveXpMode = (xpMode?: string | null): XpMode => {
   if (xpMode === 'fixed') return 'fixed';
   if (xpMode === 'per_minute' || xpMode === 'time') return 'per_minute';
   if (xpMode === 'per_number') return 'per_number';
   return 'none';
+};
+
+const getXpRatio = (item: ReportItemRow): { per: number; xp: number } => {
+  const opts = (item.options_json ?? {}) as { per?: unknown; xp?: unknown; perNumber?: unknown; xpPerUnit?: unknown };
+  const perFromOpts = Number((opts.per as number) ?? (opts.perNumber as number));
+  const xpFromOpts = Number((opts.xp as number) ?? (opts.xpPerUnit as number));
+  const per = Number.isFinite(perFromOpts) && perFromOpts > 0 ? perFromOpts : 1;
+  const xp = Number.isFinite(xpFromOpts) && xpFromOpts > 0 ? xpFromOpts : item.xp_value ?? 0;
+  return { per, xp };
 };
 
 const extractMinutes = (item: ReportItemRow, valueJson: Record<string, unknown> | null): number => {
@@ -102,6 +124,7 @@ const isBooleanTrue = (valueJson: Record<string, unknown> | null): boolean => {
 
 const computeXpDelta = (item: ReportItemRow, valueJson: Record<string, unknown> | null): { delta: number; minutes: number; units: number } => {
   const xpMode = resolveXpMode(item.xp_mode);
+  const ratio = getXpRatio(item);
 
   if (item.item_type === 'boolean') {
     const checked = isBooleanTrue(valueJson);
@@ -118,14 +141,15 @@ const computeXpDelta = (item: ReportItemRow, valueJson: Record<string, unknown> 
   }
   if (xpMode === 'per_number') {
     const units = extractNumber(valueJson);
-    const raw = units * (item.xp_value ?? 0);
+    const steps = Math.floor(units / (ratio.per > 0 ? ratio.per : 1));
+    const raw = steps * ratio.xp;
     const capped = item.xp_max_per_day != null && item.xp_max_per_day > 0 ? Math.min(raw, item.xp_max_per_day) : raw;
     const delta = Math.max(0, Math.floor(capped));
     return { delta, minutes: 0, units };
   }
   const minutes = extractMinutes(item, valueJson);
-  const perMinute = item.xp_value ?? 0;
-  const raw = minutes * perMinute;
+  const steps = Math.floor(minutes / (ratio.per > 0 ? ratio.per : 1));
+  const raw = steps * ratio.xp;
   const capped =
     item.xp_max_per_day != null && item.xp_max_per_day > 0 ? Math.min(raw, item.xp_max_per_day) : raw;
   const delta = Math.max(0, Math.floor(capped));
@@ -138,6 +162,8 @@ export async function saveValue(
     item: ReportItemRow;
     valueJson: Record<string, unknown> | null;
     userId: string;
+    applyXp?: boolean;
+    resetXpApplied?: boolean;
   },
   client: Client = getSupabaseClient()
 ): Promise<ReportValueRow> {
@@ -157,7 +183,7 @@ export async function saveValue(
     report_day_id: params.reportDayId,
     item_id: params.item.id,
     value_json: params.valueJson,
-    xp_delta_applied: existing?.xp_delta_applied ?? false
+    xp_delta_applied: params.resetXpApplied ? false : existing?.xp_delta_applied ?? false
   };
 
   const { data, error } = await client
@@ -173,10 +199,11 @@ export async function saveValue(
 
   const valueRow = data as ReportValueRow;
 
-  if (shouldApplyXp(existing ?? null)) {
+  if (params.applyXp !== false && shouldApplyXp(existing ?? null)) {
     const { delta, minutes, units } = computeXpDelta(params.item, params.valueJson);
     if (delta !== 0) {
       try {
+        const meta = extractRoutineMeta(params.item);
         await addXpDelta({
           userId: params.userId,
           delta,
@@ -184,7 +211,10 @@ export async function saveValue(
           refType: 'daily_report',
           refId: params.item.id,
           metadata: {
-            source_type: 'daily_report',
+            source_type: meta.source,
+            routine_id: meta.routineId ?? null,
+            routine_task_id: meta.routineTaskId ?? null,
+            report_day_id: params.reportDayId,
             item_id: params.item.id,
             xp_mode: resolveXpMode(params.item.xp_mode),
             minutes,
