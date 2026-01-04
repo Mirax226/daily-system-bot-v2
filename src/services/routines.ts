@@ -27,8 +27,8 @@ export type RoutineInput = {
   userId: string;
   title: string;
   description?: string | null;
-  routineType: 'boolean' | 'duration_minutes';
-  xpMode: 'fixed' | 'per_minute' | 'none';
+  routineType: 'boolean' | 'duration_minutes' | 'number';
+  xpMode: 'fixed' | 'per_minute' | 'per_number' | 'none';
   xpValue?: number | null;
   xpMaxPerDay?: number | null;
   isActive?: boolean;

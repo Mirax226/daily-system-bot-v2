@@ -550,7 +550,7 @@ export type Database = {
           title: string;
           description: string | null;
           routine_type: string;
-          xp_mode: string;
+          xp_mode: 'none' | 'fixed' | 'per_minute' | 'per_number';
           xp_value: number | null;
           xp_max_per_day: number | null;
           is_active: boolean;
@@ -564,7 +564,7 @@ export type Database = {
           title: string;
           description?: string | null;
           routine_type: string;
-          xp_mode?: string;
+          xp_mode?: 'none' | 'fixed' | 'per_minute' | 'per_number';
           xp_value?: number | null;
           xp_max_per_day?: number | null;
           is_active?: boolean;
@@ -578,7 +578,7 @@ export type Database = {
           title?: string;
           description?: string | null;
           routine_type?: string;
-          xp_mode?: string;
+          xp_mode?: 'none' | 'fixed' | 'per_minute' | 'per_number';
           xp_value?: number | null;
           xp_max_per_day?: number | null;
           is_active?: boolean;
@@ -587,6 +587,55 @@ export type Database = {
           updated_at?: string;
         };
         Relationships: [];
+      };
+      routine_tasks: {
+        Row: {
+          id: string;
+          routine_id: string;
+          title: string;
+          description: string | null;
+          item_type: 'boolean' | 'duration_minutes' | 'number';
+          xp_mode: 'none' | 'fixed' | 'per_minute' | 'per_number';
+          xp_value: number | null;
+          xp_max_per_day: number | null;
+          sort_order: number;
+          created_at: string;
+          updated_at: string;
+        };
+        Insert: {
+          id?: string;
+          routine_id: string;
+          title: string;
+          description?: string | null;
+          item_type: 'boolean' | 'duration_minutes' | 'number';
+          xp_mode?: 'none' | 'fixed' | 'per_minute' | 'per_number';
+          xp_value?: number | null;
+          xp_max_per_day?: number | null;
+          sort_order?: number;
+          created_at?: string;
+          updated_at?: string;
+        };
+        Update: {
+          id?: string;
+          routine_id?: string;
+          title?: string;
+          description?: string | null;
+          item_type?: 'boolean' | 'duration_minutes' | 'number';
+          xp_mode?: 'none' | 'fixed' | 'per_minute' | 'per_number';
+          xp_value?: number | null;
+          xp_max_per_day?: number | null;
+          sort_order?: number;
+          created_at?: string;
+          updated_at?: string;
+        };
+        Relationships: [
+          {
+            foreignKeyName: 'routine_tasks_routine_id_fkey';
+            columns: ['routine_id'];
+            referencedRelation: 'routines';
+            referencedColumns: ['id'];
+          }
+        ];
       };
       telemetry_events: {
         Row: {
@@ -678,6 +727,7 @@ export type RewardRow = Database['public']['Tables']['rewards']['Row'];
 export type RewardPurchaseRow = Database['public']['Tables']['reward_purchases']['Row'];
 export type XpLedgerRow = Database['public']['Tables']['xp_ledger']['Row'];
 export type RoutineRow = Database['public']['Tables']['routines']['Row'];
+export type RoutineTaskRow = Database['public']['Tables']['routine_tasks']['Row'];
 export type UserSettingsRow = Database['public']['Tables']['user_settings']['Row'];
 export type CallbackTokenRow = Database['public']['Tables']['callback_tokens']['Row'];
 export type ReportTemplateRow = Database['public']['Tables']['report_templates']['Row'];
