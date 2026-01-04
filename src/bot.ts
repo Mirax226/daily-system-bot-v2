@@ -2162,7 +2162,11 @@ const renderTemplateEdit = async (ctx: Context, templateId: string, flashLine?: 
   const kb = new InlineKeyboard();
 
   for (const [idx, item] of visibleItems.entries()) {
-    const btn = await makeActionButton(ctx, { label: `[${idx + 1}] ${item.label}`, action: 'dr.template_item_menu', data: { templateId, itemId: item.id } });
+    const btn = await makeActionButton(ctx, {
+      label: t('buttons.template_item_open', { index: idx + 1, label: item.label }),
+      action: 'dr.template_item_menu',
+      data: { templateId, itemId: item.id }
+    });
     kb.text(btn.text, btn.callback_data).row();
   }
 
@@ -2327,7 +2331,11 @@ const renderHistory = async (ctx: Context, range: '7d' | '30d' = '7d'): Promise<
 
   kb.text(range7Btn.text, range7Btn.callback_data).text(range30Btn.text, range30Btn.callback_data).row();
   for (const entry of days) {
-    const openBtn = await makeActionButton(ctx, { label: `📅 ${entry.day.local_date}`, action: 'dr.history_open_day', data: { reportDayId: entry.day.id } });
+    const openBtn = await makeActionButton(ctx, {
+      label: t('buttons.dr_history_open_day', { date: entry.day.local_date }),
+      action: 'dr.history_open_day',
+      data: { reportDayId: entry.day.id }
+    });
     kb.text(openBtn.text, openBtn.callback_data).row();
   }
   kb.text(backBtn.text, backBtn.callback_data);
