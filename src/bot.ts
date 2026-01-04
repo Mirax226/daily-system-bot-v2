@@ -48,7 +48,6 @@ import {
   updateRoutineTask,
   deleteRoutineTask
 } from './services/routineTasks';
-import { ensureFallbackCategory, getTemplateCategories, isDefaultCategoryName, saveTemplateCategories, type TemplateCategory } from './services/templateCategories';
 
 import {
   getOrCreateReportDay,
@@ -84,7 +83,7 @@ type TemplateItemFlow = {
   mode: 'create' | 'edit';
   templateId: string;
   itemId?: string;
-  step: 'label' | 'key' | 'type' | 'category' | 'xp_mode' | 'xp_value' | 'xp_max';
+  step: 'label' | 'key' | 'type' | 'category' | 'category_custom' | 'xp_mode' | 'xp_value' | 'xp_max' | 'summary';
   draft: {
     label?: string;
     itemKey?: string;
@@ -590,6 +589,16 @@ const formatItemLabel = (item: ReportItemRow): string => {
   return base;
 };
 
+const STANDARD_CATEGORIES: { name: string; emoji: string; labelKey: string }[] = [
+  { name: 'sleep', emoji: '😴', labelKey: 'screens.templates.category_sleep' },
+  { name: 'routine', emoji: '🔁', labelKey: 'screens.templates.category_routine' },
+  { name: 'study', emoji: '📚', labelKey: 'screens.templates.category_study' },
+  { name: 'tasks', emoji: '✅', labelKey: 'screens.templates.category_tasks' },
+  { name: 'health', emoji: '❤️', labelKey: 'screens.templates.category_health' },
+  { name: 'mindset', emoji: '🧠', labelKey: 'screens.templates.category_mindset' },
+  { name: 'other', emoji: '🏷', labelKey: 'screens.templates.category_other' }
+];
+
 const allowedXpModesForItemType = (itemType?: string): ('none' | 'fixed' | 'per_minute' | 'per_number')[] => {
   if (itemType === 'boolean') return ['none', 'fixed'];
   if (itemType === 'time_hhmm' || itemType === 'duration_minutes') return ['none', 'fixed', 'per_minute'];
@@ -602,6 +611,86 @@ const normalizeXpModeForItemType = (itemType: string | undefined, xpMode: string
   const allowed = allowedXpModesForItemType(itemType);
   if (resolved && allowed.includes(resolved as 'none' | 'fixed' | 'per_minute' | 'per_number')) return resolved as 'none' | 'fixed' | 'per_minute' | 'per_number';
   return 'none';
+};
+
+const getPerNumberConfig = (
+  draft: Pick<TemplateItemFlow['draft'], 'optionsJson' | 'xpValue'>
+): { perNumber: number; xpPerUnit: number } => {
+  const opts = draft.optionsJson ?? {};
+  const perNumber = Number((opts as { perNumber?: number }).perNumber ?? 1);
+  const xpPerUnit = Number((opts as { xpPerUnit?: number }).xpPerUnit ?? draft.xpValue ?? 0);
+  return {
+    perNumber: Number.isInteger(perNumber) && perNumber > 0 ? perNumber : 1,
+    xpPerUnit: Number.isInteger(xpPerUnit) && xpPerUnit > 0 ? xpPerUnit : draft.xpValue ?? 0
+  };
+};
+
+const buildXpSummary = (draft: TemplateItemFlow['draft']): string => {
+  const mode = normalizeXpModeForItemType(draft.itemType, draft.xpMode);
+  const capText = draft.xpMaxPerDay && draft.xpMaxPerDay > 0 ? t('screens.form_builder.xp_cap', { cap: draft.xpMaxPerDay }) : '';
+  if (!mode || mode === 'none') return t('screens.daily_report.ask_xp_mode_none');
+  if (mode === 'fixed') return t('screens.form_builder.xp_summary_fixed', { xp: draft.xpValue ?? 0 });
+  if (mode === 'per_minute') {
+    return t('screens.form_builder.xp_summary_time', {
+      xp: draft.xpValue ?? 0,
+      cap: capText
+    });
+  }
+  const perNumber = getPerNumberConfig(draft).perNumber;
+  const xpPerUnit = getPerNumberConfig(draft).xpPerUnit;
+  return t('screens.form_builder.xp_summary_number', {
+    ratio: `${perNumber}:${xpPerUnit}`,
+    cap: capText
+  });
+};
+
+const buildFieldSummaryLines = (draft: TemplateItemFlow['draft']): string[] => {
+  const lines: string[] = [
+    t('screens.form_builder.summary_field', { label: draft.label ?? t('screens.daily_report.template_new_title') }),
+    t('screens.form_builder.summary_type', { type: displayItemTypeLabel(draft.itemType ?? 'text') }),
+    t('screens.form_builder.summary_category', { category: draft.category ?? t('screens.templates.category_other') }),
+    t('screens.form_builder.summary_xp', { xp: buildXpSummary(draft) })
+  ];
+  return lines;
+};
+
+const itemToDraft = (item: ReportItemRow): TemplateItemFlow['draft'] => ({
+  label: item.label ?? undefined,
+  itemKey: item.item_key ?? undefined,
+  itemType: item.item_type,
+  category: item.category ?? undefined,
+  xpMode: (item.xp_mode as TemplateItemFlow['draft']['xpMode']) ?? 'none',
+  xpValue: item.xp_value ?? null,
+  xpMaxPerDay: (item as ReportItemRow & { xp_max_per_day?: number | null }).xp_max_per_day ?? null,
+  optionsJson: item.options_json ?? {}
+});
+
+const deriveXpStorage = (
+  draft: TemplateItemFlow['draft']
+): { xpMode: 'fixed' | 'per_minute' | 'per_number' | null; xpValue: number | null; xpMax: number | null; optionsJson: Record<string, unknown> } => {
+  const normalizedXpMode = normalizeXpModeForItemType(draft.itemType, draft.xpMode ?? null);
+  if (!normalizedXpMode || normalizedXpMode === 'none') {
+    return { xpMode: null, xpValue: null, xpMax: null, optionsJson: {} };
+  }
+  if (normalizedXpMode === 'fixed') {
+    return { xpMode: 'fixed', xpValue: draft.xpValue ?? 0, xpMax: null, optionsJson: {} };
+  }
+  if (normalizedXpMode === 'per_minute') {
+    return {
+      xpMode: 'per_minute',
+      xpValue: draft.xpValue ?? 0,
+      xpMax: draft.xpMaxPerDay ?? null,
+      optionsJson: { ...(draft.optionsJson ?? {}), per: 'minute' }
+    };
+  }
+  const perNumberCfg = getPerNumberConfig(draft);
+  const perUnit = perNumberCfg.perNumber > 0 ? perNumberCfg.xpPerUnit / perNumberCfg.perNumber : draft.xpValue ?? 0;
+  return {
+    xpMode: 'per_number',
+    xpValue: perUnit,
+    xpMax: draft.xpMaxPerDay ?? null,
+    optionsJson: { ...(draft.optionsJson ?? {}), perNumber: perNumberCfg.perNumber, xpPerUnit: perNumberCfg.xpPerUnit }
+  };
 };
 
 const valueIsTrue = (value: unknown): boolean => {
@@ -1760,22 +1849,23 @@ const buildTypeKeyboard = async (ctx: Context, params: { templateId: string; ite
 };
 
 const buildCategoryKeyboard = async (ctx: Context, params: { templateId: string; itemId?: string; backAction?: string; backData?: Record<string, unknown> }) => {
-  const { user } = await ensureUserAndSettings(ctx);
-  const categories = await getTemplateCategories(user.id);
-  const withFallback = [...categories];
-  const fallback = ensureFallbackCategory(categories);
-  if (!withFallback.some((c) => c.name.toLowerCase() === fallback.name.toLowerCase())) {
-    withFallback.push(fallback);
-  }
   const kb = new InlineKeyboard();
-  for (const category of withFallback.sort((a, b) => a.sortOrder - b.sortOrder)) {
+  for (const category of STANDARD_CATEGORIES) {
     const btn = await makeActionButton(ctx, {
-      label: `${category.emoji} ${category.name}`,
+      label: `${category.emoji} ${t(category.labelKey)}`,
       action: 'dr.template_item_select_category',
       data: { templateId: params.templateId, itemId: params.itemId, category: category.name }
     });
     kb.text(btn.text, btn.callback_data).row();
   }
+
+  const customBtn = await makeActionButton(ctx, {
+    label: t('buttons.category_custom'),
+    action: 'dr.template_item_custom_category',
+    data: { templateId: params.templateId, itemId: params.itemId }
+  });
+  kb.text(customBtn.text, customBtn.callback_data).row();
+
   const backAction = params.backAction ?? 'dr.template_edit';
   const backBtn = await makeBuilderBackButton(ctx, {
     templateId: params.templateId,
@@ -1792,10 +1882,10 @@ const buildXpModeKeyboard = async (
 ) => {
   const allowed = allowedXpModesForItemType(params.itemType);
   const modes = [
-    { key: 'none', label: t('screens.daily_report.ask_xp_mode_none') ?? 'No XP' },
-    { key: 'fixed', label: t('screens.daily_report.ask_xp_mode_fixed') ?? 'Fixed XP' },
-    { key: 'per_minute', label: t('screens.daily_report.ask_xp_mode_time') ?? 'Time-based (per minute)' },
-    { key: 'per_number', label: t('screens.daily_report.ask_xp_mode_number') ?? 'XP per number' }
+    { key: 'fixed', label: t('screens.templates.xp_mode_fixed') },
+    { key: 'per_minute', label: t('screens.templates.xp_mode_time') },
+    { key: 'per_number', label: t('screens.templates.xp_mode_number') },
+    { key: 'none', label: t('screens.daily_report.ask_xp_mode_none') ?? 'No XP' }
   ].filter((m) => allowed.includes(m.key as 'none' | 'fixed' | 'per_minute' | 'per_number'));
   const kb = new InlineKeyboard();
   for (const mode of modes) {
@@ -1824,7 +1914,7 @@ const promptLabelInput = async (ctx: Context, params: { templateId: string; back
   const kb = new InlineKeyboard().text(backBtn.text, backBtn.callback_data);
   await renderScreen(ctx, {
     titleKey: t('screens.daily_report.template_builder_title'),
-    bodyLines: [t('screens.daily_report.ask_label')],
+    bodyLines: [t('screens.daily_report.ask_label'), t('screens.templates.label_hint')],
     inlineKeyboard: kb
   });
 };
@@ -1848,14 +1938,14 @@ const promptTypeSelection = async (ctx: Context, params: { templateId: string; i
     backData: params.backToItem ? { templateId: params.templateId, itemId: params.itemId } : { templateId: params.templateId }
   });
   const helpBtn = await makeActionButton(ctx, {
-    label: t('screens.form_builder.help_button'),
+    label: t('buttons.help'),
     action: 'dr.template_help',
     data: { templateId: params.templateId, topic: 'type', itemId: params.itemId, backToItem: params.backToItem === true }
   });
   kb.row().text(helpBtn.text, helpBtn.callback_data);
   await renderScreen(ctx, {
     titleKey: t('screens.daily_report.template_builder_title'),
-    bodyLines: [t('screens.daily_report.ask_type')],
+    bodyLines: [t('screens.daily_report.ask_type'), t('screens.templates.type_hint')],
     inlineKeyboard: kb
   });
 };
@@ -1869,14 +1959,14 @@ const promptCategorySelection = async (ctx: Context, params: { templateId: strin
     backData: params.backToItem ? { templateId: params.templateId, itemId: params.itemId } : { templateId: params.templateId }
   });
   const helpBtn = await makeActionButton(ctx, {
-    label: t('screens.form_builder.help_button'),
+    label: t('buttons.help'),
     action: 'dr.template_help',
     data: { templateId: params.templateId, topic: 'category', itemId: params.itemId, backToItem: params.backToItem === true }
   });
   kb.row().text(helpBtn.text, helpBtn.callback_data);
   await renderScreen(ctx, {
     titleKey: t('screens.daily_report.template_builder_title'),
-    bodyLines: [t('screens.daily_report.ask_category')],
+    bodyLines: [t('screens.daily_report.ask_category'), t('screens.templates.category_hint')],
     inlineKeyboard: kb
   });
 };
@@ -1891,14 +1981,14 @@ const promptXpModeSelection = async (ctx: Context, params: { templateId: string;
     itemType: params.itemType
   });
   const helpBtn = await makeActionButton(ctx, {
-    label: t('screens.form_builder.help_button'),
+    label: t('buttons.help'),
     action: 'dr.template_help',
     data: { templateId: params.templateId, topic: 'xp_mode', itemId: params.itemId, backToItem: params.backToItem === true }
   });
   kb.row().text(helpBtn.text, helpBtn.callback_data);
   await renderScreen(ctx, {
     titleKey: t('screens.daily_report.template_builder_title'),
-    bodyLines: [t('screens.daily_report.ask_xp_mode')],
+    bodyLines: [t('screens.templates.xp_mode_title'), t('screens.templates.xp_mode_hint')],
     inlineKeyboard: kb
   });
 };
@@ -1908,10 +1998,23 @@ const promptXpValueInput = async (ctx: Context, params: { templateId: string; it
   const backAction = params.backToItem ? 'dr.template_item_menu' : 'dr.template_edit';
   const backData = params.backToItem ? { templateId: params.templateId, itemId: params.itemId } : { templateId: params.templateId };
   const backBtn = await makeBuilderBackButton(ctx, { templateId: params.templateId, fallbackAction: backAction, fallbackData: backData });
-  const kb = new InlineKeyboard().text(backBtn.text, backBtn.callback_data);
+  const helpBtn = await makeActionButton(ctx, {
+    label: t('buttons.help'),
+    action: 'dr.template_help',
+    data: { templateId: params.templateId, topic: 'xp_value', itemId: params.itemId, backToItem: params.backToItem === true }
+  });
+  const kb = new InlineKeyboard().text(backBtn.text, backBtn.callback_data).row().text(helpBtn.text, helpBtn.callback_data);
+  const telegramId = String(ctx.from?.id ?? '');
+  const stateXpMode = userStates.get(telegramId)?.templateItemFlow?.draft.xpMode ?? 'fixed';
+  const hintKey =
+    stateXpMode === 'per_minute'
+      ? 'screens.templates.xp_value_hint_time'
+      : stateXpMode === 'per_number'
+        ? 'screens.templates.xp_value_hint_number'
+        : 'screens.templates.xp_value_hint_fixed';
   await renderScreen(ctx, {
     titleKey: t('screens.daily_report.template_builder_title'),
-    bodyLines: [t('screens.daily_report.ask_xp_value')],
+    bodyLines: [t('screens.daily_report.ask_xp_value'), t(hintKey)],
     inlineKeyboard: kb
   });
 };
@@ -1923,22 +2026,77 @@ const promptXpMaxInput = async (ctx: Context, params: { templateId: string; item
     fallbackAction: 'dr.template_item_menu',
     fallbackData: { templateId: params.templateId, itemId: params.itemId }
   });
+  const helpBtn = await makeActionButton(ctx, {
+    label: t('buttons.help'),
+    action: 'dr.template_help',
+    data: { templateId: params.templateId, topic: 'xp_max', itemId: params.itemId, backToItem: true }
+  });
+  const kb = new InlineKeyboard().text(backBtn.text, backBtn.callback_data).row().text(helpBtn.text, helpBtn.callback_data);
+  await renderScreen(ctx, {
+    titleKey: t('screens.daily_report.template_builder_title'),
+    bodyLines: [t('screens.daily_report.ask_xp_max_per_day'), t('screens.templates.xp_max_hint')],
+    inlineKeyboard: kb
+  });
+};
+
+const promptCustomCategoryInput = async (ctx: Context, params: { templateId: string; itemId?: string; backAction?: string; backData?: Record<string, unknown> }) => {
+  const backAction = params.backAction ?? (params.itemId ? 'dr.template_item_menu' : 'dr.template_edit');
+  const backData = params.backData ?? (params.itemId ? { templateId: params.templateId, itemId: params.itemId } : { templateId: params.templateId });
+  const backBtn = await makeBuilderBackButton(ctx, { templateId: params.templateId, fallbackAction: backAction, fallbackData: backData });
   const kb = new InlineKeyboard().text(backBtn.text, backBtn.callback_data);
   await renderScreen(ctx, {
     titleKey: t('screens.daily_report.template_builder_title'),
-    bodyLines: [t('screens.daily_report.ask_xp_max_per_day')],
+    bodyLines: [t('screens.templates.custom_category_prompt'), t('screens.templates.category_hint')],
+    inlineKeyboard: kb
+  });
+};
+
+const renderStepSummary = async (
+  ctx: Context,
+  params: { templateId: string; stage: 'category' | 'xp'; flow: TemplateItemFlow; backToItem?: boolean }
+): Promise<void> => {
+  const titleKey = params.stage === 'category' ? 'screens.templates.summary_title_category' : 'screens.templates.summary_title_xp';
+  const telegramId = String(ctx.from?.id ?? '');
+  const returnStep =
+    params.stage === 'category'
+      ? 'builder.chooseCategory'
+      : params.flow.draft.xpMode === 'per_minute' || params.flow.draft.xpMode === 'per_number'
+        ? 'builder.configureXPMax'
+        : params.flow.draft.xpMode === 'none'
+          ? 'builder.configureXP'
+          : 'builder.configureXPValue';
+  updateBuilderStep(telegramId, params.templateId, 'builder.summary', returnStep);
+  setTemplateItemFlow(telegramId, { ...params.flow, step: 'summary' });
+
+  const confirmBtn = await makeActionButton(ctx, {
+    label: t('buttons.summary_confirm'),
+    action: 'builder.summary_continue',
+    data: { templateId: params.templateId, stage: params.stage, backToItem: params.backToItem === true }
+  });
+  const editBtn = await makeActionButton(ctx, {
+    label: t('buttons.summary_edit'),
+    action: 'builder.summary_edit',
+    data: { templateId: params.templateId, stage: params.stage, backToItem: params.backToItem === true }
+  });
+  const kb = new InlineKeyboard().text(confirmBtn.text, confirmBtn.callback_data).row().text(editBtn.text, editBtn.callback_data);
+
+  await renderScreen(ctx, {
+    titleKey,
+    bodyLines: buildFieldSummaryLines(params.flow.draft),
     inlineKeyboard: kb
   });
 };
 
 const renderTemplateHelp = async (
   ctx: Context,
-  params: { templateId: string; topic: 'type' | 'category' | 'xp_mode'; backToItem?: boolean; itemId?: string }
+  params: { templateId: string; topic: 'type' | 'category' | 'xp_mode' | 'xp_value' | 'xp_max'; backToItem?: boolean; itemId?: string }
 ) => {
   const keyMap: Record<string, string> = {
-    type: 'screens.form_builder.help.type',
-    category: 'screens.form_builder.help.category',
-    xp_mode: 'screens.form_builder.help.xp_mode'
+    type: 'screens.templates.help_type',
+    category: 'screens.templates.help_category',
+    xp_mode: 'screens.templates.help_xp',
+    xp_value: 'screens.templates.help_xp_value',
+    xp_max: 'screens.templates.help_xp_max'
   };
   const backAction = params.backToItem ? 'dr.template_item_menu' : 'dr.template_edit';
   const backData = params.backToItem ? { templateId: params.templateId, itemId: params.itemId } : { templateId: params.templateId };
@@ -2116,7 +2274,7 @@ const renderTemplateActions = async (ctx: Context, templateId: string): Promise<
   ];
 
   const kb = new InlineKeyboard();
-  const renameBtn = await makeActionButton(ctx, { label: t('buttons.tpl_actions_rename'), action: 'dr.template_rename_prompt', data: { templateId } });
+  const renameBtn = await makeActionButton(ctx, { label: t('buttons.templates_rename'), action: 'dr.template_rename_prompt', data: { templateId } });
   const dupBtn = await makeActionButton(ctx, { label: t('buttons.tpl_actions_duplicate'), action: 'dr.template_duplicate', data: { templateId } });
   const delBtn = await makeActionButton(ctx, { label: t('buttons.tpl_actions_delete'), action: 'dr.template_delete_confirm', data: { templateId } });
   const backBtn = await makeActionButton(ctx, { label: t('buttons.tpl_actions_back'), action: 'dr.templates' });
@@ -2154,8 +2312,8 @@ const renderTemplateEdit = async (ctx: Context, templateId: string, flashLine?: 
   } else {
     visibleItems.forEach((item, idx) => {
       const statusIcon = item.enabled ? '✅' : '🚫';
-      const xpVal = item.xp_value ?? 0;
-      lines.push(`[${idx + 1}] ${statusIcon} ${item.label} (${displayItemTypeLabel(item.item_type)}, XP: ${xpVal})`);
+      const xpSummary = buildXpSummary(itemToDraft(item));
+      lines.push(`[${idx + 1}] ${statusIcon} ${item.label} (${displayItemTypeLabel(item.item_type)}, ${xpSummary})`);
     });
   }
 
@@ -2171,7 +2329,7 @@ const renderTemplateEdit = async (ctx: Context, templateId: string, flashLine?: 
   }
 
   const addBtn = await makeActionButton(ctx, { label: t('buttons.tpl_add_item'), action: 'dr.template_item_add', data: { templateId } });
-  const renameBtn = await makeActionButton(ctx, { label: t('buttons.tpl_actions_rename'), action: 'dr.template_rename_prompt', data: { templateId } });
+  const renameBtn = await makeActionButton(ctx, { label: t('buttons.templates_rename'), action: 'dr.template_rename_prompt', data: { templateId } });
   const backBtn = await makeActionButton(ctx, { label: t('buttons.back'), action: 'dr.templates' });
   kb.text(addBtn.text, addBtn.callback_data).row();
   kb.text(renameBtn.text, renameBtn.callback_data).row();
@@ -2193,16 +2351,14 @@ const renderTemplateItemMenu = async (ctx: Context, templateId: string, itemId: 
     return;
   }
 
-  const xpMode = item.xp_mode ?? 'none';
-  const xpValue = item.xp_value ?? 0;
+  const xpSummary = buildXpSummary(itemToDraft(item));
   const lines: string[] = [
     t('screens.daily_report.item_menu_title'),
     t('screens.daily_report.item_menu_summary', {
       label: item.label,
       type: displayItemTypeLabel(item.item_type),
       category: item.category ?? '-',
-      xpMode,
-      xpValue,
+      xp: xpSummary,
       enabled: item.enabled ? t('common.active') : t('common.inactive')
     })
   ];
@@ -2256,7 +2412,7 @@ const renderTemplateDeleteConfirm = async (ctx: Context, templateId: string): Pr
     return;
   }
 
-  const lines: string[] = ['', t('screens.daily_report.template_delete_confirm', { title: tpl.title ?? t('screens.templates.default_title') })];
+  const lines: string[] = [t('screens.daily_report.template_delete_confirm', { title: tpl.title ?? t('screens.templates.default_title') })];
 
   const confirmBtn = await makeActionButton(ctx, { label: t('buttons.dr_template_delete'), action: 'dr.template_delete', data: { templateId } });
   const backBtn = await makeActionButton(ctx, { label: t('buttons.tpl_actions_back'), action: 'dr.template_actions', data: { templateId } });
@@ -2275,11 +2431,7 @@ const finalizeNewTemplateItem = async (ctx: Context, telegramId: string, flow: T
     const itemKey = flow.draft.itemKey ?? (await generateUniqueItemKey(flow.templateId, label));
     const itemType = flow.draft.itemType ?? 'text';
     const category = flow.draft.category && flow.draft.category !== 'none' ? flow.draft.category : null;
-    const normalizedXpMode = normalizeXpModeForItemType(itemType, flow.draft.xpMode ?? null);
-    const xpMode = normalizedXpMode && normalizedXpMode !== 'none' ? normalizedXpMode : null;
-    const xpValue = xpMode ? flow.draft.xpValue ?? 0 : null;
-    const xpMaxPerDay = xpMode && (xpMode === 'per_minute' || xpMode === 'per_number') ? flow.draft.xpMaxPerDay ?? null : null;
-    const optionsJson = xpMode === 'per_minute' ? { ...(flow.draft.optionsJson ?? {}), per: 'minute' } : {};
+    const xpStorage = deriveXpStorage({ ...flow.draft, itemType });
 
     await upsertItem({
       templateId: flow.templateId,
@@ -2287,10 +2439,10 @@ const finalizeNewTemplateItem = async (ctx: Context, telegramId: string, flow: T
       itemKey,
       itemType,
       category,
-      xpMode,
-      xpValue,
-      xpMaxPerDay,
-      optionsJson,
+      xpMode: xpStorage.xpMode,
+      xpValue: xpStorage.xpValue,
+      xpMaxPerDay: xpStorage.xpMax,
+      optionsJson: xpStorage.optionsJson,
       sortOrder
     });
     clearTemplateItemFlow(telegramId);
@@ -3768,6 +3920,41 @@ bot.callbackQuery(/^[A-Za-z0-9_-]{8,12}$/, async (ctx) => {
         return;
       }
 
+      case 'builder.summary_continue': {
+        const data = (payload as { data?: { templateId?: string; stage?: 'category' | 'xp'; backToItem?: boolean } }).data;
+        const telegramId = String(ctx.from?.id ?? '');
+        const flow = userStates.get(telegramId)?.templateItemFlow;
+        if (!data?.templateId || !data.stage || !flow || flow.mode !== 'create' || flow.templateId !== data.templateId) {
+          await renderTemplatesScreen(ctx);
+          return;
+        }
+        if (data.stage === 'category') {
+          setTemplateItemFlow(telegramId, { ...flow, step: 'xp_mode' });
+          await promptXpModeSelection(ctx, { templateId: data.templateId, itemType: flow.draft.itemType });
+          return;
+        }
+        await finalizeNewTemplateItem(ctx, telegramId, flow);
+        return;
+      }
+
+      case 'builder.summary_edit': {
+        const data = (payload as { data?: { templateId?: string; stage?: 'category' | 'xp'; backToItem?: boolean } }).data;
+        const telegramId = String(ctx.from?.id ?? '');
+        const flow = userStates.get(telegramId)?.templateItemFlow;
+        if (!data?.templateId || !data.stage || !flow || flow.templateId !== data.templateId) {
+          await renderTemplatesScreen(ctx);
+          return;
+        }
+        if (data.stage === 'category') {
+          setTemplateItemFlow(telegramId, { ...flow, step: 'category' });
+          await promptCategorySelection(ctx, { templateId: data.templateId, backToItem: data.backToItem, itemId: flow.itemId });
+          return;
+        }
+        setTemplateItemFlow(telegramId, { ...flow, step: 'xp_mode' });
+        await promptXpModeSelection(ctx, { templateId: data.templateId, itemId: flow.itemId, backToItem: data.backToItem, itemType: flow.draft.itemType });
+        return;
+      }
+
       case 'dr.template_item_add': {
         const templateId = (payload as { data?: { templateId?: string } }).data?.templateId;
         if (!templateId) {
@@ -3912,8 +4099,9 @@ bot.callbackQuery(/^[A-Za-z0-9_-]{8,12}$/, async (ctx) => {
         const state = userStates.get(telegramId)?.templateItemFlow;
         if (state && state.mode === 'create' && state.templateId === data.templateId) {
           const category = data.category === 'none' ? null : data.category;
-          setTemplateItemFlow(telegramId, { ...state, draft: { ...state.draft, category }, step: 'xp_mode' });
-          await promptXpModeSelection(ctx, { templateId: data.templateId, itemType: state.draft.itemType });
+          const nextFlow = { ...state, draft: { ...state.draft, category }, step: 'category' } as TemplateItemFlow;
+          setTemplateItemFlow(telegramId, nextFlow);
+          await renderStepSummary(ctx, { templateId: data.templateId, stage: 'category', flow: nextFlow });
           return;
         }
         if (data.itemId) {
@@ -3929,6 +4117,41 @@ bot.callbackQuery(/^[A-Za-z0-9_-]{8,12}$/, async (ctx) => {
           clearTemplateItemFlow(telegramId);
           clearReportContextCache();
           await renderTemplateItemMenu(ctx, data.templateId, data.itemId, t('screens.daily_report.item_saved'));
+          return;
+        }
+        await renderTemplateEdit(ctx, data.templateId);
+        return;
+      }
+
+      case 'dr.template_item_custom_category': {
+        const data = (payload as { data?: { templateId?: string; itemId?: string } }).data;
+        if (!data?.templateId) {
+          await renderTemplatesScreen(ctx);
+          return;
+        }
+        const telegramId = String(ctx.from?.id ?? '');
+        const currentFlow = userStates.get(telegramId)?.templateItemFlow;
+        if (currentFlow && currentFlow.mode === 'create' && currentFlow.templateId === data.templateId) {
+          setTemplateItemFlow(telegramId, { ...currentFlow, step: 'category_custom' });
+          await promptCustomCategoryInput(ctx, { templateId: data.templateId, itemId: data.itemId });
+          return;
+        }
+        if (data.itemId) {
+          const { user: u } = await ensureUserAndSettings(ctx);
+          const item = await getItemById(data.itemId);
+          const tpl = await getTemplateById(data.templateId);
+          if (!tpl || !item || tpl.user_id !== u.id || item.template_id !== tpl.id) {
+            await renderTemplatesScreen(ctx);
+            return;
+          }
+          setTemplateItemFlow(telegramId, {
+            mode: 'edit',
+            templateId: data.templateId,
+            itemId: data.itemId,
+            step: 'category_custom',
+            draft: { ...itemToDraft(item) }
+          });
+          await promptCustomCategoryInput(ctx, { templateId: data.templateId, itemId: data.itemId, backAction: 'dr.template_item_menu' });
           return;
         }
         await renderTemplateEdit(ctx, data.templateId);
@@ -3978,12 +4201,21 @@ bot.callbackQuery(/^[A-Za-z0-9_-]{8,12}$/, async (ctx) => {
         const itemType = state?.draft.itemType;
         const chosenMode = data.xpMode === 'time' ? 'per_minute' : data.xpMode;
         const normalizedXpMode = normalizeXpModeForItemType(itemType, chosenMode) ?? 'none';
-        const nextDraft = { ...(state?.draft ?? {}), xpMode: chosenMode, optionsJson: chosenMode === 'per_minute' ? { per: 'minute' } : {} };
+        const nextDraft: TemplateItemFlow['draft'] = {
+          ...(state?.draft ?? {}),
+          xpMode: chosenMode as TemplateItemFlow['draft']['xpMode'],
+          optionsJson:
+            chosenMode === 'per_minute'
+              ? { ...(state?.draft.optionsJson ?? {}), per: 'minute' }
+              : chosenMode === 'per_number'
+                ? { ...(state?.draft.optionsJson ?? {}), perNumber: 1, xpPerUnit: state?.draft.xpValue ?? 1 }
+                : {}
+        };
 
         if (state && state.mode === 'create' && state.templateId === data.templateId) {
           if (normalizedXpMode === 'none') {
-            setTemplateItemFlow(telegramId, { ...state, draft: { ...nextDraft, xpMode: 'none', xpValue: null, xpMaxPerDay: null }, step: 'xp_mode' });
-            await finalizeNewTemplateItem(ctx, telegramId, { ...state, draft: { ...nextDraft, xpMode: 'none', xpValue: null, xpMaxPerDay: null } });
+            const updatedFlow = { ...state, draft: { ...nextDraft, xpMode: 'none', xpValue: null, xpMaxPerDay: null }, step: 'xp_mode' } as TemplateItemFlow;
+            await renderStepSummary(ctx, { templateId: data.templateId, stage: 'xp', flow: updatedFlow });
             return;
           }
           setTemplateItemFlow(telegramId, { ...state, draft: { ...nextDraft, xpMode: normalizedXpMode }, step: 'xp_value' });
@@ -4481,6 +4713,30 @@ bot.on('message:text', async (ctx: Context) => {
         return;
       }
 
+      if (templateFlow.step === 'category_custom') {
+        const customName = text.trim();
+        if (!customName) {
+          await promptCustomCategoryInput(ctx, { templateId: templateFlow.templateId, itemId: templateFlow.itemId });
+          return;
+        }
+        if (templateFlow.mode === 'create') {
+          const draft = { ...templateFlow.draft, category: customName };
+          const nextFlow = { ...templateFlow, draft, step: 'category' } as TemplateItemFlow;
+          await renderStepSummary(ctx, { templateId: templateFlow.templateId, stage: 'category', flow: nextFlow });
+          return;
+        }
+        if (!templateFlow.itemId) {
+          clearTemplateItemFlow(telegramId);
+          await renderTemplateEdit(ctx, templateFlow.templateId);
+          return;
+        }
+        await updateItem(templateFlow.itemId, { category: customName });
+        clearTemplateItemFlow(telegramId);
+        clearReportContextCache();
+        await renderTemplateItemMenu(ctx, templateFlow.templateId, templateFlow.itemId, t('screens.daily_report.item_saved'));
+        return;
+      }
+
       if (templateFlow.step === 'key') {
         const cleanedKey = slugifyItemKey(text);
         if (!cleanedKey) {
@@ -4506,13 +4762,34 @@ bot.on('message:text', async (ctx: Context) => {
       }
 
       if (templateFlow.step === 'xp_value') {
+        const xpMode = templateFlow.draft.xpMode ?? 'none';
+        if (xpMode === 'per_number') {
+          const ratioMatch = text.trim().match(/^(\d+)\s*:\s*(\d+)$/);
+          if (!ratioMatch) {
+            await ctx.reply(t('screens.templates.invalid_ratio'));
+            return;
+          }
+          const perNumber = Number(ratioMatch[1]);
+          const xpPerUnit = Number(ratioMatch[2]);
+          if (!Number.isInteger(perNumber) || perNumber <= 0 || !Number.isInteger(xpPerUnit) || xpPerUnit <= 0) {
+            await ctx.reply(t('screens.templates.invalid_ratio'));
+            return;
+          }
+          const draft = {
+            ...templateFlow.draft,
+            xpValue: xpPerUnit,
+            optionsJson: { ...(templateFlow.draft.optionsJson ?? {}), perNumber, xpPerUnit }
+          };
+          setTemplateItemFlow(telegramId, { ...templateFlow, draft, step: 'xp_max' });
+          await promptXpMaxInput(ctx, { templateId: templateFlow.templateId, itemId: templateFlow.itemId });
+          return;
+        }
         const xpVal = Number(text);
         if (!Number.isInteger(xpVal)) {
           await ctx.reply(t('screens.daily_report.invalid_number'));
           return;
         }
-        const xpMode = templateFlow.draft.xpMode ?? 'none';
-        if (xpMode === 'per_minute' || xpMode === 'per_number') {
+        if (xpMode === 'per_minute') {
           const draft = { ...templateFlow.draft, xpValue: xpVal };
           setTemplateItemFlow(telegramId, { ...templateFlow, draft, step: 'xp_max' });
           await promptXpMaxInput(ctx, { templateId: templateFlow.templateId, itemId: templateFlow.itemId });
@@ -4520,8 +4797,8 @@ bot.on('message:text', async (ctx: Context) => {
         }
         if (templateFlow.mode === 'create') {
           const draft = { ...templateFlow.draft, xpValue: xpVal };
-          setTemplateItemFlow(telegramId, { ...templateFlow, draft, step: 'xp_value' });
-          await finalizeNewTemplateItem(ctx, telegramId, { ...templateFlow, draft });
+          const nextFlow = { ...templateFlow, draft, step: 'xp_value' } as TemplateItemFlow;
+          await renderStepSummary(ctx, { templateId: templateFlow.templateId, stage: 'xp', flow: nextFlow });
           return;
         }
         if (!templateFlow.itemId) {
@@ -4529,12 +4806,13 @@ bot.on('message:text', async (ctx: Context) => {
           await renderTemplateEdit(ctx, templateFlow.templateId);
           return;
         }
-        const xpModeNormalized = templateFlow.draft.xpMode && templateFlow.draft.xpMode !== 'none' ? templateFlow.draft.xpMode : null;
-        const xpValue = xpModeNormalized ? xpVal : null;
-        const optionsJson = xpModeNormalized === 'per_minute' ? templateFlow.draft.optionsJson ?? { per: 'minute' } : {};
-        const xpMaxPerDay =
-          xpModeNormalized === 'per_minute' || xpModeNormalized === 'per_number' ? templateFlow.draft.xpMaxPerDay ?? null : null;
-        await updateItem(templateFlow.itemId, { xp_mode: xpModeNormalized, xp_value: xpValue, xp_max_per_day: xpMaxPerDay, options_json: optionsJson });
+        const xpPayload = deriveXpStorage({ ...templateFlow.draft, xpValue: xpVal });
+        await updateItem(templateFlow.itemId, {
+          xp_mode: xpPayload.xpMode,
+          xp_value: xpPayload.xpValue,
+          xp_max_per_day: xpPayload.xpMax,
+          options_json: xpPayload.optionsJson
+        });
         clearTemplateItemFlow(telegramId);
         clearReportContextCache();
         await renderTemplateItemMenu(ctx, templateFlow.templateId, templateFlow.itemId, t('screens.daily_report.item_saved'));
@@ -4546,8 +4824,8 @@ bot.on('message:text', async (ctx: Context) => {
         const xpMax = Number.isInteger(maxVal) && maxVal > 0 ? maxVal : null;
         if (templateFlow.mode === 'create') {
           const draft = { ...templateFlow.draft, xpMaxPerDay: xpMax };
-          setTemplateItemFlow(telegramId, { ...templateFlow, draft, step: 'xp_max' });
-          await finalizeNewTemplateItem(ctx, telegramId, { ...templateFlow, draft });
+          const nextFlow = { ...templateFlow, draft, step: 'xp_max' } as TemplateItemFlow;
+          await renderStepSummary(ctx, { templateId: templateFlow.templateId, stage: 'xp', flow: nextFlow });
           return;
         }
         if (!templateFlow.itemId) {
@@ -4555,10 +4833,13 @@ bot.on('message:text', async (ctx: Context) => {
           await renderTemplateEdit(ctx, templateFlow.templateId);
           return;
         }
-        const xpMode = templateFlow.draft.xpMode && templateFlow.draft.xpMode !== 'none' ? templateFlow.draft.xpMode : null;
-        const xpValue = xpMode ? templateFlow.draft.xpValue ?? 0 : null;
-        const optionsJson = xpMode === 'per_minute' ? templateFlow.draft.optionsJson ?? { per: 'minute' } : {};
-        await updateItem(templateFlow.itemId, { xp_mode: xpMode, xp_value: xpValue, xp_max_per_day: xpMax, options_json: optionsJson });
+        const xpPayload = deriveXpStorage({ ...templateFlow.draft, xpMaxPerDay: xpMax });
+        await updateItem(templateFlow.itemId, {
+          xp_mode: xpPayload.xpMode,
+          xp_value: xpPayload.xpValue,
+          xp_max_per_day: xpPayload.xpMax,
+          options_json: xpPayload.optionsJson
+        });
         clearTemplateItemFlow(telegramId);
         clearReportContextCache();
         await renderTemplateItemMenu(ctx, templateFlow.templateId, templateFlow.itemId, t('screens.daily_report.item_saved'));
