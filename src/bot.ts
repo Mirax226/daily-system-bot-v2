@@ -40,6 +40,14 @@ import {
   updateTemplateTitle
 } from './services/reportTemplates';
 import { listRoutines, getRoutineById, createRoutine, updateRoutine, deleteRoutine } from './services/routines';
+import {
+  listRoutineTasks,
+  listRoutineTasksByRoutineIds,
+  getRoutineTaskById,
+  createRoutineTask,
+  updateRoutineTask,
+  deleteRoutineTask
+} from './services/routineTasks';
 import { ensureFallbackCategory, getTemplateCategories, isDefaultCategoryName, saveTemplateCategories, type TemplateCategory } from './services/templateCategories';
 
 import {
@@ -64,7 +72,7 @@ import { aiEnabledForUser, sendMainMenu } from './ui/mainMenu';
 import { formatLocalTime } from './utils/time';
 import { t } from './i18n';
 
-import type { ReportItemRow, ReportDayRow, RewardRow, RoutineRow } from './types/supabase';
+import type { ReportItemRow, ReportDayRow, RewardRow, RoutineRow, RoutineTaskRow } from './types/supabase';
 
 export const bot = new Bot<Context>(config.telegram.botToken);
 
@@ -82,7 +90,7 @@ type TemplateItemFlow = {
     itemKey?: string;
     itemType?: string;
     category?: string | null;
-    xpMode?: string | null;
+    xpMode?: 'none' | 'fixed' | 'per_minute' | 'per_number' | 'time' | null;
     xpValue?: number | null;
     xpMaxPerDay?: number | null;
     optionsJson?: Record<string, unknown> | null;
@@ -96,11 +104,26 @@ type RoutineFlow = {
   draft: {
     title?: string;
     description?: string | null;
-    routineType?: 'boolean' | 'duration_minutes';
-    xpMode?: 'fixed' | 'per_minute' | 'none';
+    routineType?: 'boolean' | 'duration_minutes' | 'number';
+    xpMode?: 'fixed' | 'per_minute' | 'per_number' | 'none';
     xpValue?: number | null;
     xpMaxPerDay?: number | null;
     isActive?: boolean;
+  };
+};
+
+type RoutineTaskFlow = {
+  mode: 'create' | 'edit';
+  routineId: string;
+  taskId?: string;
+  step: 'title' | 'description' | 'type' | 'xp_mode' | 'xp_value' | 'xp_max' | 'confirm';
+  draft: {
+    title?: string;
+    description?: string | null;
+    itemType?: 'boolean' | 'duration_minutes' | 'number';
+    xpMode?: 'fixed' | 'per_minute' | 'per_number' | 'none';
+    xpValue?: number | null;
+    xpMaxPerDay?: number | null;
   };
 };
 
@@ -110,6 +133,7 @@ type CategoryFlow =
   | { mode: 'emoji'; categoryId: string; step: 'emoji' };
 
 type TemplateRenameFlow = { templateId: string };
+type TemplateCreateFlow = { step: 'title' };
 
 type ReminderlessState = {
   awaitingValue?: { reportDayId: string; itemId: string };
@@ -136,8 +160,10 @@ type ReminderlessState = {
 
   templateItemFlow?: TemplateItemFlow;
   routineFlow?: RoutineFlow;
+  routineTaskFlow?: RoutineTaskFlow;
   categoryFlow?: CategoryFlow;
   templateRename?: TemplateRenameFlow;
+  templateCreate?: TemplateCreateFlow;
 };
 
 const userStates = new Map<string, ReminderlessState>();
@@ -171,6 +197,18 @@ const clearRoutineFlow = (telegramId: string): void => {
   userStates.set(telegramId, st);
 };
 
+const setRoutineTaskFlow = (telegramId: string, flow: RoutineTaskFlow): void => {
+  const st = { ...(userStates.get(telegramId) || {}) };
+  st.routineTaskFlow = flow;
+  userStates.set(telegramId, st);
+};
+
+const clearRoutineTaskFlow = (telegramId: string): void => {
+  const st = { ...(userStates.get(telegramId) || {}) };
+  delete st.routineTaskFlow;
+  userStates.set(telegramId, st);
+};
+
 const setCategoryFlow = (telegramId: string, flow: CategoryFlow): void => {
   const st = { ...(userStates.get(telegramId) || {}) };
   st.categoryFlow = flow;
@@ -192,6 +230,18 @@ const setTemplateRenameFlow = (telegramId: string, flow: TemplateRenameFlow): vo
 const clearTemplateRenameFlow = (telegramId: string): void => {
   const st = { ...(userStates.get(telegramId) || {}) };
   delete st.templateRename;
+  userStates.set(telegramId, st);
+};
+
+const setTemplateCreateFlow = (telegramId: string, flow: TemplateCreateFlow): void => {
+  const st = { ...(userStates.get(telegramId) || {}) };
+  st.templateCreate = flow;
+  userStates.set(telegramId, st);
+};
+
+const clearTemplateCreateFlow = (telegramId: string): void => {
+  const st = { ...(userStates.get(telegramId) || {}) };
+  delete st.templateCreate;
   userStates.set(telegramId, st);
 };
 
@@ -360,10 +410,83 @@ const isRoutineItem = (item: ReportItemRow): boolean => {
   return Boolean(opts.is_routine || item.item_key?.startsWith('routine_'));
 };
 
+const isRoutineParentItem = (item: ReportItemRow): boolean => {
+  const opts = (item.options_json ?? {}) as { routine_role?: string };
+  return isRoutineItem(item) && opts.routine_role === 'parent';
+};
+
+const isRoutineTaskItem = (item: ReportItemRow): boolean => {
+  const opts = (item.options_json ?? {}) as { routine_role?: string; routine_task_id?: string };
+  return isRoutineItem(item) && (opts.routine_role === 'task' || Boolean(opts.routine_task_id));
+};
+
+const displayItemTypeLabel = (itemType: string): string => {
+  switch (itemType) {
+    case 'boolean':
+      return t('screens.form_builder.type_boolean_label');
+    case 'number':
+      return t('screens.form_builder.type_number_label');
+    case 'time_hhmm':
+      return t('screens.form_builder.type_time_label');
+    case 'duration_minutes':
+      return t('screens.form_builder.type_duration_label');
+    case 'text':
+      return t('screens.form_builder.type_text_label');
+    default:
+      return itemType;
+  }
+};
+
 const formatItemLabel = (item: ReportItemRow): string => {
   const base = item.label ?? '';
-  if (isRoutineItem(item)) return t('screens.daily_report.routine_label', { title: base });
+  if (isRoutineTaskItem(item)) {
+    const opts = (item.options_json ?? {}) as { routine_title?: string };
+    const routineTitle = opts.routine_title ? `${opts.routine_title} – ` : '';
+    return t('screens.daily_report.routine_task_label', { routine: routineTitle, title: base });
+  }
+  if (isRoutineParentItem(item)) return t('screens.daily_report.routine_label', { title: base });
   return base;
+};
+
+const allowedXpModesForItemType = (itemType?: string): ('none' | 'fixed' | 'per_minute' | 'per_number')[] => {
+  if (itemType === 'boolean') return ['none', 'fixed'];
+  if (itemType === 'time_hhmm' || itemType === 'duration_minutes') return ['none', 'fixed', 'per_minute'];
+  if (itemType === 'number') return ['none', 'fixed', 'per_number'];
+  return ['none', 'fixed', 'per_minute', 'per_number'];
+};
+
+const normalizeXpModeForItemType = (itemType: string | undefined, xpMode: string | null | undefined): 'none' | 'fixed' | 'per_minute' | 'per_number' | null => {
+  const resolved = xpMode === 'time' ? 'per_minute' : xpMode;
+  const allowed = allowedXpModesForItemType(itemType);
+  if (resolved && allowed.includes(resolved as 'none' | 'fixed' | 'per_minute' | 'per_number')) return resolved as 'none' | 'fixed' | 'per_minute' | 'per_number';
+  return 'none';
+};
+
+const valueIsTrue = (value: unknown): boolean => {
+  if (typeof value === 'boolean') return value;
+  if (typeof value === 'number') return value > 0;
+  if (typeof value === 'string') {
+    const normalized = value.trim().toLowerCase();
+    return ['true', '1', 'yes', 'y', 'ok', 'on', '✅', '✔️'].includes(normalized);
+  }
+  return false;
+};
+
+const formatDisplayValue = (item: ReportItemRow, valueJson: Record<string, unknown> | null): string => {
+  if (!valueJson) return '-';
+  if ((valueJson as { skipped?: boolean }).skipped) return t('screens.daily_report.value_skipped');
+  const value = (valueJson as { value?: unknown }).value ?? (valueJson as { minutes?: unknown }).minutes ?? (valueJson as { number?: unknown }).number;
+  switch (item.item_type) {
+    case 'boolean':
+      return valueIsTrue(value) ? t('screens.daily_report.value_yes') : t('screens.daily_report.value_no');
+    case 'time_hhmm':
+      return typeof value === 'string' ? value : '-';
+    case 'duration_minutes':
+    case 'number':
+      return value != null ? String(value) : '-';
+    default:
+      return value != null ? String(value) : '-';
+  }
 };
 
 const syncRoutineItemsForTemplate = async (
@@ -373,59 +496,148 @@ const syncRoutineItemsForTemplate = async (
   items: ReportItemRow[]
 ): Promise<ReportItemRow[]> => {
   const routineIds = new Set(routines.map((r) => r.id));
+  const tasksMap = await listRoutineTasksByRoutineIds(Array.from(routineIds));
   let sortCursor = items.reduce((max, item) => Math.max(max, item.sort_order ?? 0), 0) + 10;
   const result = [...items];
+  const seenRoutineItemIds = new Set<string>();
+
+  const computeRoutineFullXp = (tasks: RoutineTaskRow[], fallbackRoutine: RoutineRow): number => {
+    if (tasks.length === 0) return fallbackRoutine.xp_value ?? 0;
+    return tasks.reduce((acc, task) => {
+      if (task.xp_mode === 'fixed') return acc + (task.xp_value ?? 0);
+      if (task.xp_mode === 'per_minute') {
+        const base = (task.xp_value ?? 0) * 60;
+        const capped = task.xp_max_per_day && task.xp_max_per_day > 0 ? Math.min(base, task.xp_max_per_day) : base;
+        return acc + capped;
+      }
+      if (task.xp_mode === 'per_number') {
+        const base = task.xp_value ?? 0;
+        const capped = task.xp_max_per_day && task.xp_max_per_day > 0 ? Math.min(base, task.xp_max_per_day) : base;
+        return acc + capped;
+      }
+      return acc;
+    }, 0);
+  };
 
   for (const routine of routines) {
     const itemKey = `routine_${routine.id}`;
+    const routineTasks = tasksMap.get(routine.id) ?? [];
+    const parentXpValue = computeRoutineFullXp(routineTasks, routine);
+    const parentType: ReportItemRow['item_type'] = 'boolean';
     const existingIdx = result.findIndex((i) => i.item_key === itemKey);
-    const itemType = routine.routine_type === 'duration_minutes' ? 'duration_minutes' : 'boolean';
     const optionsJson = {
       ...(existingIdx >= 0 ? result[existingIdx].options_json ?? {} : {}),
       is_routine: true,
       routine_id: routine.id,
-      routine_type: routine.routine_type
+      routine_type: routine.routine_type,
+      routine_role: 'parent',
+      routine_title: routine.title
     };
+
+    const parentSort = routine.sort_order ?? sortCursor;
+    sortCursor = parentSort;
 
     if (existingIdx >= 0) {
       const existing = result[existingIdx];
       const needsUpdate =
         existing.label !== routine.title ||
-        existing.item_type !== itemType ||
+        existing.item_type !== parentType ||
         existing.category !== 'routine' ||
-        existing.xp_mode !== routine.xp_mode ||
-        existing.xp_value !== routine.xp_value ||
-        (existing as ReportItemRow & { xp_max_per_day?: number | null }).xp_max_per_day !== routine.xp_max_per_day ||
-        existing.enabled !== routine.is_active;
+        existing.xp_value !== parentXpValue ||
+        existing.enabled !== routine.is_active ||
+        (existing.sort_order ?? 0) !== parentSort ||
+        (existing as ReportItemRow & { xp_max_per_day?: number | null }).xp_max_per_day !== null;
 
       if (needsUpdate) {
         const updated = await updateItem(existing.id, {
           label: routine.title,
-          item_type: itemType,
+          item_type: parentType,
           category: 'routine',
-          xp_mode: routine.xp_mode,
-          xp_value: routine.xp_value,
-          xp_max_per_day: routine.xp_max_per_day ?? null,
+          xp_mode: 'fixed',
+          xp_value: parentXpValue,
+          xp_max_per_day: null,
           options_json: optionsJson,
-          enabled: routine.is_active
+          enabled: routine.is_active,
+          sort_order: parentSort
         });
         result[existingIdx] = updated;
       }
+      seenRoutineItemIds.add(result[existingIdx].id);
     } else {
       sortCursor += 10;
       const inserted = await upsertItem({
         templateId,
         label: routine.title,
         itemKey,
-        itemType,
+        itemType: parentType,
         category: 'routine',
-        xpMode: routine.xp_mode,
-        xpValue: routine.xp_value,
-        xpMaxPerDay: routine.xp_max_per_day ?? null,
+        xpMode: 'fixed',
+        xpValue: parentXpValue,
+        xpMaxPerDay: null,
         optionsJson,
-        sortOrder: sortCursor
+        sortOrder: parentSort
       });
       result.push(inserted);
+      seenRoutineItemIds.add(inserted.id);
+    }
+
+    let taskSort = parentSort + 1;
+    for (const task of routineTasks) {
+      const taskKey = `routine_${routine.id}_task_${task.id}`;
+      const existingTaskIdx = result.findIndex((i) => i.item_key === taskKey);
+      const taskOptions = {
+        ...(existingTaskIdx >= 0 ? result[existingTaskIdx].options_json ?? {} : {}),
+        is_routine: true,
+        routine_id: routine.id,
+        routine_task_id: task.id,
+        routine_role: 'task',
+        routine_title: routine.title
+      };
+      if (existingTaskIdx >= 0) {
+        const existing = result[existingTaskIdx];
+        const needsUpdate =
+          existing.label !== task.title ||
+          existing.item_type !== task.item_type ||
+          existing.category !== 'routine' ||
+          existing.xp_mode !== task.xp_mode ||
+          existing.xp_value !== task.xp_value ||
+          (existing as ReportItemRow & { xp_max_per_day?: number | null }).xp_max_per_day !== (task.xp_max_per_day ?? null) ||
+          existing.enabled !== routine.is_active ||
+          (existing.sort_order ?? 0) !== taskSort;
+
+        if (needsUpdate) {
+          const updated = await updateItem(existing.id, {
+            label: task.title,
+            item_type: task.item_type,
+            category: 'routine',
+            xp_mode: task.xp_mode,
+            xp_value: task.xp_value,
+            xp_max_per_day: task.xp_max_per_day ?? null,
+            options_json: taskOptions,
+            enabled: routine.is_active,
+            sort_order: taskSort
+          });
+          result[existingTaskIdx] = updated;
+        }
+        seenRoutineItemIds.add(result[existingTaskIdx].id);
+      } else {
+        const insertedTask = await upsertItem({
+          templateId,
+          label: task.title,
+          itemKey: taskKey,
+          itemType: task.item_type,
+          category: 'routine',
+          xpMode: task.xp_mode,
+          xpValue: task.xp_value,
+          xpMaxPerDay: task.xp_max_per_day ?? null,
+          optionsJson: taskOptions,
+          sortOrder: taskSort
+        });
+        result.push(insertedTask);
+        seenRoutineItemIds.add(insertedTask.id);
+      }
+      taskSort += 1;
+      sortCursor = Math.max(sortCursor, taskSort);
     }
   }
 
@@ -433,6 +645,12 @@ const syncRoutineItemsForTemplate = async (
   for (const item of result) {
     const opts = (item.options_json ?? {}) as { is_routine?: boolean; routine_id?: string };
     if ((opts.is_routine || item.item_key.startsWith('routine_')) && opts.routine_id && !routineIds.has(opts.routine_id) && item.enabled) {
+      const updated = await updateItem(item.id, { enabled: false });
+      const idx = result.findIndex((i) => i.id === item.id);
+      if (idx >= 0) result[idx] = updated;
+      continue;
+    }
+    if ((opts.is_routine || item.item_key.startsWith('routine_')) && !seenRoutineItemIds.has(item.id) && item.enabled) {
       const updated = await updateItem(item.id, { enabled: false });
       const idx = result.findIndex((i) => i.id === item.id);
       if (idx >= 0) result[idx] = updated;
@@ -453,7 +671,6 @@ const buildDailyReportKeyboard = async (ctx: Context, reportDay: ReportDayRow): 
   }
 
   const nextBtn = await makeActionButton(ctx, { label: t('buttons.dr_fill_next'), action: 'dr.next', data: { reportDayId: reportDay.id } });
-  const pickBtn = await makeActionButton(ctx, { label: t('buttons.dr_fill_specific'), action: 'dr.pick_item', data: { reportDayId: reportDay.id } });
   const templatesBtn = await makeActionButton(ctx, { label: t('buttons.dr_templates'), action: 'dr.templates', data: { reportDayId: reportDay.id } });
   const historyBtn = await makeActionButton(ctx, { label: t('buttons.dr_history'), action: 'dr.history', data: { reportDayId: reportDay.id } });
   const lockBtn = await makeActionButton(ctx, { label: t('buttons.dr_lock'), action: 'dr.lock', data: { reportDayId: reportDay.id } });
@@ -462,8 +679,6 @@ const buildDailyReportKeyboard = async (ctx: Context, reportDay: ReportDayRow): 
     .text(statusBtn.text, statusBtn.callback_data)
     .row()
     .text(nextBtn.text, nextBtn.callback_data)
-    .row()
-    .text(pickBtn.text, pickBtn.callback_data)
     .row()
     .text(templatesBtn.text, templatesBtn.callback_data)
     .row()
@@ -736,14 +951,34 @@ const renderReportcar = async (ctx: Context): Promise<void> => {
   await renderScreen(ctx, { titleKey: t('screens.reportcar.title'), bodyLines: [t('screens.reportcar.coming_soon')], inlineKeyboard: new InlineKeyboard().text(back.text, back.callback_data) });
 };
 
-const routineTypeLabel = (routine: RoutineRow): string =>
-  routine.routine_type === 'duration_minutes' ? t('screens.routines.type_duration') : t('screens.routines.type_boolean');
+const routineTypeLabel = (routine: RoutineRow): string => {
+  if (routine.routine_type === 'duration_minutes') return t('screens.routines.type_duration');
+  if (routine.routine_type === 'number') return t('screens.routines.type_number');
+  return t('screens.routines.type_boolean');
+};
 
 const routineXpLabel = (routine: RoutineRow): string => {
   if (routine.xp_mode === 'fixed') return t('screens.routines.xp_fixed', { xp: routine.xp_value ?? 0 });
   if (routine.xp_mode === 'per_minute') {
     const maxPart = routine.xp_max_per_day && routine.xp_max_per_day > 0 ? t('screens.routines.xp_max_suffix', { xp: routine.xp_max_per_day }) : '';
     return t('screens.routines.xp_per_minute', { xp: routine.xp_value ?? 0, max: maxPart });
+  }
+  if (routine.xp_mode === 'per_number') {
+    const maxPart = routine.xp_max_per_day && routine.xp_max_per_day > 0 ? t('screens.routines.xp_max_suffix', { xp: routine.xp_max_per_day }) : '';
+    return t('screens.routines.xp_per_number', { xp: routine.xp_value ?? 0, max: maxPart });
+  }
+  return t('screens.routines.xp_none');
+};
+
+const routineTaskXpLabel = (task: RoutineTaskRow): string => {
+  if (task.xp_mode === 'fixed') return t('screens.routines.xp_fixed', { xp: task.xp_value ?? 0 });
+  if (task.xp_mode === 'per_minute') {
+    const maxPart = task.xp_max_per_day && task.xp_max_per_day > 0 ? t('screens.routines.xp_max_suffix', { xp: task.xp_max_per_day }) : '';
+    return t('screens.routines.xp_per_minute', { xp: task.xp_value ?? 0, max: maxPart });
+  }
+  if (task.xp_mode === 'per_number') {
+    const maxPart = task.xp_max_per_day && task.xp_max_per_day > 0 ? t('screens.routines.xp_max_suffix', { xp: task.xp_max_per_day }) : '';
+    return t('screens.routines.xp_per_number', { xp: task.xp_value ?? 0, max: maxPart });
   }
   return t('screens.routines.xp_none');
 };
@@ -793,12 +1028,14 @@ const renderRoutineDetails = async (ctx: Context, routineId: string, flash?: str
   const editDescBtn = await makeActionButton(ctx, { label: t('buttons.routines_edit_description'), action: 'routines.edit_description', data: { routineId } });
   const editTypeBtn = await makeActionButton(ctx, { label: t('buttons.routines_edit_type'), action: 'routines.edit_type', data: { routineId } });
   const editXpBtn = await makeActionButton(ctx, { label: t('buttons.routines_edit_xp'), action: 'routines.edit_xp_mode', data: { routineId } });
+  const editTasksBtn = await makeActionButton(ctx, { label: t('buttons.routine_tasks_manage'), action: 'routines.tasks', data: { routineId } });
   const deleteBtn = await makeActionButton(ctx, { label: t('buttons.routines_delete'), action: 'routines.delete_confirm', data: { routineId } });
   const backBtn = await makeActionButton(ctx, { label: t('buttons.back'), action: 'routines.root' });
 
   kb.text(toggleBtn.text, toggleBtn.callback_data).row();
   kb.text(editTitleBtn.text, editTitleBtn.callback_data).text(editDescBtn.text, editDescBtn.callback_data).row();
   kb.text(editTypeBtn.text, editTypeBtn.callback_data).text(editXpBtn.text, editXpBtn.callback_data).row();
+  kb.text(editTasksBtn.text, editTasksBtn.callback_data).row();
   kb.text(deleteBtn.text, deleteBtn.callback_data).row();
   kb.text(backBtn.text, backBtn.callback_data);
 
@@ -812,6 +1049,120 @@ const renderRoutineDeleteConfirm = async (ctx: Context, routineId: string): Prom
   await renderScreen(ctx, { titleKey: t('screens.routines.title'), bodyLines: [t('screens.routines.delete_confirm')], inlineKeyboard: kb });
 };
 
+const renderRoutineTasks = async (ctx: Context, routineId: string, flash?: string): Promise<void> => {
+  const { user } = await ensureUserAndSettings(ctx);
+  const routine = await getRoutineById(routineId);
+  if (!routine || routine.user_id !== user.id) {
+    await renderRoutinesRoot(ctx);
+    return;
+  }
+  const tasks = await listRoutineTasks(routineId);
+  const lines: string[] = [t('screens.routine_tasks.title', { title: routine.title })];
+  if (flash) lines.push(flash);
+  lines.push('');
+  if (tasks.length === 0) {
+    lines.push(t('screens.routine_tasks.list_empty'));
+  } else {
+    tasks.forEach((task, idx) => {
+      lines.push(`${idx + 1}) ${task.title} — ${routineTaskXpLabel(task)}`);
+    });
+  }
+
+  const kb = new InlineKeyboard();
+  const addBtn = await makeActionButton(ctx, { label: t('buttons.routine_tasks_add'), action: 'routines.task_add', data: { routineId } });
+  kb.text(addBtn.text, addBtn.callback_data).row();
+  for (const task of tasks) {
+    const editBtn = await makeActionButton(ctx, { label: `✏️ ${task.title}`, action: 'routines.task_edit', data: { routineId, taskId: task.id } });
+    const delBtn = await makeActionButton(ctx, { label: t('buttons.routine_tasks_delete'), action: 'routines.task_delete_confirm', data: { routineId, taskId: task.id } });
+    kb.text(editBtn.text, editBtn.callback_data).text(delBtn.text, delBtn.callback_data).row();
+  }
+  const backBtn = await makeActionButton(ctx, { label: t('buttons.back'), action: 'routines.view', data: { routineId } });
+  kb.text(backBtn.text, backBtn.callback_data);
+
+  await renderScreen(ctx, { titleKey: t('screens.routine_tasks.title', { title: routine.title }), bodyLines: lines, inlineKeyboard: kb });
+};
+
+const promptRoutineTaskTitle = async (ctx: Context, params: { routineId: string; taskId?: string }) => {
+  const backBtn = await makeActionButton(ctx, { label: t('buttons.back'), action: 'routines.tasks', data: { routineId: params.routineId } });
+  const kb = new InlineKeyboard().text(backBtn.text, backBtn.callback_data);
+  await renderScreen(ctx, {
+    titleKey: params.taskId ? t('screens.routine_tasks.edit_title') : t('screens.routine_tasks.add_title'),
+    bodyLines: [t('screens.routine_tasks.add_prompt')],
+    inlineKeyboard: kb
+  });
+};
+
+const promptRoutineTaskDescription = async (ctx: Context, params: { routineId: string; taskId?: string }) => {
+  const backBtn = await makeActionButton(ctx, { label: t('buttons.back'), action: 'routines.tasks', data: { routineId: params.routineId } });
+  const kb = new InlineKeyboard().text(backBtn.text, backBtn.callback_data);
+  await renderScreen(ctx, {
+    titleKey: params.taskId ? t('screens.routine_tasks.edit_title') : t('screens.routine_tasks.add_title'),
+    bodyLines: [t('screens.routine_tasks.add_description')],
+    inlineKeyboard: kb
+  });
+};
+
+const promptRoutineTaskType = async (ctx: Context, params: { routineId: string; taskId?: string }) => {
+  const kb = new InlineKeyboard();
+  const types: { key: RoutineTaskRow['item_type']; label: string }[] = [
+    { key: 'boolean', label: t('screens.form_builder.type_boolean_label') },
+    { key: 'duration_minutes', label: t('screens.form_builder.type_duration_label') },
+    { key: 'number', label: t('screens.form_builder.type_number_label') }
+  ];
+  for (const type of types) {
+    const btn = await makeActionButton(ctx, { label: type.label, action: 'routines.task_select_type', data: { routineId: params.routineId, taskId: params.taskId, itemType: type.key } });
+    kb.text(btn.text, btn.callback_data).row();
+  }
+  const backBtn = await makeActionButton(ctx, { label: t('buttons.back'), action: 'routines.tasks', data: { routineId: params.routineId } });
+  kb.text(backBtn.text, backBtn.callback_data);
+  await renderScreen(ctx, { titleKey: t('screens.routine_tasks.title_short'), bodyLines: [t('screens.routine_tasks.choose_type')], inlineKeyboard: kb });
+};
+
+const promptRoutineTaskXpMode = async (ctx: Context, params: { routineId: string; taskId?: string; itemType?: RoutineTaskRow['item_type'] }) => {
+  const allowed = allowedXpModesForItemType(params.itemType);
+  const modes = [
+    { key: 'none', label: t('screens.routines.xp_mode_none') },
+    { key: 'fixed', label: t('screens.routines.xp_mode_fixed') },
+    { key: 'per_minute', label: t('screens.routines.xp_mode_time') },
+    { key: 'per_number', label: t('screens.routines.xp_mode_number') }
+  ].filter((m) => allowed.includes(m.key as 'none' | 'fixed' | 'per_minute' | 'per_number'));
+  const kb = new InlineKeyboard();
+  for (const mode of modes) {
+    const btn = await makeActionButton(ctx, { label: mode.label, action: 'routines.task_select_xp_mode', data: { routineId: params.routineId, taskId: params.taskId, xpMode: mode.key } });
+    kb.text(btn.text, btn.callback_data).row();
+  }
+  const backBtn = await makeActionButton(ctx, { label: t('buttons.back'), action: 'routines.tasks', data: { routineId: params.routineId } });
+  kb.text(backBtn.text, backBtn.callback_data);
+  await renderScreen(ctx, { titleKey: t('screens.routine_tasks.title_short'), bodyLines: [t('screens.routines.choose_xp_mode')], inlineKeyboard: kb });
+};
+
+const promptRoutineTaskXpValue = async (
+  ctx: Context,
+  params: { routineId: string; taskId?: string; xpMode: RoutineTaskRow['xp_mode']; itemType?: RoutineTaskRow['item_type'] }
+) => {
+  const backBtn = await makeActionButton(ctx, { label: t('buttons.back'), action: 'routines.tasks', data: { routineId: params.routineId } });
+  const kb = new InlineKeyboard().text(backBtn.text, backBtn.callback_data);
+  const body =
+    params.xpMode === 'fixed'
+      ? t('screens.routines.ask_fixed_xp')
+      : params.xpMode === 'per_number'
+        ? t('screens.routines.ask_number_xp')
+        : t('screens.routines.ask_time_xp');
+  await renderScreen(ctx, { titleKey: t('screens.routine_tasks.title_short'), bodyLines: [body], inlineKeyboard: kb });
+};
+
+const promptRoutineTaskXpMax = async (ctx: Context, params: { routineId: string; taskId?: string }) => {
+  const backBtn = await makeActionButton(ctx, { label: t('buttons.back'), action: 'routines.tasks', data: { routineId: params.routineId } });
+  const kb = new InlineKeyboard().text(backBtn.text, backBtn.callback_data);
+  await renderScreen(ctx, { titleKey: t('screens.routine_tasks.title_short'), bodyLines: [t('screens.routines.ask_time_xp_max')], inlineKeyboard: kb });
+};
+
+const renderRoutineTaskDeleteConfirm = async (ctx: Context, params: { routineId: string; taskId: string }) => {
+  const yesBtn = await makeActionButton(ctx, { label: t('buttons.tpl_yes'), action: 'routines.task_delete', data: params });
+  const noBtn = await makeActionButton(ctx, { label: t('buttons.tpl_no'), action: 'routines.tasks', data: { routineId: params.routineId } });
+  const kb = new InlineKeyboard().text(yesBtn.text, yesBtn.callback_data).row().text(noBtn.text, noBtn.callback_data);
+  await renderScreen(ctx, { titleKey: t('screens.routine_tasks.title_short'), bodyLines: [t('screens.routine_tasks.delete_confirm')], inlineKeyboard: kb });
+};
 const renderTasks = async (ctx: Context): Promise<void> => {
   await renderRoutinesRoot(ctx);
 };
@@ -998,6 +1349,75 @@ const renderNumericInput = async (ctx: Context, reportDayId: string, item: Repor
   await renderScreen(ctx, { titleKey: t('screens.daily_report.title'), bodyLines: lines, inlineKeyboard: kb });
 };
 
+const renderRoutineDailyTasks = async (
+  ctx: Context,
+  params: { reportDay: ReportDayRow; routineItem: ReportItemRow; items: ReportItemRow[] }
+): Promise<void> => {
+  const opts = (params.routineItem.options_json ?? {}) as { routine_id?: string };
+  const routineId = opts.routine_id;
+  const taskItems = params.items.filter((it) => isRoutineTaskItem(it) && ((it.options_json ?? {}) as { routine_id?: string }).routine_id === routineId);
+  const statuses = taskItems.length ? await listCompletionStatus(params.reportDay.id, taskItems) : [];
+  const lines: string[] = [
+    t('screens.daily_report.routine_tasks_title', { title: params.routineItem.label ?? '' }),
+    t('screens.daily_report.routine_tasks_hint'),
+    ''
+  ];
+  if (statuses.length === 0) {
+    lines.push(t('screens.routine_tasks.list_empty'));
+  } else {
+    statuses.forEach((s, idx) => {
+      const icon = s.filled ? '✅' : s.skipped ? '⏭' : '⬜️';
+      const valueText = s.filled ? formatDisplayValue(s.item, s.value?.value_json ?? null) : '-';
+      lines.push(`${icon} ${idx + 1}) ${formatItemLabel(s.item)} — ${valueText}`);
+    });
+  }
+  const kb = new InlineKeyboard();
+  for (const status of statuses) {
+    const action = params.reportDay.locked ? 'noop' : 'dr.item';
+    const btn = await makeActionButton(ctx, { label: formatItemLabel(status.item), action, data: { reportDayId: params.reportDay.id, itemId: status.item.id } });
+    kb.text(btn.text, btn.callback_data).row();
+  }
+  const backBtn = await makeActionButton(ctx, {
+    label: t('buttons.back'),
+    action: 'dr.routine_detail',
+    data: { reportDayId: params.reportDay.id, routineId, itemId: params.routineItem.id }
+  });
+  kb.text(backBtn.text, backBtn.callback_data);
+  await renderScreen(ctx, { titleKey: t('screens.daily_report.title'), bodyLines: lines, inlineKeyboard: kb });
+};
+
+const renderRoutineDailyEntry = async (ctx: Context, reportDay: ReportDayRow, routineItem: ReportItemRow, items: ReportItemRow[]): Promise<void> => {
+  const opts = (routineItem.options_json ?? {}) as { routine_id?: string };
+  const routineId = opts.routine_id;
+  const taskItems = items.filter((it) => isRoutineTaskItem(it) && ((it.options_json ?? {}) as { routine_id?: string }).routine_id === routineId);
+  const statuses = taskItems.length ? await listCompletionStatus(reportDay.id, taskItems) : [];
+  const doneCount = statuses.filter((s) => s.filled).length;
+  const lines: string[] = [
+    t('screens.daily_report.routine_detail_title', { title: routineItem.label ?? '' }),
+    t('screens.daily_report.routine_detail_hint', { completed: doneCount, total: statuses.length }),
+    ''
+  ];
+
+  const kb = new InlineKeyboard();
+  if (!reportDay.locked && routineId) {
+    const doneBtn = await makeActionButton(ctx, {
+      label: t('buttons.routine_mark_done'),
+      action: 'dr.routine_mark_done',
+      data: { reportDayId: reportDay.id, routineId, itemId: routineItem.id }
+    });
+    const detailsBtn = await makeActionButton(ctx, {
+      label: t('buttons.routine_open_tasks'),
+      action: 'dr.routine_open_tasks',
+      data: { reportDayId: reportDay.id, routineId, itemId: routineItem.id }
+    });
+    kb.text(doneBtn.text, doneBtn.callback_data).row().text(detailsBtn.text, detailsBtn.callback_data).row();
+  }
+  const backBtn = await makeActionButton(ctx, { label: t('buttons.back'), action: 'dr.menu', data: { reportDayId: reportDay.id } });
+  kb.text(backBtn.text, backBtn.callback_data);
+
+  await renderScreen(ctx, { titleKey: t('screens.daily_report.title'), bodyLines: lines, inlineKeyboard: kb });
+};
+
 const promptForItem = async (ctx: Context, reportDay: ReportDayRow, item: ReportItemRow) => {
   const telegramId = String(ctx.from?.id ?? '');
   const existing = userStates.get(telegramId) ?? {};
@@ -1015,6 +1435,13 @@ const promptForItem = async (ctx: Context, reportDay: ReportDayRow, item: Report
     const initialDraft = { reportDayId: reportDay.id, itemId: item.id, hour12: 10, minuteTens: 0, minuteOnes: 0, ampm: 'PM' as const };
     userStates.set(telegramId, { ...existing, awaitingValue: { reportDayId: reportDay.id, itemId: item.id }, timeDraft: initialDraft });
     await renderTimePicker(ctx, reportDay.id, item, initialDraft);
+    return;
+  }
+
+  if (isRoutineParentItem(item)) {
+    const cached = [...reportContextCache.values()].find((v) => v.reportDay.id === reportDay.id);
+    const context = cached ?? (await ensureSpecificReportContext(ctx, reportDay.local_date));
+    await renderRoutineDailyEntry(ctx, context.reportDay, item, context.items);
     return;
   }
 
@@ -1169,9 +1596,15 @@ const generateUniqueItemKey = async (templateId: string, label: string): Promise
 
 const buildTypeKeyboard = async (ctx: Context, params: { templateId: string; itemId?: string; backAction?: string; backData?: Record<string, unknown> }) => {
   const kb = new InlineKeyboard();
-  const types = ['boolean', 'number', 'time_hhmm', 'duration_minutes', 'text'];
+  const types: { key: string; label: string }[] = [
+    { key: 'boolean', label: t('screens.form_builder.type_boolean_label') },
+    { key: 'number', label: t('screens.form_builder.type_number_label') },
+    { key: 'time_hhmm', label: t('screens.form_builder.type_time_label') },
+    { key: 'duration_minutes', label: t('screens.form_builder.type_duration_label') },
+    { key: 'text', label: t('screens.form_builder.type_text_label') }
+  ];
   for (const type of types) {
-    const btn = await makeActionButton(ctx, { label: type, action: 'dr.template_item_select_type', data: { templateId: params.templateId, itemId: params.itemId, itemType: type } });
+    const btn = await makeActionButton(ctx, { label: type.label, action: 'dr.template_item_select_type', data: { templateId: params.templateId, itemId: params.itemId, itemType: type.key } });
     kb.text(btn.text, btn.callback_data).row();
   }
   const backAction = params.backAction ?? 'dr.template_edit';
@@ -1203,15 +1636,24 @@ const buildCategoryKeyboard = async (ctx: Context, params: { templateId: string;
   return kb;
 };
 
-const buildXpModeKeyboard = async (ctx: Context, params: { templateId: string; itemId?: string; backAction?: string; backData?: Record<string, unknown> }) => {
+const buildXpModeKeyboard = async (
+  ctx: Context,
+  params: { templateId: string; itemId?: string; backAction?: string; backData?: Record<string, unknown>; itemType?: string }
+) => {
+  const allowed = allowedXpModesForItemType(params.itemType);
   const modes = [
     { key: 'none', label: t('screens.daily_report.ask_xp_mode_none') ?? 'No XP' },
     { key: 'fixed', label: t('screens.daily_report.ask_xp_mode_fixed') ?? 'Fixed XP' },
-    { key: 'time', label: t('screens.daily_report.ask_xp_mode_time') ?? 'Time-based (per minute)' }
-  ];
+    { key: 'per_minute', label: t('screens.daily_report.ask_xp_mode_time') ?? 'Time-based (per minute)' },
+    { key: 'per_number', label: t('screens.daily_report.ask_xp_mode_number') ?? 'XP per number' }
+  ].filter((m) => allowed.includes(m.key as 'none' | 'fixed' | 'per_minute' | 'per_number'));
   const kb = new InlineKeyboard();
   for (const mode of modes) {
-    const btn = await makeActionButton(ctx, { label: mode.label, action: 'dr.template_item_select_xp_mode', data: { templateId: params.templateId, itemId: params.itemId, xpMode: mode.key } });
+    const btn = await makeActionButton(ctx, {
+      label: mode.label,
+      action: 'dr.template_item_select_xp_mode',
+      data: { templateId: params.templateId, itemId: params.itemId, xpMode: mode.key }
+    });
     kb.text(btn.text, btn.callback_data).row();
   }
   const backAction = params.backAction ?? 'dr.template_edit';
@@ -1249,6 +1691,12 @@ const promptTypeSelection = async (ctx: Context, params: { templateId: string; i
     backAction: params.backToItem ? 'dr.template_item_menu' : 'dr.template_edit',
     backData: params.backToItem ? { templateId: params.templateId, itemId: params.itemId } : { templateId: params.templateId }
   });
+  const helpBtn = await makeActionButton(ctx, {
+    label: t('screens.form_builder.help_button'),
+    action: 'dr.template_help',
+    data: { templateId: params.templateId, topic: 'type', itemId: params.itemId, backToItem: params.backToItem === true }
+  });
+  kb.row().text(helpBtn.text, helpBtn.callback_data);
   await renderScreen(ctx, {
     titleKey: t('screens.daily_report.template_builder_title'),
     bodyLines: [t('screens.daily_report.ask_type')],
@@ -1263,6 +1711,12 @@ const promptCategorySelection = async (ctx: Context, params: { templateId: strin
     backAction: params.backToItem ? 'dr.template_item_menu' : 'dr.template_edit',
     backData: params.backToItem ? { templateId: params.templateId, itemId: params.itemId } : { templateId: params.templateId }
   });
+  const helpBtn = await makeActionButton(ctx, {
+    label: t('screens.form_builder.help_button'),
+    action: 'dr.template_help',
+    data: { templateId: params.templateId, topic: 'category', itemId: params.itemId, backToItem: params.backToItem === true }
+  });
+  kb.row().text(helpBtn.text, helpBtn.callback_data);
   await renderScreen(ctx, {
     titleKey: t('screens.daily_report.template_builder_title'),
     bodyLines: [t('screens.daily_report.ask_category')],
@@ -1270,13 +1724,20 @@ const promptCategorySelection = async (ctx: Context, params: { templateId: strin
   });
 };
 
-const promptXpModeSelection = async (ctx: Context, params: { templateId: string; itemId?: string; backToItem?: boolean }) => {
+const promptXpModeSelection = async (ctx: Context, params: { templateId: string; itemId?: string; backToItem?: boolean; itemType?: string }) => {
   const kb = await buildXpModeKeyboard(ctx, {
     templateId: params.templateId,
     itemId: params.itemId,
     backAction: params.backToItem ? 'dr.template_item_menu' : 'dr.template_edit',
-    backData: params.backToItem ? { templateId: params.templateId, itemId: params.itemId } : { templateId: params.templateId }
+    backData: params.backToItem ? { templateId: params.templateId, itemId: params.itemId } : { templateId: params.templateId },
+    itemType: params.itemType
   });
+  const helpBtn = await makeActionButton(ctx, {
+    label: t('screens.form_builder.help_button'),
+    action: 'dr.template_help',
+    data: { templateId: params.templateId, topic: 'xp_mode', itemId: params.itemId, backToItem: params.backToItem === true }
+  });
+  kb.row().text(helpBtn.text, helpBtn.callback_data);
   await renderScreen(ctx, {
     titleKey: t('screens.daily_report.template_builder_title'),
     bodyLines: [t('screens.daily_report.ask_xp_mode')],
@@ -1306,6 +1767,26 @@ const promptXpMaxInput = async (ctx: Context, params: { templateId: string; item
   });
 };
 
+const renderTemplateHelp = async (
+  ctx: Context,
+  params: { templateId: string; topic: 'type' | 'category' | 'xp_mode'; backToItem?: boolean; itemId?: string }
+) => {
+  const keyMap: Record<string, string> = {
+    type: 'screens.form_builder.help.type',
+    category: 'screens.form_builder.help.category',
+    xp_mode: 'screens.form_builder.help.xp_mode'
+  };
+  const backAction = params.backToItem ? 'dr.template_item_menu' : 'dr.template_edit';
+  const backData = params.backToItem ? { templateId: params.templateId, itemId: params.itemId } : { templateId: params.templateId };
+  const backBtn = await makeActionButton(ctx, { label: t('buttons.back'), action: backAction, data: backData });
+  const kb = new InlineKeyboard().text(backBtn.text, backBtn.callback_data);
+  await renderScreen(ctx, {
+    titleKey: t('screens.form_builder.help.title'),
+    bodyLines: [t(keyMap[params.topic] ?? '')],
+    inlineKeyboard: kb
+  });
+};
+
 const buildRoutineTypeKeyboard = async (ctx: Context, routineId?: string) => {
   const kb = new InlineKeyboard();
   const booleanBtn = await makeActionButton(ctx, {
@@ -1318,7 +1799,12 @@ const buildRoutineTypeKeyboard = async (ctx: Context, routineId?: string) => {
     action: 'routines.select_type',
     data: { routineId, routineType: 'duration_minutes' }
   });
-  kb.text(booleanBtn.text, booleanBtn.callback_data).row().text(durationBtn.text, durationBtn.callback_data);
+  const numberBtn = await makeActionButton(ctx, {
+    label: t('screens.routines.type_number'),
+    action: 'routines.select_type',
+    data: { routineId, routineType: 'number' }
+  });
+  kb.text(booleanBtn.text, booleanBtn.callback_data).row().text(durationBtn.text, durationBtn.callback_data).row().text(numberBtn.text, numberBtn.callback_data);
   return kb;
 };
 
@@ -1327,6 +1813,7 @@ const buildRoutineXpModeKeyboard = async (ctx: Context, routineId?: string) => {
   const modes = [
     { key: 'fixed', label: t('screens.routines.xp_mode_fixed') },
     { key: 'per_minute', label: t('screens.routines.xp_mode_time') },
+    { key: 'per_number', label: t('screens.routines.xp_mode_number') },
     { key: 'none', label: t('screens.routines.xp_mode_none') }
   ];
   for (const mode of modes) {
@@ -1352,13 +1839,17 @@ const promptRoutineDescription = async (ctx: Context, params: { routineId?: stri
   await renderScreen(ctx, { titleKey: t('screens.routines.title'), bodyLines: [t('screens.routines.add_description')], inlineKeyboard: kb });
 };
 
-const promptRoutineXpValue = async (ctx: Context, params: { routineId?: string; xpMode: 'fixed' | 'per_minute' }) => {
+const promptRoutineXpValue = async (ctx: Context, params: { routineId?: string; xpMode: 'fixed' | 'per_minute' | 'per_number' }) => {
   const backAction = params.routineId ? 'routines.view' : 'routines.root';
   const backData = params.routineId ? { routineId: params.routineId } : {};
   const backBtn = await makeActionButton(ctx, { label: t('buttons.back'), action: backAction, data: backData });
   const kb = new InlineKeyboard().text(backBtn.text, backBtn.callback_data);
   const body =
-    params.xpMode === 'fixed' ? t('screens.routines.ask_fixed_xp') : t('screens.routines.ask_time_xp');
+    params.xpMode === 'fixed'
+      ? t('screens.routines.ask_fixed_xp')
+      : params.xpMode === 'per_number'
+        ? t('screens.routines.ask_number_xp')
+        : t('screens.routines.ask_time_xp');
   await renderScreen(ctx, { titleKey: t('screens.routines.title'), bodyLines: [body], inlineKeyboard: kb });
 };
 
@@ -1383,7 +1874,12 @@ const promptRoutineConfirm = async (ctx: Context, flow: RoutineFlow) => {
             xp: flow.draft.xpValue ?? 0,
             max: flow.draft.xpMaxPerDay && flow.draft.xpMaxPerDay > 0 ? t('screens.routines.xp_max_suffix', { xp: flow.draft.xpMaxPerDay }) : ''
           })
-        : t('screens.routines.xp_none')
+        : flow.draft.xpMode === 'per_number'
+          ? t('screens.routines.xp_per_number', {
+              xp: flow.draft.xpValue ?? 0,
+              max: flow.draft.xpMaxPerDay && flow.draft.xpMaxPerDay > 0 ? t('screens.routines.xp_max_suffix', { xp: flow.draft.xpMaxPerDay }) : ''
+            })
+          : t('screens.routines.xp_none')
   ];
 
   const saveBtn = await makeActionButton(ctx, { label: t('buttons.tpl_yes'), action: 'routines.save', data: { routineId: flow.routineId } });
@@ -1448,13 +1944,11 @@ const renderTemplateActions = async (ctx: Context, templateId: string): Promise<
   ];
 
   const kb = new InlineKeyboard();
-  const editBtn = await makeActionButton(ctx, { label: t('buttons.tpl_actions_edit'), action: 'dr.template_edit', data: { templateId } });
   const renameBtn = await makeActionButton(ctx, { label: t('buttons.tpl_actions_rename'), action: 'dr.template_rename_prompt', data: { templateId } });
   const dupBtn = await makeActionButton(ctx, { label: t('buttons.tpl_actions_duplicate'), action: 'dr.template_duplicate', data: { templateId } });
   const delBtn = await makeActionButton(ctx, { label: t('buttons.tpl_actions_delete'), action: 'dr.template_delete_confirm', data: { templateId } });
   const backBtn = await makeActionButton(ctx, { label: t('buttons.tpl_actions_back'), action: 'dr.templates' });
 
-  kb.text(editBtn.text, editBtn.callback_data).row();
   kb.text(renameBtn.text, renameBtn.callback_data).row();
   kb.text(dupBtn.text, dupBtn.callback_data).row();
   kb.text(delBtn.text, delBtn.callback_data).row();
@@ -1488,7 +1982,7 @@ const renderTemplateEdit = async (ctx: Context, templateId: string, flashLine?: 
     visibleItems.forEach((item, idx) => {
       const statusIcon = item.enabled ? '✅' : '🚫';
       const xpVal = item.xp_value ?? 0;
-      lines.push(`[${idx + 1}] ${statusIcon} ${item.label} (${item.item_type}, XP: ${xpVal})`);
+      lines.push(`[${idx + 1}] ${statusIcon} ${item.label} (${displayItemTypeLabel(item.item_type)}, XP: ${xpVal})`);
     });
   }
 
@@ -1500,8 +1994,10 @@ const renderTemplateEdit = async (ctx: Context, templateId: string, flashLine?: 
   }
 
   const addBtn = await makeActionButton(ctx, { label: t('buttons.tpl_add_item'), action: 'dr.template_item_add', data: { templateId } });
+  const renameBtn = await makeActionButton(ctx, { label: t('buttons.tpl_actions_rename'), action: 'dr.template_rename_prompt', data: { templateId } });
   const backBtn = await makeActionButton(ctx, { label: t('buttons.back'), action: 'dr.templates' });
   kb.text(addBtn.text, addBtn.callback_data).row();
+  kb.text(renameBtn.text, renameBtn.callback_data).row();
   kb.text(backBtn.text, backBtn.callback_data);
 
   await renderScreen(ctx, { titleKey: t('screens.daily_report.template_builder_title'), bodyLines: lines, inlineKeyboard: kb });
@@ -1526,7 +2022,7 @@ const renderTemplateItemMenu = async (ctx: Context, templateId: string, itemId: 
     t('screens.daily_report.item_menu_title'),
     t('screens.daily_report.item_menu_summary', {
       label: item.label,
-      type: item.item_type,
+      type: displayItemTypeLabel(item.item_type),
       category: item.category ?? '-',
       xpMode,
       xpValue,
@@ -1602,10 +2098,11 @@ const finalizeNewTemplateItem = async (ctx: Context, telegramId: string, flow: T
     const itemKey = flow.draft.itemKey ?? (await generateUniqueItemKey(flow.templateId, label));
     const itemType = flow.draft.itemType ?? 'text';
     const category = flow.draft.category && flow.draft.category !== 'none' ? flow.draft.category : null;
-    const xpMode = flow.draft.xpMode && flow.draft.xpMode !== 'none' ? flow.draft.xpMode : null;
+    const normalizedXpMode = normalizeXpModeForItemType(itemType, flow.draft.xpMode ?? null);
+    const xpMode = normalizedXpMode && normalizedXpMode !== 'none' ? normalizedXpMode : null;
     const xpValue = xpMode ? flow.draft.xpValue ?? 0 : null;
-    const xpMaxPerDay = xpMode === 'per_minute' ? flow.draft.xpMaxPerDay ?? null : null;
-    const optionsJson = xpMode === 'per_minute' ? flow.draft.optionsJson ?? { per: 'minute' } : {};
+    const xpMaxPerDay = xpMode && (xpMode === 'per_minute' || xpMode === 'per_number') ? flow.draft.xpMaxPerDay ?? null : null;
+    const optionsJson = xpMode === 'per_minute' ? { ...(flow.draft.optionsJson ?? {}), per: 'minute' } : {};
 
     await upsertItem({
       templateId: flow.templateId,
@@ -1654,32 +2151,46 @@ const renderHistory = async (ctx: Context, range: '7d' | '30d' = '7d'): Promise<
   const backBtn = await makeActionButton(ctx, { label: t('buttons.back'), action: 'dr.menu' });
 
   kb.text(range7Btn.text, range7Btn.callback_data).text(range30Btn.text, range30Btn.callback_data).row();
+  for (const entry of days) {
+    const openBtn = await makeActionButton(ctx, { label: `📅 ${entry.day.local_date}`, action: 'dr.history_open_day', data: { reportDayId: entry.day.id } });
+    kb.text(openBtn.text, openBtn.callback_data).row();
+  }
   kb.text(backBtn.text, backBtn.callback_data);
 
   await renderScreen(ctx, { titleKey: t('screens.daily_report.history_title'), bodyLines: lines, inlineKeyboard: kb });
 };
 
-const renderHistoryDay = async (ctx: Context, localDate: string): Promise<void> => {
-  const { userId, reportDay, items } = await ensureSpecificReportContext(ctx, localDate);
-  const statuses = await listCompletionStatus(reportDay.id, items);
+const renderHistoryDay = async (ctx: Context, reportDayId: string): Promise<void> => {
+  const reportDay = await getReportDayById(reportDayId);
+  if (!reportDay) {
+    await renderHistory(ctx);
+    return;
+  }
+  const items = await listAllItems(reportDay.template_id);
+  const enabledItems = items.filter((i) => i.enabled);
+  const statuses = await listCompletionStatus(reportDay.id, enabledItems);
+  const template = await getTemplateById(reportDay.template_id);
 
-  const lines: string[] = [t('screens.history.day_title', { date: reportDay.local_date }), ''];
+  const lines: string[] = [
+    t('screens.daily_report.history_detail_title', { date: reportDay.local_date, template: template?.title ?? t('screens.templates.default_title') }),
+    t('screens.daily_report.history_detail_hint'),
+    ''
+  ];
 
   statuses.forEach((s, idx) => {
     const icon = s.filled ? '✅' : s.skipped ? '⏭' : '⬜️';
-    lines.push(`${icon} ${idx + 1}) ${formatItemLabel(s.item)}`);
+    const valueText = s.filled ? formatDisplayValue(s.item, s.value?.value_json ?? null) : t('screens.daily_report.value_skipped');
+    lines.push(`${icon} ${idx + 1}) ${formatItemLabel(s.item)} — ${valueText}`);
   });
 
   const kb = new InlineKeyboard();
-  const openBtn = await makeActionButton(ctx, { label: t('buttons.dr_open_date'), action: 'dr.open_date', data: { localDate } });
   const backBtn = await makeActionButton(ctx, { label: t('buttons.back'), action: 'dr.history' });
+  kb.text(backBtn.text, backBtn.callback_data);
 
-  kb.text(openBtn.text, openBtn.callback_data).row().text(backBtn.text, backBtn.callback_data);
+  // cache warmed
+  reportContextCache.set(`${reportDay.user_id}:${reportDay.local_date}`, { reportDay, items: enabledItems });
 
-  // Make sure cache is warmed for that day
-  reportContextCache.set(`${userId}:${localDate}`, { reportDay, items });
-
-  await renderScreen(ctx, { titleKey: t('screens.history.day_title', { date: reportDay.local_date }), bodyLines: lines, inlineKeyboard: kb });
+  await renderScreen(ctx, { titleKey: t('screens.daily_report.history_title'), bodyLines: lines, inlineKeyboard: kb });
 };
 
 const handleSaveValue = async (ctx: Context, text: string): Promise<void> => {
@@ -1691,8 +2202,14 @@ const handleSaveValue = async (ctx: Context, text: string): Promise<void> => {
   const { reportDayId, itemId } = state.awaitingValue;
   const cached = [...reportContextCache.values()].find((v) => v.reportDay.id === reportDayId);
 
-  const reportDay = cached?.reportDay ?? (await ensureReportContext(ctx)).reportDay;
-  const items = cached?.items ?? (await ensureDefaultItems(reportDay.user_id));
+  let context = cached ?? null;
+  if (!context) {
+    const existingDay = await getReportDayById(reportDayId);
+    const localDate = existingDay?.local_date ?? formatLocalTime(config.defaultTimezone).date;
+    context = await ensureSpecificReportContext(ctx, localDate);
+  }
+  const reportDay = context.reportDay;
+  const items = context.items;
 
   if (reportDay.id !== reportDayId) {
     userStates.delete(stateKey);
@@ -1757,7 +2274,8 @@ const handleSaveValue = async (ctx: Context, text: string): Promise<void> => {
         return;
       }
       const isPerMinute = ['per_minute', 'time'].includes(item.xp_mode ?? '');
-      valueJson = isPerMinute ? { value: n, minutes: n } : { value: n };
+      const isPerNumber = (item.xp_mode ?? '') === 'per_number';
+      valueJson = { value: n, number: n, ...(isPerMinute ? { minutes: n } : {}), ...(isPerNumber ? { units: n } : {}) };
       break;
     }
     default:
@@ -1903,6 +2421,15 @@ bot.callbackQuery(/^[A-Za-z0-9_-]{8,12}$/, async (ctx) => {
         await renderRoutineDetails(ctx, routineId);
         return;
       }
+      case 'routines.tasks': {
+        const routineId = (payload as { data?: { routineId?: string } }).data?.routineId;
+        if (!routineId) {
+          await renderRoutinesRoot(ctx);
+          return;
+        }
+        await renderRoutineTasks(ctx, routineId);
+        return;
+      }
       case 'routines.toggle': {
         const routineId = (payload as { data?: { routineId?: string } }).data?.routineId;
         if (!routineId) {
@@ -1938,6 +2465,140 @@ bot.callbackQuery(/^[A-Za-z0-9_-]{8,12}$/, async (ctx) => {
         const telegramId = String(ctx.from?.id ?? '');
         setRoutineFlow(telegramId, { mode: 'edit', routineId, step: 'description', draft: {} });
         await promptRoutineDescription(ctx, { routineId });
+        return;
+      }
+      case 'routines.task_add': {
+        const routineId = (payload as { data?: { routineId?: string } }).data?.routineId;
+        if (!routineId) {
+          await renderRoutinesRoot(ctx);
+          return;
+        }
+        const telegramId = String(ctx.from?.id ?? '');
+        clearRoutineTaskFlow(telegramId);
+        setRoutineTaskFlow(telegramId, { mode: 'create', routineId, step: 'title', draft: {} });
+        await promptRoutineTaskTitle(ctx, { routineId });
+        return;
+      }
+      case 'routines.task_edit': {
+        const data = (payload as { data?: { routineId?: string; taskId?: string } }).data;
+        if (!data?.routineId || !data.taskId) {
+          await renderRoutinesRoot(ctx);
+          return;
+        }
+        const { user } = await ensureUserAndSettings(ctx);
+        const routine = await getRoutineById(data.routineId);
+        const task = await getRoutineTaskById(data.taskId);
+        if (!routine || routine.user_id !== user.id || !task || task.routine_id !== routine.id) {
+          await renderRoutinesRoot(ctx);
+          return;
+        }
+        const telegramId = String(ctx.from?.id ?? '');
+        clearRoutineTaskFlow(telegramId);
+        setRoutineTaskFlow(telegramId, {
+          mode: 'edit',
+          routineId: data.routineId,
+          taskId: data.taskId,
+          step: 'title',
+          draft: {
+            title: task.title,
+            description: task.description,
+            itemType: task.item_type,
+            xpMode: task.xp_mode,
+            xpValue: task.xp_value,
+            xpMaxPerDay: task.xp_max_per_day ?? null
+          }
+        });
+        await promptRoutineTaskTitle(ctx, { routineId: data.routineId, taskId: data.taskId });
+        return;
+      }
+      case 'routines.task_delete_confirm': {
+        const data = (payload as { data?: { routineId?: string; taskId?: string } }).data;
+        if (!data?.routineId || !data.taskId) {
+          await renderRoutinesRoot(ctx);
+          return;
+        }
+        await renderRoutineTaskDeleteConfirm(ctx, { routineId: data.routineId, taskId: data.taskId });
+        return;
+      }
+      case 'routines.task_delete': {
+        const data = (payload as { data?: { routineId?: string; taskId?: string } }).data;
+        if (!data?.routineId || !data.taskId) {
+          await renderRoutinesRoot(ctx);
+          return;
+        }
+        const { user } = await ensureUserAndSettings(ctx);
+        const routine = await getRoutineById(data.routineId);
+        const task = await getRoutineTaskById(data.taskId);
+        if (!routine || routine.user_id !== user.id || !task || task.routine_id !== routine.id) {
+          await renderRoutinesRoot(ctx);
+          return;
+        }
+        await deleteRoutineTask(data.taskId);
+        clearRoutineTaskFlow(String(ctx.from?.id ?? ''));
+        clearReportContextCache();
+        await renderRoutineTasks(ctx, data.routineId, t('screens.routines.saved'));
+        return;
+      }
+      case 'routines.task_select_type': {
+        const data = (payload as { data?: { routineId?: string; taskId?: string; itemType?: RoutineTaskRow['item_type'] } }).data;
+        if (!data?.routineId || !data.itemType) {
+          await renderRoutinesRoot(ctx);
+          return;
+        }
+        const telegramId = String(ctx.from?.id ?? '');
+        const flow = userStates.get(telegramId)?.routineTaskFlow;
+        if (flow && flow.routineId === data.routineId) {
+          const draft = { ...flow.draft, itemType: data.itemType };
+          setRoutineTaskFlow(telegramId, { ...flow, draft, step: 'xp_mode' });
+          await promptRoutineTaskXpMode(ctx, { routineId: data.routineId, taskId: data.taskId ?? flow.taskId, itemType: data.itemType });
+          return;
+        }
+        await renderRoutineTasks(ctx, data.routineId);
+        return;
+      }
+      case 'routines.task_select_xp_mode': {
+        const data = (payload as { data?: { routineId?: string; taskId?: string; xpMode?: RoutineTaskRow['xp_mode'] } }).data;
+        if (!data?.routineId || !data.xpMode) {
+          await renderRoutinesRoot(ctx);
+          return;
+        }
+        const telegramId = String(ctx.from?.id ?? '');
+        const flow = userStates.get(telegramId)?.routineTaskFlow;
+        if (flow && flow.routineId === data.routineId) {
+          const normalizedMode: RoutineTaskRow['xp_mode'] = (normalizeXpModeForItemType(flow.draft.itemType, data.xpMode) as RoutineTaskRow['xp_mode']) ?? 'none';
+          if (normalizedMode === 'none') {
+            const draft = { ...flow.draft, xpMode: normalizedMode, xpValue: null, xpMaxPerDay: null };
+            setRoutineTaskFlow(telegramId, { ...flow, draft, step: 'xp_value' });
+            // save immediately
+            const saved = flow.taskId
+              ? await updateRoutineTask(flow.taskId, {
+                  title: draft.title ?? '',
+                  description: draft.description ?? null,
+                  itemType: draft.itemType ?? 'boolean',
+                  xpMode: normalizedMode,
+                  xpValue: null,
+                  xpMaxPerDay: null
+                })
+              : await createRoutineTask({
+                  routineId: flow.routineId,
+                  title: draft.title ?? t('screens.routine_tasks.default_title'),
+                  description: draft.description ?? null,
+                  itemType: draft.itemType ?? 'boolean',
+                  xpMode: normalizedMode,
+                  xpValue: null,
+                  xpMaxPerDay: null
+                });
+            clearRoutineTaskFlow(telegramId);
+            clearReportContextCache();
+            await renderRoutineTasks(ctx, data.routineId, t('screens.routines.saved'));
+            return;
+          }
+          const draft = { ...flow.draft, xpMode: normalizedMode };
+          setRoutineTaskFlow(telegramId, { ...flow, draft, step: 'xp_value' });
+          await promptRoutineTaskXpValue(ctx, { routineId: data.routineId, taskId: flow.taskId, xpMode: normalizedMode, itemType: draft.itemType });
+          return;
+        }
+        await renderRoutineTasks(ctx, data.routineId);
         return;
       }
       case 'routines.edit_type': {
@@ -2342,8 +3003,17 @@ bot.callbackQuery(/^[A-Za-z0-9_-]{8,12}$/, async (ctx) => {
         const reportDayId = (payload as { data?: { reportDayId?: string } }).data?.reportDayId;
 
         const cached = reportDayId ? [...reportContextCache.values()].find((v) => v.reportDay.id === reportDayId) : null;
-        const reportDay = cached?.reportDay ?? (await ensureReportContext(ctx)).reportDay;
-        const items = cached?.items ?? (await ensureDefaultItems(reportDay.user_id));
+        let context = cached ?? null;
+        if (!context) {
+          const reportDayRow = reportDayId ? await getReportDayById(reportDayId) : null;
+          if (reportDayRow) {
+            context = await ensureSpecificReportContext(ctx, reportDayRow.local_date);
+          } else {
+            context = await ensureReportContext(ctx);
+          }
+        }
+        const reportDay = context.reportDay;
+        const items = context.items;
 
         if (reportDay.locked) {
           await renderScreen(ctx, { titleKey: t('screens.daily_report.title'), bodyLines: isLockedMessageLines(reportDay), inlineKeyboard: await buildDailyReportKeyboard(ctx, reportDay) });
@@ -2360,13 +3030,6 @@ bot.callbackQuery(/^[A-Za-z0-9_-]{8,12}$/, async (ctx) => {
         return;
       }
 
-      case 'dr.pick_item': {
-        const reportDayId = (payload as { data?: { reportDayId?: string } }).data?.reportDayId;
-        const { reportDay } = await (reportDayId ? ensureReportContext(ctx) : ensureReportContext(ctx));
-        await renderDailyStatusWithFilter(ctx, reportDay.id, 'all');
-        return;
-      }
-
       case 'dr.item': {
         const data = (payload as { data?: { reportDayId?: string; itemId?: string } }).data;
         const reportDayId = data?.reportDayId;
@@ -2377,8 +3040,17 @@ bot.callbackQuery(/^[A-Za-z0-9_-]{8,12}$/, async (ctx) => {
         }
 
         const cached = [...reportContextCache.values()].find((v) => v.reportDay.id === reportDayId);
-        const reportDay = cached?.reportDay ?? (await ensureReportContext(ctx)).reportDay;
-        const items = cached?.items ?? (await ensureDefaultItems(reportDay.user_id));
+        let context = cached ?? null;
+        if (!context) {
+          const reportDayRow = await getReportDayById(reportDayId);
+          if (reportDayRow) {
+            context = await ensureSpecificReportContext(ctx, reportDayRow.local_date);
+          } else {
+            context = await ensureReportContext(ctx);
+          }
+        }
+        const reportDay = context.reportDay;
+        const items = context.items;
 
         const item = items.find((i) => i.id === itemId);
         if (!item) {
@@ -2425,8 +3097,17 @@ bot.callbackQuery(/^[A-Za-z0-9_-]{8,12}$/, async (ctx) => {
         userStates.set(telegramId, { ...(state || {}), timeDraft: nextDraft });
 
         const cached = [...reportContextCache.values()].find((v) => v.reportDay.id === reportDayId);
-        const reportDay = cached?.reportDay ?? (await ensureReportContext(ctx)).reportDay;
-        const items = cached?.items ?? (await ensureDefaultItems(reportDay.user_id));
+        let context = cached ?? null;
+        if (!context) {
+          const reportDayRow = await getReportDayById(reportDayId);
+          if (reportDayRow) {
+            context = await ensureSpecificReportContext(ctx, reportDayRow.local_date);
+          } else {
+            context = await ensureReportContext(ctx);
+          }
+        }
+        const reportDay = context.reportDay;
+        const items = context.items;
         const item = items.find((i) => i.id === itemId);
         if (!item) {
           await renderDailyReportRoot(ctx);
@@ -2479,8 +3160,17 @@ bot.callbackQuery(/^[A-Za-z0-9_-]{8,12}$/, async (ctx) => {
         }
 
         const cached = [...reportContextCache.values()].find((v) => v.reportDay.id === reportDayId);
-        const reportDay = cached?.reportDay ?? (await ensureReportContext(ctx)).reportDay;
-        const items = cached?.items ?? (await ensureDefaultItems(reportDay.user_id));
+        let context = cached ?? null;
+        if (!context) {
+          const reportDayRow = await getReportDayById(reportDayId);
+          if (reportDayRow) {
+            context = await ensureSpecificReportContext(ctx, reportDayRow.local_date);
+          } else {
+            context = await ensureReportContext(ctx);
+          }
+        }
+        const reportDay = context.reportDay;
+        const items = context.items;
         const item = items.find((i) => i.id === itemId);
         if (!item) {
           await renderDailyReportRoot(ctx);
@@ -2534,8 +3224,17 @@ bot.callbackQuery(/^[A-Za-z0-9_-]{8,12}$/, async (ctx) => {
         }
 
         const cached = [...reportContextCache.values()].find((v) => v.reportDay.id === reportDayId);
-        const reportDay = cached?.reportDay ?? (await ensureReportContext(ctx)).reportDay;
-        const items = cached?.items ?? (await ensureDefaultItems(reportDay.user_id));
+        let context = cached ?? null;
+        if (!context) {
+          const reportDayRow = await getReportDayById(reportDayId);
+          if (reportDayRow) {
+            context = await ensureSpecificReportContext(ctx, reportDayRow.local_date);
+          } else {
+            context = await ensureReportContext(ctx);
+          }
+        }
+        const reportDay = context.reportDay;
+        const items = context.items;
         const item = items.find((i) => i.id === itemId);
         if (!item) {
           await renderDailyReportRoot(ctx);
@@ -2557,6 +3256,101 @@ bot.callbackQuery(/^[A-Za-z0-9_-]{8,12}$/, async (ctx) => {
         delete st.timeDraft;
         userStates.set(telegramId, st);
 
+        await renderDailyReportRoot(ctx, reportDay.local_date);
+        return;
+      }
+
+      case 'dr.routine_open_tasks': {
+        const data = (payload as { data?: { reportDayId?: string; routineId?: string; itemId?: string } }).data;
+        if (!data?.reportDayId || !data.routineId) {
+          await renderDailyReportRoot(ctx);
+          return;
+        }
+        const reportDay = await getReportDayById(data.reportDayId);
+        if (!reportDay) {
+          await renderDailyReportRoot(ctx);
+          return;
+        }
+        const context = await ensureSpecificReportContext(ctx, reportDay.local_date);
+        const routineItem =
+          (data.itemId && context.items.find((i) => i.id === data.itemId)) ||
+          context.items.find(
+            (i) =>
+              isRoutineParentItem(i) &&
+              ((i.options_json ?? {}) as { routine_id?: string }).routine_id === data.routineId
+          );
+        if (!routineItem) {
+          await renderDailyReportRoot(ctx, reportDay.local_date);
+          return;
+        }
+        await renderRoutineDailyTasks(ctx, { reportDay: context.reportDay, routineItem, items: context.items });
+        return;
+      }
+
+      case 'dr.routine_detail': {
+        const data = (payload as { data?: { reportDayId?: string; routineId?: string; itemId?: string } }).data;
+        if (!data?.reportDayId || !data.routineId) {
+          await renderDailyReportRoot(ctx);
+          return;
+        }
+        const reportDay = await getReportDayById(data.reportDayId);
+        if (!reportDay) {
+          await renderDailyReportRoot(ctx);
+          return;
+        }
+        const context = await ensureSpecificReportContext(ctx, reportDay.local_date);
+        const routineItem =
+          (data.itemId && context.items.find((i) => i.id === data.itemId)) ||
+          context.items.find(
+            (i) =>
+              isRoutineParentItem(i) &&
+              ((i.options_json ?? {}) as { routine_id?: string }).routine_id === data.routineId
+          );
+        if (!routineItem) {
+          await renderDailyReportRoot(ctx, reportDay.local_date);
+          return;
+        }
+        await renderRoutineDailyEntry(ctx, context.reportDay, routineItem, context.items);
+        return;
+      }
+
+      case 'dr.routine_mark_done': {
+        const data = (payload as { data?: { reportDayId?: string; routineId?: string; itemId?: string } }).data;
+        if (!data?.reportDayId || !data.routineId) {
+          await renderDailyReportRoot(ctx);
+          return;
+        }
+        const reportDay = await getReportDayById(data.reportDayId);
+        if (!reportDay) {
+          await renderDailyReportRoot(ctx);
+          return;
+        }
+        if (reportDay.locked) {
+          await renderScreen(ctx, { titleKey: t('screens.daily_report.title'), bodyLines: isLockedMessageLines(reportDay), inlineKeyboard: await buildDailyReportKeyboard(ctx, reportDay) });
+          return;
+        }
+        const context = await ensureSpecificReportContext(ctx, reportDay.local_date);
+        const routineItem =
+          (data.itemId && context.items.find((i) => i.id === data.itemId)) ||
+          context.items.find(
+            (i) =>
+              isRoutineParentItem(i) &&
+              ((i.options_json ?? {}) as { routine_id?: string }).routine_id === data.routineId
+          );
+        if (!routineItem) {
+          await renderDailyReportRoot(ctx, reportDay.local_date);
+          return;
+        }
+        const routineId = ((routineItem.options_json ?? {}) as { routine_id?: string }).routine_id;
+        await saveValue({ reportDayId: reportDay.id, item: routineItem, valueJson: { value: true, completed_all: true }, userId: reportDay.user_id });
+        if (routineId) {
+          const taskItems = context.items.filter(
+            (i) => isRoutineTaskItem(i) && ((i.options_json ?? {}) as { routine_id?: string }).routine_id === routineId
+          );
+          for (const task of taskItems) {
+            await saveValue({ reportDayId: reportDay.id, item: task, valueJson: { skipped: true }, userId: reportDay.user_id });
+          }
+        }
         await renderDailyReportRoot(ctx, reportDay.local_date);
         return;
       }
@@ -2745,16 +3539,15 @@ bot.callbackQuery(/^[A-Za-z0-9_-]{8,12}$/, async (ctx) => {
       }
 
       case 'dr.template_new': {
-        try {
-          const { user: u } = await ensureUserAndSettings(ctx);
-          const newTemplate = await createUserTemplate({ userId: u.id, title: t('screens.daily_report.template_new_title') });
-          clearReportContextCache();
-          await renderTemplateEdit(ctx, newTemplate.id);
-          return;
-        } catch (error) {
-          console.error({ scope: 'daily_report', event: 'template_new_failed', error });
-        }
-        await renderTemplatesScreen(ctx);
+        const telegramId = String(ctx.from?.id ?? '');
+        setTemplateCreateFlow(telegramId, { step: 'title' });
+        const backBtn = await makeActionButton(ctx, { label: t('buttons.back'), action: 'dr.templates' });
+        const kb = new InlineKeyboard().text(backBtn.text, backBtn.callback_data);
+        await renderScreen(ctx, {
+          titleKey: t('screens.templates.new_title'),
+          bodyLines: [t('screens.templates.new_prompt')],
+          inlineKeyboard: kb
+        });
         return;
       }
 
@@ -2765,6 +3558,20 @@ bot.callbackQuery(/^[A-Za-z0-9_-]{8,12}$/, async (ctx) => {
           return;
         }
         await renderTemplateItemMenu(ctx, data.templateId, data.itemId);
+        return;
+      }
+      case 'dr.template_help': {
+        const data = (payload as { data?: { templateId?: string; topic?: 'type' | 'category' | 'xp_mode'; itemId?: string; backToItem?: boolean } }).data;
+        if (!data?.templateId || !data.topic) {
+          await renderTemplatesScreen(ctx);
+          return;
+        }
+        await renderTemplateHelp(ctx, {
+          templateId: data.templateId,
+          topic: data.topic,
+          itemId: data.itemId,
+          backToItem: data.backToItem
+        });
         return;
       }
 
@@ -2912,7 +3719,7 @@ bot.callbackQuery(/^[A-Za-z0-9_-]{8,12}$/, async (ctx) => {
         if (state && state.mode === 'create' && state.templateId === data.templateId) {
           const category = data.category === 'none' ? null : data.category;
           setTemplateItemFlow(telegramId, { ...state, draft: { ...state.draft, category }, step: 'xp_mode' });
-          await promptXpModeSelection(ctx, { templateId: data.templateId });
+          await promptXpModeSelection(ctx, { templateId: data.templateId, itemType: state.draft.itemType });
           return;
         }
         if (data.itemId) {
@@ -2954,9 +3761,15 @@ bot.callbackQuery(/^[A-Za-z0-9_-]{8,12}$/, async (ctx) => {
           templateId: data.templateId,
           itemId: data.itemId,
           step: 'xp_mode',
-          draft: { xpMode: item.xp_mode ?? 'none', xpValue: item.xp_value ?? 0, optionsJson: item.options_json ?? {} }
+          draft: {
+            xpMode: ((item.xp_mode as TemplateItemFlow['draft']['xpMode']) ?? 'none') as TemplateItemFlow['draft']['xpMode'],
+            xpValue: item.xp_value ?? 0,
+            xpMaxPerDay: (item as ReportItemRow & { xp_max_per_day?: number | null }).xp_max_per_day ?? null,
+            optionsJson: item.options_json ?? {},
+            itemType: item.item_type as TemplateItemFlow['draft']['itemType']
+          }
         });
-        await promptXpModeSelection(ctx, { templateId: data.templateId, itemId: data.itemId, backToItem: true });
+        await promptXpModeSelection(ctx, { templateId: data.templateId, itemId: data.itemId, backToItem: true, itemType: item.item_type });
         return;
       }
 
@@ -2968,16 +3781,18 @@ bot.callbackQuery(/^[A-Za-z0-9_-]{8,12}$/, async (ctx) => {
         }
         const telegramId = String(ctx.from?.id ?? '');
         const state = userStates.get(telegramId)?.templateItemFlow;
+        const itemType = state?.draft.itemType;
         const chosenMode = data.xpMode === 'time' ? 'per_minute' : data.xpMode;
+        const normalizedXpMode = normalizeXpModeForItemType(itemType, chosenMode) ?? 'none';
         const nextDraft = { ...(state?.draft ?? {}), xpMode: chosenMode, optionsJson: chosenMode === 'per_minute' ? { per: 'minute' } : {} };
 
         if (state && state.mode === 'create' && state.templateId === data.templateId) {
-          if (chosenMode === 'none') {
-            setTemplateItemFlow(telegramId, { ...state, draft: { ...nextDraft, xpValue: null, xpMaxPerDay: null }, step: 'xp_mode' });
-            await finalizeNewTemplateItem(ctx, telegramId, { ...state, draft: { ...nextDraft, xpValue: null, xpMaxPerDay: null } });
+          if (normalizedXpMode === 'none') {
+            setTemplateItemFlow(telegramId, { ...state, draft: { ...nextDraft, xpMode: 'none', xpValue: null, xpMaxPerDay: null }, step: 'xp_mode' });
+            await finalizeNewTemplateItem(ctx, telegramId, { ...state, draft: { ...nextDraft, xpMode: 'none', xpValue: null, xpMaxPerDay: null } });
             return;
           }
-          setTemplateItemFlow(telegramId, { ...state, draft: nextDraft, step: 'xp_value' });
+          setTemplateItemFlow(telegramId, { ...state, draft: { ...nextDraft, xpMode: normalizedXpMode }, step: 'xp_value' });
           await promptXpValueInput(ctx, { templateId: data.templateId });
           return;
         }
@@ -2991,7 +3806,9 @@ bot.callbackQuery(/^[A-Za-z0-9_-]{8,12}$/, async (ctx) => {
             return;
           }
 
-          if (chosenMode === 'none') {
+          const normalizedForExisting = normalizeXpModeForItemType(item.item_type, normalizedXpMode);
+
+          if (normalizedForExisting === 'none') {
             await updateItem(data.itemId, { xp_mode: null, xp_value: null, xp_max_per_day: null, options_json: {} });
             clearTemplateItemFlow(telegramId);
             clearReportContextCache();
@@ -3004,7 +3821,7 @@ bot.callbackQuery(/^[A-Za-z0-9_-]{8,12}$/, async (ctx) => {
             templateId: data.templateId,
             itemId: data.itemId,
             step: 'xp_value',
-            draft: nextDraft
+            draft: { ...nextDraft, xpMode: normalizedForExisting }
           });
           await promptXpValueInput(ctx, { templateId: data.templateId, itemId: data.itemId, backToItem: true });
           return;
@@ -3111,13 +3928,24 @@ bot.callbackQuery(/^[A-Za-z0-9_-]{8,12}$/, async (ctx) => {
         return;
       }
 
+      case 'dr.history_open_day': {
+        const reportDayId = (payload as { data?: { reportDayId?: string } }).data?.reportDayId;
+        if (!reportDayId) {
+          await renderHistory(ctx);
+          return;
+        }
+        await renderHistoryDay(ctx, reportDayId);
+        return;
+      }
+
       case 'hist.open': {
         const localDate = (payload as { data?: { localDate?: string } }).data?.localDate;
         if (!localDate) {
           await renderHistory(ctx);
           return;
         }
-        await renderHistoryDay(ctx, localDate);
+        const { reportDay } = await ensureSpecificReportContext(ctx, localDate);
+        await renderHistoryDay(ctx, reportDay.id);
         return;
       }
 
@@ -3221,6 +4049,34 @@ bot.on('message:text', async (ctx: Context) => {
     return;
   }
 
+  if (state.templateCreate) {
+    const trimmed = text.trim();
+    const telegramId = stateKey;
+    if (!trimmed) {
+      const backBtn = await makeActionButton(ctx, { label: t('buttons.back'), action: 'dr.templates' });
+      const kb = new InlineKeyboard().text(backBtn.text, backBtn.callback_data);
+      await renderScreen(ctx, {
+        titleKey: t('screens.templates.new_title'),
+        bodyLines: [t('screens.templates.new_prompt')],
+        inlineKeyboard: kb
+      });
+      return;
+    }
+    try {
+      const { user: u } = await ensureUserAndSettings(ctx);
+      const newTemplate = await createUserTemplate({ userId: u.id, title: trimmed });
+      clearTemplateCreateFlow(telegramId);
+      clearReportContextCache();
+      await renderTemplateEdit(ctx, newTemplate.id);
+      return;
+    } catch (error) {
+      console.error({ scope: 'daily_report', event: 'template_new_failed', error, title: trimmed });
+      clearTemplateCreateFlow(telegramId);
+      await renderTemplatesScreen(ctx);
+      return;
+    }
+  }
+
   if (state.templateRename) {
     const { templateId } = state.templateRename;
     const trimmed = text.trim();
@@ -3293,7 +4149,7 @@ bot.on('message:text', async (ctx: Context) => {
       }
       if (routineFlow.mode === 'create') {
         const draft = { ...routineFlow.draft, xpValue: xpVal };
-        if (draft.xpMode === 'per_minute') {
+        if (draft.xpMode === 'per_minute' || draft.xpMode === 'per_number') {
           setRoutineFlow(telegramId, { ...routineFlow, draft, step: 'xp_max' });
           await promptRoutineXpMax(ctx, {});
           return;
@@ -3304,13 +4160,13 @@ bot.on('message:text', async (ctx: Context) => {
       }
       if (routineFlow.mode === 'edit' && routineFlow.routineId) {
         const xpMode = routineFlow.draft.xpMode ?? 'none';
-        if (xpMode === 'per_minute') {
+        if (xpMode === 'per_minute' || xpMode === 'per_number') {
           const draft = { ...routineFlow.draft, xpValue: xpVal };
           setRoutineFlow(telegramId, { ...routineFlow, draft, step: 'xp_max' });
           await promptRoutineXpMax(ctx, { routineId: routineFlow.routineId });
           return;
         }
-        await updateRoutine(routineFlow.routineId, { xpMode, xpValue: xpVal, xpMaxPerDay: null });
+        await updateRoutine(routineFlow.routineId, { xpMode, xpValue: xpVal, xpMaxPerDay: xpMode === 'none' ? null : routineFlow.draft.xpMaxPerDay ?? null });
         clearRoutineFlow(telegramId);
         clearReportContextCache();
         await renderRoutineDetails(ctx, routineFlow.routineId, t('screens.routines.saved'));
@@ -3334,6 +4190,73 @@ bot.on('message:text', async (ctx: Context) => {
         await renderRoutineDetails(ctx, routineFlow.routineId, t('screens.routines.saved'));
         return;
       }
+    }
+  }
+
+  const routineTaskFlow = state.routineTaskFlow;
+  if (routineTaskFlow) {
+    const telegramId = stateKey;
+    const saveTask = async (draft: RoutineTaskFlow['draft']): Promise<void> => {
+      const xpMode = normalizeXpModeForItemType(draft.itemType, draft.xpMode ?? null) ?? 'none';
+      const payload = {
+        title: draft.title ?? t('screens.routine_tasks.default_title'),
+        description: draft.description ?? null,
+        itemType: draft.itemType ?? 'boolean',
+        xpMode,
+        xpValue: xpMode === 'none' ? null : draft.xpValue ?? 0,
+        xpMaxPerDay: xpMode === 'per_minute' || xpMode === 'per_number' ? draft.xpMaxPerDay ?? null : null
+      };
+      if (routineTaskFlow.mode === 'edit' && routineTaskFlow.taskId) {
+        await updateRoutineTask(routineTaskFlow.taskId, payload);
+      } else {
+        await createRoutineTask({ routineId: routineTaskFlow.routineId, ...payload });
+      }
+      clearRoutineTaskFlow(telegramId);
+      clearReportContextCache();
+      await renderRoutineTasks(ctx, routineTaskFlow.routineId, t('screens.routines.saved'));
+    };
+
+    if (routineTaskFlow.step === 'title') {
+      if (!text) {
+        await promptRoutineTaskTitle(ctx, { routineId: routineTaskFlow.routineId, taskId: routineTaskFlow.taskId });
+        return;
+      }
+      const draft = { ...routineTaskFlow.draft, title: text };
+      setRoutineTaskFlow(telegramId, { ...routineTaskFlow, draft, step: 'description' });
+      await promptRoutineTaskDescription(ctx, { routineId: routineTaskFlow.routineId, taskId: routineTaskFlow.taskId });
+      return;
+    }
+
+    if (routineTaskFlow.step === 'description') {
+      const description = text === '-' || text.toLowerCase() === '/skip' ? null : text;
+      const draft = { ...routineTaskFlow.draft, description };
+      setRoutineTaskFlow(telegramId, { ...routineTaskFlow, draft, step: 'type' });
+      await promptRoutineTaskType(ctx, { routineId: routineTaskFlow.routineId, taskId: routineTaskFlow.taskId });
+      return;
+    }
+
+    if (routineTaskFlow.step === 'xp_value') {
+      const xpVal = Number(text);
+      if (!Number.isInteger(xpVal)) {
+        await ctx.reply(t('screens.daily_report.invalid_number'));
+        return;
+      }
+      const xpMode = routineTaskFlow.draft.xpMode ?? 'none';
+      if (xpMode === 'per_minute' || xpMode === 'per_number') {
+        const draft = { ...routineTaskFlow.draft, xpValue: xpVal };
+        setRoutineTaskFlow(telegramId, { ...routineTaskFlow, draft, step: 'xp_max' });
+        await promptRoutineTaskXpMax(ctx, { routineId: routineTaskFlow.routineId, taskId: routineTaskFlow.taskId });
+        return;
+      }
+      await saveTask({ ...routineTaskFlow.draft, xpValue: xpVal });
+      return;
+    }
+
+    if (routineTaskFlow.step === 'xp_max') {
+      const maxVal = Number(text);
+      const xpMax = Number.isInteger(maxVal) && maxVal > 0 ? maxVal : null;
+      await saveTask({ ...routineTaskFlow.draft, xpMaxPerDay: xpMax });
+      return;
     }
   }
 
@@ -3395,7 +4318,7 @@ bot.on('message:text', async (ctx: Context) => {
           return;
         }
         const xpMode = templateFlow.draft.xpMode ?? 'none';
-        if (xpMode === 'per_minute') {
+        if (xpMode === 'per_minute' || xpMode === 'per_number') {
           const draft = { ...templateFlow.draft, xpValue: xpVal };
           setTemplateItemFlow(telegramId, { ...templateFlow, draft, step: 'xp_max' });
           await promptXpMaxInput(ctx, { templateId: templateFlow.templateId, itemId: templateFlow.itemId });
@@ -3415,7 +4338,9 @@ bot.on('message:text', async (ctx: Context) => {
         const xpModeNormalized = templateFlow.draft.xpMode && templateFlow.draft.xpMode !== 'none' ? templateFlow.draft.xpMode : null;
         const xpValue = xpModeNormalized ? xpVal : null;
         const optionsJson = xpModeNormalized === 'per_minute' ? templateFlow.draft.optionsJson ?? { per: 'minute' } : {};
-        await updateItem(templateFlow.itemId, { xp_mode: xpModeNormalized, xp_value: xpValue, xp_max_per_day: null, options_json: optionsJson });
+        const xpMaxPerDay =
+          xpModeNormalized === 'per_minute' || xpModeNormalized === 'per_number' ? templateFlow.draft.xpMaxPerDay ?? null : null;
+        await updateItem(templateFlow.itemId, { xp_mode: xpModeNormalized, xp_value: xpValue, xp_max_per_day: xpMaxPerDay, options_json: optionsJson });
         clearTemplateItemFlow(telegramId);
         clearReportContextCache();
         await renderTemplateItemMenu(ctx, templateFlow.templateId, templateFlow.itemId, t('screens.daily_report.item_saved'));

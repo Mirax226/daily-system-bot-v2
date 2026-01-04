@@ -87,15 +87,19 @@
       "ask_xp_mode_none": "No XP",
       "ask_xp_mode_fixed": "Fixed XP",
       "ask_xp_mode_time": "Time-based (per minute)",
+      "ask_xp_mode_number": "Number-based (per unit)",
       "ask_xp_value": "Send XP value (integer).",
       "ask_xp_max_per_day": "Send max XP per day (0 for unlimited).",
       "duplicate_key": "That key is already used in this template. Please send another key.",
       "templates_rename_title": "Rename template",
       "templates_rename_prompt": "Send a new name for this template.",
       "routine_label": "🔁 Routine – {title}",
+      "routine_task_label": "🔁 {routine}{title}",
       "history_title": "Daily Report History",
       "history_range": "Range: {range}",
       "history_no_results": "No reports found in this range.",
+      "history_detail_title": "📅 {date} • {template}",
+      "history_detail_hint": "Review the full day details below.",
       "today_locked_flag": "Today is locked (read-only).",
       "yesterday_title": "Yesterday's report ({date})",
       "yesterday_closed": "Yesterday has been closed. Remaining items were skipped.",
@@ -104,7 +108,14 @@
       "none_pending": "No pending items to show.",
       "send_value_as_text": "Or send a value as text.",
       "set_value_for": "Set value for {label}",
-      "today_locked_note": "Today is locked (read-only)."
+      "today_locked_note": "Today is locked (read-only).",
+      "routine_detail_title": "🔁 Routine: {title}",
+      "routine_detail_hint": "Completed tasks: {completed}/{total}. Mark all done or open details.",
+      "routine_tasks_title": "🧩 Routine tasks: {title}",
+      "routine_tasks_hint": "Tap a task to view or edit its value.",
+      "value_skipped": "⏭ Skipped",
+      "value_yes": "✅ Yes",
+      "value_no": "❌ No"
     },
     "settings": {
       "title": "Settings",
@@ -168,8 +179,10 @@
       "no_description": "No description.",
       "type_boolean": "👍 / 👎 Yes / No (routine)",
       "type_duration": "⏳ Duration (minutes)",
+      "type_number": "🔢 Number",
       "xp_fixed": "⭐ Fixed XP: {xp}",
       "xp_per_minute": "⏱ {xp} XP per minute {max}",
+      "xp_per_number": "🔢 {xp} XP per unit {max}",
       "xp_max_suffix": "(max {xp} per day)",
       "xp_none": "🚫 No XP",
       "delete_confirm": "Delete this routine?",
@@ -182,11 +195,25 @@
       "choose_xp_mode": "Choose XP mode:",
       "xp_mode_fixed": "⭐ Fixed XP",
       "xp_mode_time": "⏱ Time XP (per minute)",
+      "xp_mode_number": "🔢 XP per number",
       "xp_mode_none": "🚫 No XP",
       "ask_fixed_xp": "Send XP amount for this routine.",
+      "ask_number_xp": "Send XP per unit.",
       "ask_time_xp": "Send XP per minute.",
       "ask_time_xp_max": "Optional: send max XP per day (0 for unlimited).",
       "confirm_title": "Save routine \"{title}\"?"
+    },
+    "routine_tasks": {
+      "title": "🧩 Tasks for {title}",
+      "title_short": "🧩 Routine tasks",
+      "list_empty": "No tasks yet.",
+      "add_title": "Add a task",
+      "add_prompt": "Send a title for this task.",
+      "add_description": "Send a description (or /skip).",
+      "edit_title": "Edit task",
+      "choose_type": "Choose task type:",
+      "delete_confirm": "Delete this task?",
+      "default_title": "New task"
     },
     "todo": {
       "title": "To-Do List",
@@ -227,7 +254,25 @@
       "none": "No templates yet.",
       "details_title": "Template details",
       "new_coming_soon": "Template creation is coming soon.",
-      "default_title": "Default Template"
+      "default_title": "Default Template",
+      "new_title": "🆕 New Template",
+      "new_prompt": "Send a name for the new template.",
+      "rename_title": "✏️ Rename template",
+      "rename_prompt": "Send a new name for this template."
+    },
+    "form_builder": {
+      "type_boolean_label": "✅ Yes / No",
+      "type_number_label": "🔢 Number",
+      "type_time_label": "⏰ Time (HH:MM)",
+      "type_duration_label": "⏳ Duration (minutes)",
+      "type_text_label": "📝 Text",
+      "help_button": "ℹ️ Help",
+      "help": {
+        "title": "ℹ️ Field help",
+        "type": "Choose the input style. \"Yes/No\", number, or time fields award XP based on their mode.",
+        "category": "Organize items into categories for reporting.",
+        "xp_mode": "XP modes: none, fixed, per minute (time), or per number (counts)."
+      }
     },
     "error_report": {
       "sent": "Thanks! Your report was sent."
@@ -326,6 +371,11 @@
     "routines_edit_type": "🔢 Edit type",
     "routines_edit_xp": "⭐ Edit XP",
     "routines_delete": "🗑 Delete routine",
+    "routine_tasks_manage": "🧩 Edit tasks",
+    "routine_tasks_add": "➕ Add task",
+    "routine_tasks_delete": "🗑 Delete task",
+    "routine_open_tasks": "🧩 Task details",
+    "routine_mark_done": "✅ Routine done",
     "yes_delete": "Yes, delete",
     "debug_inline": "Test button"
   },
