@@ -141,21 +141,31 @@ type BuilderNavigationState = {
   returnStep?: string;
 };
 
+type AwaitingValueState = { reportDayId: string; itemId: string; origin?: 'next' | 'status'; statusFilter?: 'all' | 'not_filled' | 'filled' };
+
+type NumericDraftState = { reportDayId: string; itemId: string; value: number; unit?: 'minutes' | 'seconds' };
+
+type TimeDraftState = {
+  reportDayId: string;
+  itemId: string;
+  hour12: number;
+  minuteTens: number;
+  minuteOnes: number;
+  ampm: 'AM' | 'PM';
+  mode?: 'single' | 'start_end';
+  phase?: 'start' | 'end';
+  startValue?: { hhmm: string; minutesTotal: number };
+};
+
 type ReminderlessState = {
-  awaitingValue?: { reportDayId: string; itemId: string };
+  awaitingValue?: AwaitingValueState;
 
   settingsRoutine?: { step: 'label' | 'xp'; label?: string };
 
-  numericDraft?: { reportDayId: string; itemId: string; value: number };
+  numericDraft?: NumericDraftState;
 
-  timeDraft?: {
-    reportDayId: string;
-    itemId: string;
-    hour12: number;
-    minuteTens: number;
-    minuteOnes: number;
-    ampm: 'AM' | 'PM';
-  };
+  timeDraft?: TimeDraftState;
+  statusFilter?: { reportDayId: string; filter: 'all' | 'not_filled' | 'filled' };
 
   rewardEdit?: {
     mode: 'create' | 'edit';
@@ -703,6 +713,43 @@ const valueIsTrue = (value: unknown): boolean => {
   return false;
 };
 
+const parseNonNegativeNumber = (input: string): number | null => {
+  const trimmed = input.trim();
+  const n = Number(trimmed);
+  if (!Number.isFinite(n)) return null;
+  if (n < 0) return null;
+  return n;
+};
+
+const convertToMinutes = (value: number, unit: 'minutes' | 'seconds' = 'minutes'): { minutes: number; seconds?: number } => {
+  if (!Number.isFinite(value) || value < 0) return { minutes: 0 };
+  if (unit === 'seconds') {
+    const seconds = Math.max(0, Math.round(value));
+    return { minutes: seconds / 60, seconds };
+  }
+  return { minutes: value };
+};
+
+const minutesFromHhmm = (hhmm: string): number | null => {
+  const parsed = parseTimeHhmm(hhmm);
+  if (!parsed) return null;
+  return parsed.minutes;
+};
+
+const formatDurationValue = (minutes: number, seconds?: number): string => {
+  const safeMinutes = Number.isFinite(minutes) ? minutes : 0;
+  const totalSeconds = seconds != null && Number.isFinite(seconds) ? Math.max(0, Math.round(seconds)) : Math.max(0, Math.round(safeMinutes * 60));
+  const hours = Math.floor(totalSeconds / 3600);
+  const remainder = totalSeconds % 3600;
+  const mins = Math.floor(remainder / 60);
+  const secs = remainder % 60;
+  const parts: string[] = [];
+  if (hours > 0) parts.push(`${hours}${t('screens.daily_report.duration_unit_hour')}`);
+  if (mins > 0) parts.push(`${mins}${t('screens.daily_report.duration_unit_minute')}`);
+  if (secs > 0 || parts.length === 0) parts.push(`${secs}${t('screens.daily_report.duration_unit_second')}`);
+  return parts.join(' ');
+};
+
 const formatDisplayValue = (item: ReportItemRow, valueJson: Record<string, unknown> | null): string => {
   if (!valueJson) return '-';
   if ((valueJson as { skipped?: boolean }).skipped) return t('screens.daily_report.value_skipped');
@@ -712,7 +759,15 @@ const formatDisplayValue = (item: ReportItemRow, valueJson: Record<string, unkno
       return valueIsTrue(value) ? t('screens.daily_report.value_yes') : t('screens.daily_report.value_no');
     case 'time_hhmm':
       return typeof value === 'string' ? value : '-';
-    case 'duration_minutes':
+    case 'duration_minutes': {
+      const minutes = Number((valueJson as { minutes?: number; value?: number }).minutes ?? (valueJson as { value?: number }).value ?? 0);
+      const seconds = Number((valueJson as { seconds?: number }).seconds);
+      const start = (valueJson as { start?: string }).start;
+      const end = (valueJson as { end?: string }).end;
+      const formatted = formatDurationValue(minutes, Number.isFinite(seconds) ? seconds : undefined);
+      if (start && end) return `${start} → ${end} (${formatted})`;
+      return formatted;
+    }
     case 'number':
       return value != null ? String(value) : '-';
     default:
@@ -891,7 +946,11 @@ const syncRoutineItemsForTemplate = async (
   return result;
 };
 
-const buildDailyReportKeyboard = async (ctx: Context, reportDay: ReportDayRow): Promise<InlineKeyboard> => {
+const buildDailyReportKeyboard = async (
+  ctx: Context,
+  reportDay: ReportDayRow,
+  options?: { items?: ReportItemRow[]; statuses?: { item: ReportItemRow; filled: boolean; skipped: boolean }[] }
+): Promise<InlineKeyboard> => {
   const statusBtn = await makeActionButton(ctx, { label: t('buttons.dr_today_status'), action: 'dr.status', data: { reportDayId: reportDay.id, filter: 'all' } });
   const backBtn = await makeActionButton(ctx, { label: t('buttons.back'), action: 'dr.back' });
 
@@ -901,23 +960,30 @@ const buildDailyReportKeyboard = async (ctx: Context, reportDay: ReportDayRow): 
     return new InlineKeyboard().text(statusBtn.text, statusBtn.callback_data).row().text(unlockBtn.text, unlockBtn.callback_data).row().text(backBtn.text, backBtn.callback_data);
   }
 
-  const nextBtn = await makeActionButton(ctx, { label: t('buttons.dr_fill_next'), action: 'dr.next', data: { reportDayId: reportDay.id } });
+  let hasPending = true;
+  try {
+    const items = options?.items ?? (await ensureContextByReportDayId(ctx, reportDay.id)).items;
+    const statuses = options?.statuses ?? (await listCompletionStatus(reportDay.id, items));
+    hasPending = statuses.some((s) => !s.filled && !s.skipped);
+  } catch (error) {
+    console.warn({ scope: 'daily_report', event: 'keyboard_pending_check_failed', reportDayId: reportDay.id, error });
+  }
+
+  const nextBtn = hasPending ? await makeActionButton(ctx, { label: t('buttons.dr_fill_next'), action: 'dr.next', data: { reportDayId: reportDay.id } }) : null;
   const templatesBtn = await makeActionButton(ctx, { label: t('buttons.dr_templates'), action: 'dr.templates', data: { reportDayId: reportDay.id } });
   const historyBtn = await makeActionButton(ctx, { label: t('buttons.dr_history'), action: 'dr.history', data: { reportDayId: reportDay.id } });
   const lockBtn = await makeActionButton(ctx, { label: t('buttons.dr_lock'), action: 'dr.lock', data: { reportDayId: reportDay.id } });
 
-  return new InlineKeyboard()
-    .text(statusBtn.text, statusBtn.callback_data)
-    .row()
-    .text(nextBtn.text, nextBtn.callback_data)
-    .row()
-    .text(templatesBtn.text, templatesBtn.callback_data)
+  const kb = new InlineKeyboard().text(statusBtn.text, statusBtn.callback_data).row();
+  if (nextBtn) kb.text(nextBtn.text, nextBtn.callback_data).row();
+  kb.text(templatesBtn.text, templatesBtn.callback_data)
     .row()
     .text(historyBtn.text, historyBtn.callback_data)
     .row()
     .text(lockBtn.text, lockBtn.callback_data)
     .row()
     .text(backBtn.text, backBtn.callback_data);
+  return kb;
 };
 
 const ensureReportContext = async (ctx: Context): Promise<{ userId: string; reportDay: ReportDayRow; items: ReportItemRow[] }> => {
@@ -969,6 +1035,18 @@ const ensureSpecificReportContext = async (
 
   reportContextCache.set(cacheKey, { reportDay, items });
   return { userId: user.id, reportDay, items };
+};
+
+const ensureContextByReportDayId = async (ctx: Context, reportDayId: string): Promise<{ reportDay: ReportDayRow; items: ReportItemRow[] }> => {
+  const cached = [...reportContextCache.values()].find((v) => v.reportDay.id === reportDayId);
+  if (cached) return cached;
+  const reportDayRow = await getReportDayById(reportDayId);
+  if (reportDayRow) {
+    const context = await ensureSpecificReportContext(ctx, reportDayRow.local_date);
+    return { reportDay: context.reportDay, items: context.items };
+  }
+  const context = await ensureReportContext(ctx);
+  return { reportDay: context.reportDay, items: context.items };
 };
 
 const isLockedMessageLines = (reportDay: ReportDayRow): string[] => {
@@ -1455,15 +1533,6 @@ const parseTimeHhmm = (input: string): { hhmm: string; minutes: number } | null 
   return { hhmm: `${hh}:${mm}`, minutes: total };
 };
 
-const parseDurationMinutes = (input: string): number | null => {
-  const trimmed = input.trim();
-  const n = Number(trimmed);
-  if (!Number.isFinite(n)) return null;
-  if (!Number.isInteger(n)) return null;
-  if (n <= 0) return null;
-  return n;
-};
-
 const timeDraftToDisplay = (draft: {
   hour12: number;
   minuteTens: number;
@@ -1490,14 +1559,15 @@ const renderTimePicker = async (
   ctx: Context,
   reportDayId: string,
   item: ReportItemRow,
-  draft: { hour12: number; minuteTens: number; minuteOnes: number; ampm: 'AM' | 'PM' }
+  draft: { hour12: number; minuteTens: number; minuteOnes: number; ampm: 'AM' | 'PM' },
+  opts?: { title?: string; currentLabel?: string; hint?: string }
 ): Promise<void> => {
   const { label: timeLabel } = timeDraftToDisplay(draft);
 
   const lines = [
-    t('screens.daily_report.time_title', { label: item.label }),
-    t('screens.daily_report.time_current', { value: timeLabel }),
-    t('screens.daily_report.time_hint')
+    opts?.title ?? t('screens.daily_report.time_title', { label: item.label }),
+    opts?.currentLabel ?? t('screens.daily_report.time_current', { value: timeLabel }),
+    opts?.hint ?? t('screens.daily_report.time_hint')
   ];
 
   const kb = new InlineKeyboard();
@@ -1543,19 +1613,42 @@ const renderTimePicker = async (
   await renderScreen(ctx, { titleKey: t('screens.daily_report.title'), bodyLines: lines, inlineKeyboard: kb });
 };
 
-const renderNumericInput = async (ctx: Context, reportDayId: string, item: ReportItemRow, value: number): Promise<void> => {
+const renderNumericInput = async (ctx: Context, reportDayId: string, item: ReportItemRow, draft: NumericDraftState): Promise<void> => {
+  const unit = draft.unit ?? 'minutes';
+  const formattedValue =
+    item.item_type === 'duration_minutes'
+      ? formatDurationValue(convertToMinutes(draft.value, unit).minutes, unit === 'seconds' ? draft.value : undefined)
+      : draft.value;
   const lines = [
     t('screens.daily_report.numeric_title', { label: item.label }),
-    t('screens.daily_report.numeric_current', { value }),
+    t('screens.daily_report.numeric_current', { value: formattedValue }),
     t('screens.daily_report.numeric_hint')
   ];
+  if (item.item_type === 'duration_minutes') {
+    const unitLabel = unit === 'seconds' ? t('screens.daily_report.unit_seconds') : t('screens.daily_report.unit_minutes');
+    lines.splice(2, 0, t('screens.daily_report.numeric_units', { unit: unitLabel }));
+  }
 
   const kb = new InlineKeyboard();
 
-  const deltasRow1 = [-15, -5, 5, 15];
-  for (const delta of deltasRow1) {
+  if (item.item_type === 'duration_minutes') {
+    const minutesBtn = await makeActionButton(ctx, {
+      label: `${unit === 'minutes' ? '✅ ' : ''}${t('screens.daily_report.unit_minutes')}`,
+      action: 'dr.num_unit',
+      data: { reportDayId, itemId: item.id, unit: 'minutes' }
+    });
+    const secondsBtn = await makeActionButton(ctx, {
+      label: `${unit === 'seconds' ? '✅ ' : ''}${t('screens.daily_report.unit_seconds')}`,
+      action: 'dr.num_unit',
+      data: { reportDayId, itemId: item.id, unit: 'seconds' }
+    });
+    kb.text(minutesBtn.text, minutesBtn.callback_data).text(secondsBtn.text, secondsBtn.callback_data).row();
+  }
+
+  const deltasRowPositive = [50, 10, 5, 2, 1];
+  for (const delta of deltasRowPositive) {
     const btn = await makeActionButton(ctx, {
-      label: delta > 0 ? `+${delta}` : `${delta}`,
+      label: `+${delta}`,
       action: 'dr.num_delta',
       data: { reportDayId, itemId: item.id, delta }
     });
@@ -1563,9 +1656,9 @@ const renderNumericInput = async (ctx: Context, reportDayId: string, item: Repor
   }
   kb.row();
 
-  const deltasRow2 = [30, 60];
-  for (const delta of deltasRow2) {
-    const btn = await makeActionButton(ctx, { label: `+${delta}`, action: 'dr.num_delta', data: { reportDayId, itemId: item.id, delta } });
+  const deltasRowNegative = [-1, -2, -5, -10, -50];
+  for (const delta of deltasRowNegative) {
+    const btn = await makeActionButton(ctx, { label: `${delta}`, action: 'dr.num_delta', data: { reportDayId, itemId: item.id, delta } });
     kb.text(btn.text, btn.callback_data);
   }
   kb.row();
@@ -1576,6 +1669,21 @@ const renderNumericInput = async (ctx: Context, reportDayId: string, item: Repor
 
   kb.text(saveBtn.text, saveBtn.callback_data).row();
   kb.text(skipBtn.text, skipBtn.callback_data).text(backBtn.text, backBtn.callback_data);
+
+  await renderScreen(ctx, { titleKey: t('screens.daily_report.title'), bodyLines: lines, inlineKeyboard: kb });
+};
+
+const renderBooleanInput = async (ctx: Context, reportDayId: string, item: ReportItemRow): Promise<void> => {
+  const lines = [t('screens.daily_report.boolean_question', { label: item.label })];
+  const kb = new InlineKeyboard();
+
+  const yesBtn = await makeActionButton(ctx, { label: t('screens.daily_report.boolean_yes'), action: 'dr.boolean', data: { reportDayId, itemId: item.id, value: true } });
+  const noBtn = await makeActionButton(ctx, { label: t('screens.daily_report.boolean_no'), action: 'dr.boolean', data: { reportDayId, itemId: item.id, value: false } });
+  const skipBtn = await makeActionButton(ctx, { label: t('buttons.skip'), action: 'dr.skip', data: { reportDayId, itemId: item.id } });
+  const cancelBtn = await makeActionButton(ctx, { label: t('buttons.cancel'), action: 'dr.menu', data: { reportDayId } });
+
+  kb.text(yesBtn.text, yesBtn.callback_data).text(noBtn.text, noBtn.callback_data).row();
+  kb.text(skipBtn.text, skipBtn.callback_data).text(cancelBtn.text, cancelBtn.callback_data);
 
   await renderScreen(ctx, { titleKey: t('screens.daily_report.title'), bodyLines: lines, inlineKeyboard: kb });
 };
@@ -1649,9 +1757,20 @@ const renderRoutineDailyEntry = async (ctx: Context, reportDay: ReportDayRow, ro
   await renderScreen(ctx, { titleKey: t('screens.daily_report.title'), bodyLines: lines, inlineKeyboard: kb });
 };
 
-const promptForItem = async (ctx: Context, reportDay: ReportDayRow, item: ReportItemRow) => {
+const promptForItem = async (
+  ctx: Context,
+  reportDay: ReportDayRow,
+  item: ReportItemRow,
+  opts?: { origin?: 'next' | 'status'; statusFilter?: 'all' | 'not_filled' | 'filled' }
+) => {
   const telegramId = String(ctx.from?.id ?? '');
   const existing = userStates.get(telegramId) ?? {};
+  const awaitingValue: AwaitingValueState = {
+    reportDayId: reportDay.id,
+    itemId: item.id,
+    origin: opts?.origin,
+    statusFilter: opts?.statusFilter
+  };
 
   if (reportDay.locked) {
     await renderScreen(ctx, {
@@ -1663,8 +1782,17 @@ const promptForItem = async (ctx: Context, reportDay: ReportDayRow, item: Report
   }
 
   if (item.item_type === 'time_hhmm') {
-    const initialDraft = { reportDayId: reportDay.id, itemId: item.id, hour12: 10, minuteTens: 0, minuteOnes: 0, ampm: 'PM' as const };
-    userStates.set(telegramId, { ...existing, awaitingValue: { reportDayId: reportDay.id, itemId: item.id }, timeDraft: initialDraft });
+    const initialDraft: TimeDraftState = {
+      reportDayId: reportDay.id,
+      itemId: item.id,
+      hour12: 10,
+      minuteTens: 0,
+      minuteOnes: 0,
+      ampm: 'PM',
+      mode: 'single',
+      phase: 'end'
+    };
+    userStates.set(telegramId, { ...existing, awaitingValue, timeDraft: initialDraft });
     await renderTimePicker(ctx, reportDay.id, item, initialDraft);
     return;
   }
@@ -1676,14 +1804,47 @@ const promptForItem = async (ctx: Context, reportDay: ReportDayRow, item: Report
     return;
   }
 
-  if (item.item_type === 'number' || item.item_type === 'duration_minutes') {
-    const draftValue = 0;
-    userStates.set(telegramId, { ...existing, awaitingValue: { reportDayId: reportDay.id, itemId: item.id }, numericDraft: { reportDayId: reportDay.id, itemId: item.id, value: draftValue } });
-    await renderNumericInput(ctx, reportDay.id, item, draftValue);
+  const optionsJson = (item.options_json ?? {}) as { useStartEnd?: boolean };
+  if (item.item_type === 'duration_minutes' && optionsJson.useStartEnd) {
+    const initialDraft: TimeDraftState = {
+      reportDayId: reportDay.id,
+      itemId: item.id,
+      hour12: 10,
+      minuteTens: 0,
+      minuteOnes: 0,
+      ampm: 'AM',
+      mode: 'start_end',
+      phase: 'start'
+    };
+    userStates.set(telegramId, { ...existing, awaitingValue, timeDraft: initialDraft });
+    await renderTimePicker(ctx, reportDay.id, item, initialDraft, {
+      title: t('screens.daily_report.duration_start_title'),
+      currentLabel: t('screens.daily_report.duration_start_current', { value: timeDraftToDisplay(initialDraft).label }),
+      hint: t('screens.daily_report.duration_start_hint', { label: item.label })
+    });
     return;
   }
 
-  userStates.set(telegramId, { ...existing, awaitingValue: { reportDayId: reportDay.id, itemId: item.id } });
+  if (item.item_type === 'number' || item.item_type === 'duration_minutes') {
+    const draftValue = 0;
+    const numericDraft: NumericDraftState = {
+      reportDayId: reportDay.id,
+      itemId: item.id,
+      value: draftValue,
+      unit: item.item_type === 'duration_minutes' ? 'minutes' : undefined
+    };
+    userStates.set(telegramId, { ...existing, awaitingValue, numericDraft });
+    await renderNumericInput(ctx, reportDay.id, item, numericDraft);
+    return;
+  }
+
+  if (item.item_type === 'boolean') {
+    userStates.set(telegramId, { ...existing, awaitingValue });
+    await renderBooleanInput(ctx, reportDay.id, item);
+    return;
+  }
+
+  userStates.set(telegramId, { ...existing, awaitingValue });
 
   const skipBtn = await makeActionButton(ctx, { label: t('buttons.skip'), action: 'dr.skip', data: { reportDayId: reportDay.id, itemId: item.id } });
   const cancelBtn = await makeActionButton(ctx, { label: t('buttons.cancel'), action: 'dr.menu', data: { reportDayId: reportDay.id } });
@@ -1691,6 +1852,32 @@ const promptForItem = async (ctx: Context, reportDay: ReportDayRow, item: Report
   const kb = new InlineKeyboard().text(skipBtn.text, skipBtn.callback_data).row().text(cancelBtn.text, cancelBtn.callback_data);
 
   await renderScreen(ctx, { titleKey: t('screens.daily_report.title'), bodyLines: [t('screens.daily_report.set_value_for', { label: item.label }), t('screens.daily_report.send_value_as_text')], inlineKeyboard: kb });
+};
+
+const continueFlowAfterAction = async (
+  ctx: Context,
+  reportDay: ReportDayRow,
+  origin?: 'next' | 'status',
+  statusFilter?: 'all' | 'not_filled' | 'filled'
+): Promise<void> => {
+  if (origin === 'next') {
+    const context = await ensureContextByReportDayId(ctx, reportDay.id);
+    const statuses = await listCompletionStatus(reportDay.id, context.items);
+    const next = statuses.find((s) => !s.filled && !s.skipped);
+    if (next) {
+      await promptForItem(ctx, context.reportDay, next.item, { origin: 'next' });
+      return;
+    }
+    await renderDailyReportRoot(ctx, reportDay.local_date);
+    return;
+  }
+  if (origin === 'status') {
+    const telegramId = String(ctx.from?.id ?? '');
+    const filter = statusFilter ?? userStates.get(telegramId)?.statusFilter?.filter ?? 'all';
+    await renderDailyStatusWithFilter(ctx, reportDay.id, filter);
+    return;
+  }
+  await renderDailyReportRoot(ctx, reportDay.local_date);
 };
 
 const renderDailyReportRoot = async (ctx: Context, localDate?: string): Promise<void> => {
@@ -1723,7 +1910,7 @@ const renderDailyReportRoot = async (ctx: Context, localDate?: string): Promise<
   const hourNow = Number((local.time || '00:00').split(':')[0] ?? 0);
   const showYesterdayCheck = hourNow >= 0; // always true, but kept for clarity
 
-  const kb = await buildDailyReportKeyboard(ctx, reportDay);
+  const kb = await buildDailyReportKeyboard(ctx, reportDay, { items, statuses });
 
   if (showYesterdayCheck) {
     // Compute yesterday date (YYYY-MM-DD). We do simple date arithmetic in UTC and accept that formatLocalTime is the main source.
@@ -1762,6 +1949,13 @@ const renderDailyStatusWithFilter = async (ctx: Context, reportDayId: string, fi
   const cached = [...reportContextCache.values()].find((v) => v.reportDay.id === reportDayId);
   const reportDay = cached?.reportDay ?? (await getReportDayById(reportDayId)) ?? (await getOrCreateReportDay({ userId: user.id, templateId: (await ensureDefaultTemplate(user.id)).id, localDate: formatLocalTime(user.timezone ?? config.defaultTimezone).date }));
 
+  const telegramId = String(ctx.from?.id ?? '');
+  if (telegramId) {
+    const st = { ...(userStates.get(telegramId) || {}) };
+    st.statusFilter = { reportDayId: reportDay.id, filter };
+    userStates.set(telegramId, st);
+  }
+
   const context = cached ?? (await ensureSpecificReportContext(ctx, reportDay.local_date));
   const items = context.items;
   const statuses = await listCompletionStatus(reportDay.id, items);
@@ -1793,7 +1987,7 @@ const renderDailyStatusWithFilter = async (ctx: Context, reportDayId: string, fi
   for (const status of filtered) {
     const label = `${status.filled ? '✅' : status.skipped ? '⏭' : '⬜️'} ${formatItemLabel(status.item)}`;
     const action = reportDay.locked ? 'noop' : 'dr.item';
-    const btn = await makeActionButton(ctx, { label, action, data: { reportDayId: reportDay.id, itemId: status.item.id } });
+    const btn = await makeActionButton(ctx, { label, action, data: { reportDayId: reportDay.id, itemId: status.item.id, filter } });
     kb.text(btn.text, btn.callback_data).row();
   }
 
@@ -2470,9 +2664,17 @@ const renderHistory = async (ctx: Context, range: '7d' | '30d' = '7d'): Promise<
   if (!days.length) {
     lines.push(t('screens.daily_report.history_no_results'));
   } else {
+    lines.push(t('screens.daily_report.history_open_hint'), '');
     for (const entry of days) {
-      const suffix = entry.day.locked ? ' (locked)' : '';
-      lines.push(`• ${entry.day.local_date}${suffix}`);
+      const lockedSuffix = entry.day.locked ? t('screens.daily_report.history_locked_suffix') : '';
+      lines.push(
+        t('screens.daily_report.history_list_line', {
+          date: entry.day.local_date,
+          completed: entry.completed,
+          total: entry.total,
+          skipped: entry.skipped
+        }) + lockedSuffix
+      );
     }
   }
 
@@ -2519,8 +2721,9 @@ const renderHistoryDay = async (ctx: Context, reportDayId: string): Promise<void
   });
 
   const kb = new InlineKeyboard();
-  const backBtn = await makeActionButton(ctx, { label: t('buttons.back'), action: 'dr.history' });
-  kb.text(backBtn.text, backBtn.callback_data);
+  const backToHistoryBtn = await makeActionButton(ctx, { label: t('buttons.dr_history_back'), action: 'dr.history' });
+  const backBtn = await makeActionButton(ctx, { label: t('buttons.back'), action: 'dr.menu' });
+  kb.text(backToHistoryBtn.text, backToHistoryBtn.callback_data).row().text(backBtn.text, backBtn.callback_data);
 
   // cache warmed
   reportContextCache.set(`${reportDay.user_id}:${reportDay.local_date}`, { reportDay, items: enabledItems });
@@ -2534,7 +2737,7 @@ const handleSaveValue = async (ctx: Context, text: string): Promise<void> => {
   const state = userStates.get(stateKey);
   if (!state?.awaitingValue) return;
 
-  const { reportDayId, itemId } = state.awaitingValue;
+  const { reportDayId, itemId, origin, statusFilter } = state.awaitingValue;
   const cached = [...reportContextCache.values()].find((v) => v.reportDay.id === reportDayId);
 
   let context = cached ?? null;
@@ -2583,34 +2786,48 @@ const handleSaveValue = async (ctx: Context, text: string): Promise<void> => {
     case 'time_hhmm': {
       const parsed = parseTimeHhmm(text);
       if (!parsed) {
-        await renderScreen(ctx, { titleKey: t('screens.daily_report.title'), bodyLines: [t('screens.daily_report.invalid_time')], inlineKeyboard: await buildDailyReportKeyboard(ctx, reportDay) });
+        await renderScreen(ctx, {
+          titleKey: t('screens.daily_report.title'),
+          bodyLines: [t('screens.daily_report.invalid_time')],
+          inlineKeyboard: await buildDailyReportKeyboard(ctx, reportDay, { items })
+        });
         return;
       }
       valueJson = { value: parsed.hhmm, minutes: parsed.minutes };
       break;
     }
     case 'duration_minutes': {
-      const mins = parseDurationMinutes(text);
-      if (mins === null) {
+      const n = parseNonNegativeNumber(text);
+      if (n === null) {
         await renderScreen(ctx, {
           titleKey: t('screens.daily_report.title'),
           bodyLines: [t('screens.daily_report.invalid_duration')],
-          inlineKeyboard: await buildDailyReportKeyboard(ctx, reportDay)
+          inlineKeyboard: await buildDailyReportKeyboard(ctx, reportDay, { items })
         });
         return;
       }
-      valueJson = { value: mins, minutes: mins };
+      const unit = state.numericDraft?.unit ?? 'minutes';
+      const { minutes, seconds } = convertToMinutes(n, unit);
+      valueJson = { value: minutes, minutes, ...(unit === 'seconds' ? { seconds: Math.max(0, Math.round(n)) } : {}) };
       break;
     }
     case 'number': {
-      const n = Number(text.trim());
-      if (!Number.isFinite(n)) {
-        await renderScreen(ctx, { titleKey: t('screens.daily_report.title'), bodyLines: [t('screens.daily_report.invalid_number')], inlineKeyboard: await buildDailyReportKeyboard(ctx, reportDay) });
+      const n = parseNonNegativeNumber(text);
+      if (n === null) {
+        await renderScreen(ctx, {
+          titleKey: t('screens.daily_report.title'),
+          bodyLines: [t('screens.daily_report.invalid_number')],
+          inlineKeyboard: await buildDailyReportKeyboard(ctx, reportDay, { items })
+        });
         return;
       }
       const isPerMinute = ['per_minute', 'time'].includes(item.xp_mode ?? '');
       const isPerNumber = (item.xp_mode ?? '') === 'per_number';
       valueJson = { value: n, number: n, ...(isPerMinute ? { minutes: n } : {}), ...(isPerNumber ? { units: n } : {}) };
+      break;
+    }
+    case 'boolean': {
+      valueJson = { value: valueIsTrue(text) };
       break;
     }
     default:
@@ -2635,7 +2852,7 @@ const handleSaveValue = async (ctx: Context, text: string): Promise<void> => {
   delete nextState.timeDraft;
   userStates.set(stateKey, nextState);
 
-  await renderDailyReportRoot(ctx, reportDay.local_date);
+  await continueFlowAfterAction(ctx, reportDay, origin, statusFilter);
 };
 
 const renderSettingsRoot = async (ctx: Context): Promise<void> => {
@@ -2717,7 +2934,7 @@ bot.callbackQuery(/^[A-Za-z0-9_-]{8,12}$/, async (ctx) => {
         await renderDailyReportRoot(ctx);
         return;
       case 'dr.back':
-        await renderDailyReportRoot(ctx);
+        await renderDashboard(ctx);
         return;
       case 'nav.reportcar':
         await renderReportcar(ctx);
@@ -3361,12 +3578,12 @@ bot.callbackQuery(/^[A-Za-z0-9_-]{8,12}$/, async (ctx) => {
           await renderScreen(ctx, { titleKey: t('screens.daily_report.title'), bodyLines: [t('screens.daily_report.all_done')], inlineKeyboard: await buildDailyReportKeyboard(ctx, reportDay) });
           return;
         }
-        await promptForItem(ctx, reportDay, next.item);
+        await promptForItem(ctx, reportDay, next.item, { origin: 'next' });
         return;
       }
 
       case 'dr.item': {
-        const data = (payload as { data?: { reportDayId?: string; itemId?: string } }).data;
+        const data = (payload as { data?: { reportDayId?: string; itemId?: string; filter?: 'all' | 'not_filled' | 'filled' } }).data;
         const reportDayId = data?.reportDayId;
         const itemId = data?.itemId;
         if (!reportDayId || !itemId) {
@@ -3392,7 +3609,7 @@ bot.callbackQuery(/^[A-Za-z0-9_-]{8,12}$/, async (ctx) => {
           await ctx.answerCallbackQuery({ text: t('errors.item_not_found'), show_alert: true });
           return;
         }
-        await promptForItem(ctx, reportDay, item);
+        await promptForItem(ctx, reportDay, item, data?.filter ? { origin: 'status', statusFilter: data.filter } : undefined);
         return;
       }
 
@@ -3452,7 +3669,21 @@ bot.callbackQuery(/^[A-Za-z0-9_-]{8,12}$/, async (ctx) => {
           await renderScreen(ctx, { titleKey: t('screens.daily_report.title'), bodyLines: isLockedMessageLines(reportDay), inlineKeyboard: await buildDailyReportKeyboard(ctx, reportDay) });
           return;
         }
-        await renderTimePicker(ctx, reportDayId, item, nextDraft);
+        const pickerOpts =
+          nextDraft.mode === 'start_end'
+            ? nextDraft.phase === 'start'
+              ? {
+                  title: t('screens.daily_report.duration_start_title'),
+                  currentLabel: t('screens.daily_report.duration_start_current', { value: timeDraftToDisplay(nextDraft).label }),
+                  hint: t('screens.daily_report.duration_start_hint', { label: item.label })
+                }
+              : {
+                  title: t('screens.daily_report.duration_end_title'),
+                  currentLabel: t('screens.daily_report.duration_end_current', { value: timeDraftToDisplay(nextDraft).label }),
+                  hint: t('screens.daily_report.duration_end_hint', { start: nextDraft.startValue?.hhmm ?? '' })
+                }
+            : undefined;
+        await renderTimePicker(ctx, reportDayId, item, nextDraft, pickerOpts);
         return;
       }
 
@@ -3471,7 +3702,61 @@ bot.callbackQuery(/^[A-Za-z0-9_-]{8,12}$/, async (ctx) => {
           return;
         }
 
+        const context = await ensureContextByReportDayId(ctx, reportDayId);
+        const reportDay = context.reportDay;
+        const item = context.items.find((i) => i.id === itemId);
+        if (!item) {
+          await renderDailyReportRoot(ctx);
+          return;
+        }
+
+        if (reportDay.locked) {
+          await renderScreen(ctx, { titleKey: t('screens.daily_report.title'), bodyLines: isLockedMessageLines(reportDay), inlineKeyboard: await buildDailyReportKeyboard(ctx, reportDay, { items: context.items }) });
+          return;
+        }
+
         const { hhmm24 } = timeDraftToDisplay(draft);
+
+        if (draft.mode === 'start_end') {
+          const endMinutes = minutesFromHhmm(hhmm24) ?? 0;
+          if (draft.phase === 'start' || !draft.startValue) {
+            const nextDraft: TimeDraftState = { ...draft, phase: 'end', startValue: { hhmm: hhmm24, minutesTotal: endMinutes } };
+            const pickerOpts = {
+              title: t('screens.daily_report.duration_end_title'),
+              currentLabel: t('screens.daily_report.duration_end_current', { value: timeDraftToDisplay(nextDraft).label }),
+              hint: t('screens.daily_report.duration_end_hint', { start: nextDraft.startValue?.hhmm ?? hhmm24 })
+            };
+            userStates.set(telegramId, { ...(state || {}), timeDraft: nextDraft });
+            await renderTimePicker(ctx, reportDayId, item, nextDraft, pickerOpts);
+            return;
+          }
+          const duration = endMinutes - draft.startValue.minutesTotal;
+          if (duration <= 0) {
+            await renderScreen(ctx, {
+              titleKey: t('screens.daily_report.title'),
+              bodyLines: [t('screens.daily_report.duration_end_error')],
+              inlineKeyboard: await buildDailyReportKeyboard(ctx, reportDay, { items: context.items })
+            });
+            return;
+          }
+          await saveValue({ reportDayId, item, valueJson: { start: draft.startValue.hhmm, end: hhmm24, minutes: duration }, userId: reportDay.user_id });
+          const userSettings = (await ensureUserAndSettings(ctx)).user.settings_json as Record<string, unknown>;
+          await logForUser({
+            userId: reportDay.user_id,
+            ctx,
+            eventName: 'db_write',
+            payload: { action: 'save_value', item_id: item.id },
+            enabled: telemetryEnabledForUser(userSettings)
+          });
+          const updated = { ...(userStates.get(telegramId) || {}) };
+          delete updated.awaitingValue;
+          delete updated.timeDraft;
+          delete updated.numericDraft;
+          userStates.set(telegramId, updated);
+          await continueFlowAfterAction(ctx, reportDay, state?.awaitingValue?.origin, state?.awaitingValue?.statusFilter);
+          return;
+        }
+
         await handleSaveValue(ctx, hhmm24);
 
         const updated = { ...(userStates.get(telegramId) || {}) };
@@ -3494,35 +3779,58 @@ bot.callbackQuery(/^[A-Za-z0-9_-]{8,12}$/, async (ctx) => {
           return;
         }
 
-        const cached = [...reportContextCache.values()].find((v) => v.reportDay.id === reportDayId);
-        let context = cached ?? null;
-        if (!context) {
-          const reportDayRow = await getReportDayById(reportDayId);
-          if (reportDayRow) {
-            context = await ensureSpecificReportContext(ctx, reportDayRow.local_date);
-          } else {
-            context = await ensureReportContext(ctx);
-          }
-        }
+        const context = await ensureContextByReportDayId(ctx, reportDayId);
         const reportDay = context.reportDay;
-        const items = context.items;
-        const item = items.find((i) => i.id === itemId);
+        const item = context.items.find((i) => i.id === itemId);
         if (!item) {
           await renderDailyReportRoot(ctx);
           return;
         }
 
         if (reportDay.locked) {
-          await renderScreen(ctx, { titleKey: t('screens.daily_report.title'), bodyLines: isLockedMessageLines(reportDay), inlineKeyboard: await buildDailyReportKeyboard(ctx, reportDay) });
+          await renderScreen(ctx, { titleKey: t('screens.daily_report.title'), bodyLines: isLockedMessageLines(reportDay), inlineKeyboard: await buildDailyReportKeyboard(ctx, reportDay, { items: context.items }) });
           return;
         }
 
         const current = state.numericDraft.value ?? 0;
         const next = Math.max(0, current + delta);
 
-        userStates.set(telegramId, { ...state, numericDraft: { reportDayId, itemId, value: next } });
+        userStates.set(telegramId, { ...state, numericDraft: { reportDayId, itemId, value: next, unit: state.numericDraft.unit } });
 
-        await renderNumericInput(ctx, reportDayId, item, next);
+        await renderNumericInput(ctx, reportDayId, item, { reportDayId, itemId, value: next, unit: state.numericDraft.unit });
+        return;
+      }
+
+      case 'dr.num_unit': {
+        const data = (payload as { data?: { reportDayId?: string; itemId?: string; unit?: 'minutes' | 'seconds' } }).data;
+        const reportDayId = data?.reportDayId;
+        const itemId = data?.itemId;
+        const unit = data?.unit;
+        if (!reportDayId || !itemId || !unit) return;
+
+        const telegramId = String(ctx.from?.id ?? '');
+        const state = userStates.get(telegramId);
+        const draft = state?.numericDraft;
+        if (!draft || draft.reportDayId !== reportDayId || draft.itemId !== itemId) {
+          await renderDailyReportRoot(ctx);
+          return;
+        }
+        const context = await ensureContextByReportDayId(ctx, reportDayId);
+        const reportDay = context.reportDay;
+        const item = context.items.find((i) => i.id === itemId);
+        if (!item) {
+          await renderDailyReportRoot(ctx);
+          return;
+        }
+        if (item.item_type !== 'duration_minutes') {
+          await renderNumericInput(ctx, reportDayId, item, draft);
+          return;
+        }
+        const minutesValue = convertToMinutes(draft.value, draft.unit ?? 'minutes').minutes;
+        const nextValue = unit === 'seconds' ? Math.max(0, Math.round(minutesValue * 60)) : minutesValue;
+        const nextDraft: NumericDraftState = { ...draft, unit, value: nextValue };
+        userStates.set(telegramId, { ...state, numericDraft: nextDraft });
+        await renderNumericInput(ctx, reportDayId, item, nextDraft);
         return;
       }
 
@@ -3541,11 +3849,59 @@ bot.callbackQuery(/^[A-Za-z0-9_-]{8,12}$/, async (ctx) => {
           return;
         }
 
-        await handleSaveValue(ctx, String(draft.value));
+        const context = await ensureContextByReportDayId(ctx, reportDayId);
+        const reportDay = context.reportDay;
+        const item = context.items.find((i) => i.id === itemId);
+        if (!item) {
+          await renderDailyReportRoot(ctx);
+          return;
+        }
+
+        if (reportDay.locked) {
+          await renderScreen(ctx, { titleKey: t('screens.daily_report.title'), bodyLines: isLockedMessageLines(reportDay), inlineKeyboard: await buildDailyReportKeyboard(ctx, reportDay, { items: context.items }) });
+          return;
+        }
+
+        const awaiting = state?.awaitingValue;
+        let valueJson: Record<string, unknown> | null = null;
+        if (item.item_type === 'duration_minutes') {
+          const { minutes, seconds } = convertToMinutes(draft.value, draft.unit ?? 'minutes');
+          valueJson = { value: minutes, minutes, ...(seconds != null ? { seconds } : {}) };
+        } else if (item.item_type === 'number') {
+          const n = Math.max(0, draft.value);
+          const isPerMinute = ['per_minute', 'time'].includes(item.xp_mode ?? '');
+          const isPerNumber = (item.xp_mode ?? '') === 'per_number';
+          valueJson = { value: n, number: n, ...(isPerMinute ? { minutes: n } : {}), ...(isPerNumber ? { units: n } : {}) };
+        } else {
+          valueJson = { value: draft.value };
+        }
+
+        try {
+          await saveValue({ reportDayId, item, valueJson, userId: reportDay.user_id });
+          const userSettings = (await ensureUserAndSettings(ctx)).user.settings_json as Record<string, unknown>;
+          await logForUser({
+            userId: reportDay.user_id,
+            ctx,
+            eventName: 'db_write',
+            payload: { action: 'save_value', item_id: item.id },
+            enabled: telemetryEnabledForUser(userSettings)
+          });
+        } catch (error) {
+          console.error({ scope: 'daily_report', event: 'save_value_failed', error, reportDayId, itemId: item.id, valueJson });
+          await renderScreen(ctx, {
+            titleKey: t('screens.daily_report.title'),
+            bodyLines: [t('screens.daily_report.save_failed')],
+            inlineKeyboard: await buildDailyReportKeyboard(ctx, reportDay, { items: context.items })
+          });
+          return;
+        }
 
         const updated = { ...(userStates.get(telegramId) || {}) };
+        delete updated.awaitingValue;
         delete updated.numericDraft;
+        delete updated.timeDraft;
         userStates.set(telegramId, updated);
+        await continueFlowAfterAction(ctx, reportDay, awaiting?.origin, awaiting?.statusFilter);
         return;
       }
 
@@ -3558,26 +3914,20 @@ bot.callbackQuery(/^[A-Za-z0-9_-]{8,12}$/, async (ctx) => {
           return;
         }
 
-        const cached = [...reportContextCache.values()].find((v) => v.reportDay.id === reportDayId);
-        let context = cached ?? null;
-        if (!context) {
-          const reportDayRow = await getReportDayById(reportDayId);
-          if (reportDayRow) {
-            context = await ensureSpecificReportContext(ctx, reportDayRow.local_date);
-          } else {
-            context = await ensureReportContext(ctx);
-          }
-        }
+        const context = await ensureContextByReportDayId(ctx, reportDayId);
         const reportDay = context.reportDay;
-        const items = context.items;
-        const item = items.find((i) => i.id === itemId);
+        const item = context.items.find((i) => i.id === itemId);
         if (!item) {
           await renderDailyReportRoot(ctx);
           return;
         }
 
         if (reportDay.locked) {
-          await renderScreen(ctx, { titleKey: t('screens.daily_report.title'), bodyLines: isLockedMessageLines(reportDay), inlineKeyboard: await buildDailyReportKeyboard(ctx, reportDay) });
+          await renderScreen(ctx, {
+            titleKey: t('screens.daily_report.title'),
+            bodyLines: isLockedMessageLines(reportDay),
+            inlineKeyboard: await buildDailyReportKeyboard(ctx, reportDay, { items: context.items })
+          });
           return;
         }
 
@@ -3586,12 +3936,63 @@ bot.callbackQuery(/^[A-Za-z0-9_-]{8,12}$/, async (ctx) => {
         // Clear state for that field if it was awaiting this.
         const telegramId = String(ctx.from?.id ?? '');
         const st = { ...(userStates.get(telegramId) || {}) };
+        const origin = st.awaitingValue?.origin;
+        const statusFilter = st.awaitingValue?.statusFilter;
         if (st.awaitingValue?.itemId === itemId && st.awaitingValue?.reportDayId === reportDayId) delete st.awaitingValue;
         delete st.numericDraft;
         delete st.timeDraft;
         userStates.set(telegramId, st);
 
-        await renderDailyReportRoot(ctx, reportDay.local_date);
+        await continueFlowAfterAction(ctx, reportDay, origin, statusFilter);
+        return;
+      }
+
+      case 'dr.boolean': {
+        const data = (payload as { data?: { reportDayId?: string; itemId?: string; value?: boolean } }).data;
+        const reportDayId = data?.reportDayId;
+        const itemId = data?.itemId;
+        const value = data?.value;
+        if (!reportDayId || !itemId || typeof value !== 'boolean') {
+          await renderDailyReportRoot(ctx);
+          return;
+        }
+
+        const context = await ensureContextByReportDayId(ctx, reportDayId);
+        const reportDay = context.reportDay;
+        const item = context.items.find((i) => i.id === itemId);
+        if (!item) {
+          await renderDailyReportRoot(ctx);
+          return;
+        }
+        if (reportDay.locked) {
+          await renderScreen(ctx, {
+            titleKey: t('screens.daily_report.title'),
+            bodyLines: isLockedMessageLines(reportDay),
+            inlineKeyboard: await buildDailyReportKeyboard(ctx, reportDay, { items: context.items })
+          });
+          return;
+        }
+
+        const telegramId = String(ctx.from?.id ?? '');
+        const awaiting = userStates.get(telegramId)?.awaitingValue;
+
+        await saveValue({ reportDayId, item, valueJson: { value }, userId: reportDay.user_id });
+        const userSettings = (await ensureUserAndSettings(ctx)).user.settings_json as Record<string, unknown>;
+        await logForUser({
+          userId: reportDay.user_id,
+          ctx,
+          eventName: 'db_write',
+          payload: { action: 'save_value', item_id: item.id },
+          enabled: telemetryEnabledForUser(userSettings)
+        });
+
+        const updated = { ...(userStates.get(telegramId) || {}) };
+        delete updated.awaitingValue;
+        delete updated.numericDraft;
+        delete updated.timeDraft;
+        userStates.set(telegramId, updated);
+
+        await continueFlowAfterAction(ctx, reportDay, awaiting?.origin, awaiting?.statusFilter);
         return;
       }
 
