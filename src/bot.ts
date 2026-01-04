@@ -1399,13 +1399,8 @@ const routineTypeLabel = (routine: RoutineRow): string => {
 
 const routineXpLabel = (routine: RoutineRow): string => {
   if (routine.xp_mode === 'fixed') return t('screens.routines.xp_fixed', { xp: routine.xp_value ?? 0 });
-  if (routine.xp_mode === 'per_minute') {
-    const maxPart = routine.xp_max_per_day && routine.xp_max_per_day > 0 ? t('screens.routines.xp_max_suffix', { xp: routine.xp_max_per_day }) : '';
-    return t('screens.routines.xp_per_minute', { xp: routine.xp_value ?? 0, max: maxPart });
-  }
-  if (routine.xp_mode === 'per_number') {
-    const maxPart = routine.xp_max_per_day && routine.xp_max_per_day > 0 ? t('screens.routines.xp_max_suffix', { xp: routine.xp_max_per_day }) : '';
-    return t('screens.routines.xp_per_number', { xp: routine.xp_value ?? 0, max: maxPart });
+  if (routine.xp_mode === 'per_minute' || routine.xp_mode === 'per_number') {
+    return t('screens.routines.xp_per_unit', { xp: routine.xp_value ?? 0 });
   }
   return t('screens.routines.xp_none');
 };
@@ -1430,15 +1425,11 @@ const routineTaskXpLabel = (task: RoutineTaskRow): string => {
 const renderRoutinesRoot = async (ctx: Context, flash?: string): Promise<void> => {
   const { user } = await ensureUserAndSettings(ctx);
   const routines = await listRoutines(user.id);
-  const lines: string[] = [t('screens.routines.title')];
+  const lines: string[] = [];
   if (flash) lines.push(flash);
   if (routines.length === 0) {
     lines.push(t('screens.routines.empty'));
   } else {
-    routines.forEach((routine) => {
-      lines.push(`• ${routine.title}`);
-    });
-    lines.push('');
     lines.push(t('screens.routines.tap_to_edit'));
   }
 
@@ -1446,7 +1437,7 @@ const renderRoutinesRoot = async (ctx: Context, flash?: string): Promise<void> =
   const addBtn = await makeActionButton(ctx, { label: t('buttons.routines_add'), action: 'routines.add' });
   kb.text(addBtn.text, addBtn.callback_data).row();
   for (const routine of routines) {
-    const btn = await makeActionButton(ctx, { label: routine.title, action: 'routines.view', data: { routineId: routine.id } });
+    const btn = await makeActionButton(ctx, { label: `🧩 ${routine.title}`, action: 'routines.view', data: { routineId: routine.id } });
     kb.text(btn.text, btn.callback_data).row();
   }
   const back = await makeActionButton(ctx, { label: t('buttons.back'), action: 'nav.dashboard' });
@@ -1462,21 +1453,47 @@ const renderRoutineDetails = async (ctx: Context, routineId: string, flash?: str
     await renderRoutinesRoot(ctx);
     return;
   }
-  const lines: string[] = [];
+  const tasks = await listRoutineTasks(routineId);
+  const primaryTaskTitle = tasks[0]?.title ?? t('screens.routine_tasks.list_empty');
+  const lines: string[] = [
+    t('screens.routines.detail_title', { title: routine.title }),
+    primaryTaskTitle,
+    routineTypeLabel(routine),
+    routineXpLabel(routine)
+  ];
   if (flash) lines.push(flash);
 
   const kb = new InlineKeyboard();
+  const toggleBtn = await makeActionButton(ctx, {
+    label: t('buttons.routines_toggle_active'),
+    action: 'routines.toggle',
+    data: { routineId }
+  });
   const editTitleBtn = await makeActionButton(ctx, { label: t('buttons.routines_edit_title'), action: 'routines.edit_title', data: { routineId } });
+  const editDescBtn = await makeActionButton(ctx, { label: t('buttons.routines_edit_description'), action: 'routines.edit_description', data: { routineId } });
+  const editTypeBtn = await makeActionButton(ctx, { label: t('buttons.routines_edit_type'), action: 'routines.edit_type', data: { routineId } });
+  const editXpBtn = await makeActionButton(ctx, { label: t('buttons.routines_edit_xp'), action: 'routines.edit_xp_mode', data: { routineId } });
   const editTasksBtn = await makeActionButton(ctx, { label: t('buttons.routine_tasks_manage'), action: 'routines.tasks', data: { routineId } });
   const deleteBtn = await makeActionButton(ctx, { label: t('buttons.routines_delete'), action: 'routines.delete_confirm', data: { routineId } });
   const backBtn = await makeActionButton(ctx, { label: t('buttons.back'), action: 'routines.root' });
 
-  kb.text(editTitleBtn.text, editTitleBtn.callback_data).row();
-  kb.text(editTasksBtn.text, editTasksBtn.callback_data).row();
-  kb.text(deleteBtn.text, deleteBtn.callback_data).row();
-  kb.text(backBtn.text, backBtn.callback_data);
+  kb.text(toggleBtn.text, toggleBtn.callback_data)
+    .row()
+    .text(editTitleBtn.text, editTitleBtn.callback_data)
+    .row()
+    .text(editDescBtn.text, editDescBtn.callback_data)
+    .row()
+    .text(editTypeBtn.text, editTypeBtn.callback_data)
+    .row()
+    .text(editXpBtn.text, editXpBtn.callback_data)
+    .row()
+    .text(editTasksBtn.text, editTasksBtn.callback_data)
+    .row()
+    .text(deleteBtn.text, deleteBtn.callback_data)
+    .row()
+    .text(backBtn.text, backBtn.callback_data);
 
-  await renderScreen(ctx, { title: `🧩 ${routine.title}`, bodyLines: lines, inlineKeyboard: kb });
+  await renderScreen(ctx, { titleKey: t('screens.routines.title'), bodyLines: lines, inlineKeyboard: kb });
 };
 
 const renderRoutineDeleteConfirm = async (ctx: Context, routineId: string): Promise<void> => {
@@ -1516,7 +1533,7 @@ const renderRoutineTasks = async (ctx: Context, routineId: string, flash?: strin
   const backBtn = await makeActionButton(ctx, { label: t('buttons.back'), action: 'routines.view', data: { routineId } });
   kb.text(backBtn.text, backBtn.callback_data);
 
-  await renderScreen(ctx, { title: `🧩 ${routine.title}`, bodyLines: lines, inlineKeyboard: kb });
+  await renderScreen(ctx, { title: t('screens.routine_tasks.title', { title: routine.title }), bodyLines: lines, inlineKeyboard: kb });
 };
 
 const promptRoutineTaskTitle = async (ctx: Context, params: { routineId: string; taskId?: string }) => {
@@ -1801,7 +1818,8 @@ const renderNumericInput = async (ctx: Context, reportDayId: string, item: Repor
 };
 
 const renderBooleanInput = async (ctx: Context, reportDayId: string, item: ReportItemRow): Promise<void> => {
-  const lines = [t('screens.daily_report.boolean_question', { label: item.label })];
+  const labelLine = item.label ? String(item.label) : null;
+  const lines = [labelLine, t('screens.daily_report.boolean_question')].filter(Boolean) as string[];
   const kb = new InlineKeyboard();
 
   const yesBtn = await makeActionButton(ctx, { label: t('screens.daily_report.boolean_yes'), action: 'dr.boolean', data: { reportDayId, itemId: item.id, value: true } });
@@ -1817,7 +1835,7 @@ const renderBooleanInput = async (ctx: Context, reportDayId: string, item: Repor
 
 const renderRoutineDailyTasks = async (
   ctx: Context,
-  params: { reportDay: ReportDayRow; routineItem: ReportItemRow; items: ReportItemRow[] }
+  params: { reportDay: ReportDayRow; routineItem: ReportItemRow; items: ReportItemRow[]; origin?: 'next' | 'status'; statusFilter?: 'all' | 'not_filled' | 'filled' }
 ): Promise<void> => {
   const opts = (params.routineItem.options_json ?? {}) as { routine_id?: string };
   const routineId = opts.routine_id;
@@ -1840,19 +1858,35 @@ const renderRoutineDailyTasks = async (
   const kb = new InlineKeyboard();
   for (const status of statuses) {
     const action = params.reportDay.locked ? 'noop' : 'dr.item';
-    const btn = await makeActionButton(ctx, { label: formatItemLabel(status.item), action, data: { reportDayId: params.reportDay.id, itemId: status.item.id } });
+    const btn = await makeActionButton(ctx, {
+      label: formatItemLabel(status.item),
+      action,
+      data: {
+        reportDayId: params.reportDay.id,
+        itemId: status.item.id,
+        origin: params.origin,
+        statusFilter: params.statusFilter
+      }
+    });
     kb.text(btn.text, btn.callback_data).row();
   }
   const backBtn = await makeActionButton(ctx, {
     label: t('buttons.back'),
     action: 'dr.routine_detail',
-    data: { reportDayId: params.reportDay.id, routineId, itemId: params.routineItem.id }
+    data: { reportDayId: params.reportDay.id, routineId, itemId: params.routineItem.id, origin: params.origin, statusFilter: params.statusFilter }
   });
   kb.text(backBtn.text, backBtn.callback_data);
   await renderScreen(ctx, { titleKey: t('screens.daily_report.title'), bodyLines: lines, inlineKeyboard: kb });
 };
 
-const renderRoutineDailyEntry = async (ctx: Context, reportDay: ReportDayRow, routineItem: ReportItemRow, items: ReportItemRow[]): Promise<void> => {
+const renderRoutineDailyEntry = async (
+  ctx: Context,
+  reportDay: ReportDayRow,
+  routineItem: ReportItemRow,
+  items: ReportItemRow[],
+  origin?: 'next' | 'status',
+  statusFilter?: 'all' | 'not_filled' | 'filled'
+): Promise<void> => {
   const opts = (routineItem.options_json ?? {}) as { routine_id?: string };
   const routineId = opts.routine_id;
   const taskItems = items.filter((it) => isRoutineTaskItem(it) && ((it.options_json ?? {}) as { routine_id?: string }).routine_id === routineId);
@@ -1860,17 +1894,13 @@ const renderRoutineDailyEntry = async (ctx: Context, reportDay: ReportDayRow, ro
   const doneCount = statuses.filter((s) => s.filled && !s.skipped).length;
   const [routineStatus] = await listCompletionStatus(reportDay.id, [routineItem]);
   const state = routineValueState(routineStatus?.value?.value_json ?? null);
-  const lines: string[] = [`🧩 ${routineItem.label ?? ''}`, t('screens.daily_report.routine_task_progress', { completed: doneCount, total: statuses.length })];
-  if (state === 'done') {
-    lines.push(t('screens.daily_report.routine_status_done'));
-  } else if (state === 'partial') {
-    lines.push(t('screens.daily_report.routine_status_partial'));
-  } else if (state === 'skipped') {
-    lines.push(t('screens.daily_report.routine_status_skipped'));
-  } else {
-    lines.push(t('screens.daily_report.routine_status_pending'));
-    lines.push(t('screens.daily_report.routine_prompt_question'));
-  }
+  const lines: string[] = [t('screens.routines.detail_title', { title: routineItem.label ?? '' })];
+  if (state === 'pending') lines.push(t('screens.daily_report.routine_prompt_question'));
+  lines.push(t('screens.daily_report.routine_task_progress', { completed: doneCount, total: statuses.length }));
+  if (state === 'done') lines.push(t('screens.daily_report.routine_status_done'));
+  if (state === 'partial') lines.push(t('screens.daily_report.routine_status_partial'));
+  if (state === 'skipped') lines.push(t('screens.daily_report.routine_status_skipped'));
+  if (state === 'pending') lines.push(t('screens.daily_report.routine_status_pending'));
 
   const kb = new InlineKeyboard();
   if (!reportDay.locked && routineId) {
@@ -1878,29 +1908,29 @@ const renderRoutineDailyEntry = async (ctx: Context, reportDay: ReportDayRow, ro
       const undoBtn = await makeActionButton(ctx, {
         label: t('buttons.routine_undo'),
         action: 'dr.routine_undo',
-        data: { reportDayId: reportDay.id, routineId, itemId: routineItem.id }
+        data: { reportDayId: reportDay.id, routineId, itemId: routineItem.id, origin, statusFilter }
       });
       const detailsBtn = await makeActionButton(ctx, {
         label: t('buttons.routine_open_tasks'),
         action: 'dr.routine_open_tasks',
-        data: { reportDayId: reportDay.id, routineId, itemId: routineItem.id }
+        data: { reportDayId: reportDay.id, routineId, itemId: routineItem.id, origin, statusFilter }
       });
       kb.text(undoBtn.text, undoBtn.callback_data).row().text(detailsBtn.text, detailsBtn.callback_data).row();
     } else {
       const doneBtn = await makeActionButton(ctx, {
         label: t('buttons.routine_mark_done'),
         action: 'dr.routine_done',
-        data: { reportDayId: reportDay.id, routineId, itemId: routineItem.id }
+        data: { reportDayId: reportDay.id, routineId, itemId: routineItem.id, origin, statusFilter }
       });
       const partialBtn = await makeActionButton(ctx, {
         label: t('buttons.routine_mark_partial'),
         action: 'dr.routine_partial',
-        data: { reportDayId: reportDay.id, routineId, itemId: routineItem.id }
+        data: { reportDayId: reportDay.id, routineId, itemId: routineItem.id, origin, statusFilter }
       });
       const skipBtn = await makeActionButton(ctx, {
         label: t('buttons.routine_skip'),
         action: 'dr.routine_skip',
-        data: { reportDayId: reportDay.id, routineId, itemId: routineItem.id }
+        data: { reportDayId: reportDay.id, routineId, itemId: routineItem.id, origin, statusFilter }
       });
       kb.text(doneBtn.text, doneBtn.callback_data).row().text(partialBtn.text, partialBtn.callback_data).row().text(skipBtn.text, skipBtn.callback_data).row();
     }
@@ -1954,7 +1984,8 @@ const promptForItem = async (
   if (isRoutineParentItem(item)) {
     const cached = [...reportContextCache.values()].find((v) => v.reportDay.id === reportDay.id);
     const context = cached ?? (await ensureSpecificReportContext(ctx, reportDay.local_date));
-    await renderRoutineDailyEntry(ctx, context.reportDay, item, context.items);
+    userStates.set(telegramId, { ...existing, awaitingValue });
+    await renderRoutineDailyEntry(ctx, context.reportDay, item, context.items, opts?.origin, opts?.statusFilter);
     return;
   }
 
@@ -2900,7 +2931,8 @@ const renderHistoryDay = async (ctx: Context, reportDayId: string): Promise<void
   }
   const items = await listAllItems(reportDay.template_id);
   const enabledItems = items.filter((i) => i.enabled);
-  const statuses = await listCompletionStatus(reportDay.id, enabledItems);
+  const displayItems = enabledItems.filter((item) => !isRoutineTaskItem(item));
+  const statuses = await listCompletionStatus(reportDay.id, displayItems);
   const template = await getTemplateById(reportDay.template_id);
 
   const lines: string[] = [
@@ -3816,7 +3848,7 @@ bot.callbackQuery(/^[A-Za-z0-9_-]{8,12}$/, async (ctx) => {
       }
 
       case 'dr.item': {
-        const data = (payload as { data?: { reportDayId?: string; itemId?: string; filter?: 'all' | 'not_filled' | 'filled' } }).data;
+        const data = (payload as { data?: { reportDayId?: string; itemId?: string; filter?: 'all' | 'not_filled' | 'filled'; origin?: 'next' | 'status'; statusFilter?: 'all' | 'not_filled' | 'filled' } }).data;
         const reportDayId = data?.reportDayId;
         const itemId = data?.itemId;
         if (!reportDayId || !itemId) {
@@ -3842,7 +3874,14 @@ bot.callbackQuery(/^[A-Za-z0-9_-]{8,12}$/, async (ctx) => {
           await ctx.answerCallbackQuery({ text: t('errors.item_not_found'), show_alert: true });
           return;
         }
-        await promptForItem(ctx, reportDay, item, data?.filter ? { origin: 'status', statusFilter: data.filter } : undefined);
+        const origin = data?.origin as 'next' | 'status' | undefined;
+        const statusFilter = (data?.statusFilter as 'all' | 'not_filled' | 'filled' | undefined) ?? data?.filter;
+        const opts: { origin?: 'next' | 'status'; statusFilter?: 'all' | 'not_filled' | 'filled' } | undefined = origin
+          ? { origin, statusFilter }
+          : data?.filter
+            ? { origin: 'status', statusFilter: data.filter }
+            : undefined;
+        await promptForItem(ctx, reportDay, item, opts);
         return;
       }
 
@@ -4230,7 +4269,7 @@ bot.callbackQuery(/^[A-Za-z0-9_-]{8,12}$/, async (ctx) => {
       }
 
       case 'dr.routine_open_tasks': {
-        const data = (payload as { data?: { reportDayId?: string; routineId?: string; itemId?: string } }).data;
+        const data = (payload as { data?: { reportDayId?: string; routineId?: string; itemId?: string; origin?: 'next' | 'status'; statusFilter?: 'all' | 'not_filled' | 'filled' } }).data;
         if (!data?.reportDayId || !data.routineId) {
           await renderDailyReportRoot(ctx);
           return;
@@ -4252,12 +4291,18 @@ bot.callbackQuery(/^[A-Za-z0-9_-]{8,12}$/, async (ctx) => {
           await renderDailyReportRoot(ctx, reportDay.local_date);
           return;
         }
-        await renderRoutineDailyTasks(ctx, { reportDay: context.reportDay, routineItem, items: context.items });
+        await renderRoutineDailyTasks(ctx, {
+          reportDay: context.reportDay,
+          routineItem,
+          items: context.items,
+          origin: data.origin,
+          statusFilter: data.statusFilter
+        });
         return;
       }
 
       case 'dr.routine_detail': {
-        const data = (payload as { data?: { reportDayId?: string; routineId?: string; itemId?: string } }).data;
+        const data = (payload as { data?: { reportDayId?: string; routineId?: string; itemId?: string; origin?: 'next' | 'status'; statusFilter?: 'all' | 'not_filled' | 'filled' } }).data;
         if (!data?.reportDayId || !data.routineId) {
           await renderDailyReportRoot(ctx);
           return;
@@ -4279,17 +4324,21 @@ bot.callbackQuery(/^[A-Za-z0-9_-]{8,12}$/, async (ctx) => {
           await renderDailyReportRoot(ctx, reportDay.local_date);
           return;
         }
-        await renderRoutineDailyEntry(ctx, context.reportDay, routineItem, context.items);
+        await renderRoutineDailyEntry(ctx, context.reportDay, routineItem, context.items, data.origin, data.statusFilter);
         return;
       }
 
       case 'dr.routine_done':
       case 'dr.routine_mark_done': {
-        const data = (payload as { data?: { reportDayId?: string; routineId?: string; itemId?: string } }).data;
+        const data = (payload as { data?: { reportDayId?: string; routineId?: string; itemId?: string; origin?: 'next' | 'status'; statusFilter?: 'all' | 'not_filled' | 'filled' } }).data;
         if (!data?.reportDayId || !data.routineId) {
           await renderDailyReportRoot(ctx);
           return;
         }
+        const telegramId = String(ctx.from?.id ?? '');
+        const awaiting = userStates.get(telegramId)?.awaitingValue;
+        const resolvedOrigin = (data.origin as 'next' | 'status' | undefined) ?? awaiting?.origin;
+        const resolvedStatusFilter = (data.statusFilter as 'all' | 'not_filled' | 'filled' | undefined) ?? awaiting?.statusFilter;
         const reportDay = await getReportDayById(data.reportDayId);
         if (!reportDay) {
           await renderDailyReportRoot(ctx);
@@ -4333,16 +4382,25 @@ bot.callbackQuery(/^[A-Za-z0-9_-]{8,12}$/, async (ctx) => {
             });
           }
         }
-        await renderDailyReportRoot(ctx, reportDay.local_date);
+        const updatedState = { ...(userStates.get(telegramId) || {}) };
+        if (updatedState.awaitingValue?.itemId === routineItem.id && updatedState.awaitingValue?.reportDayId === reportDay.id) delete updatedState.awaitingValue;
+        delete updatedState.numericDraft;
+        delete updatedState.timeDraft;
+        userStates.set(telegramId, updatedState);
+        await continueFlowAfterAction(ctx, reportDay, resolvedOrigin, resolvedStatusFilter);
         return;
       }
 
       case 'dr.routine_partial': {
-        const data = (payload as { data?: { reportDayId?: string; routineId?: string; itemId?: string } }).data;
+        const data = (payload as { data?: { reportDayId?: string; routineId?: string; itemId?: string; origin?: 'next' | 'status'; statusFilter?: 'all' | 'not_filled' | 'filled' } }).data;
         if (!data?.reportDayId || !data.routineId) {
           await renderDailyReportRoot(ctx);
           return;
         }
+        const telegramId = String(ctx.from?.id ?? '');
+        const awaiting = userStates.get(telegramId)?.awaitingValue;
+        const resolvedOrigin = (data.origin as 'next' | 'status' | undefined) ?? awaiting?.origin;
+        const resolvedStatusFilter = (data.statusFilter as 'all' | 'not_filled' | 'filled' | undefined) ?? awaiting?.statusFilter;
         const reportDay = await getReportDayById(data.reportDayId);
         if (!reportDay) {
           await renderDailyReportRoot(ctx);
@@ -4364,6 +4422,11 @@ bot.callbackQuery(/^[A-Za-z0-9_-]{8,12}$/, async (ctx) => {
           await renderDailyReportRoot(ctx, reportDay.local_date);
           return;
         }
+        const updatedState = { ...(userStates.get(telegramId) || {}) };
+        if (updatedState.awaitingValue?.itemId === routineItem.id && updatedState.awaitingValue?.reportDayId === reportDay.id) delete updatedState.awaitingValue;
+        delete updatedState.numericDraft;
+        delete updatedState.timeDraft;
+        userStates.set(telegramId, updatedState);
         await saveValue({
           reportDayId: reportDay.id,
           item: routineItem,
@@ -4372,16 +4435,20 @@ bot.callbackQuery(/^[A-Za-z0-9_-]{8,12}$/, async (ctx) => {
           applyXp: false,
           resetXpApplied: true
         });
-        await renderRoutineDailyTasks(ctx, { reportDay, routineItem, items: context.items });
+        await renderRoutineDailyTasks(ctx, { reportDay, routineItem, items: context.items, origin: resolvedOrigin, statusFilter: resolvedStatusFilter });
         return;
       }
 
       case 'dr.routine_skip': {
-        const data = (payload as { data?: { reportDayId?: string; routineId?: string; itemId?: string } }).data;
+        const data = (payload as { data?: { reportDayId?: string; routineId?: string; itemId?: string; origin?: 'next' | 'status'; statusFilter?: 'all' | 'not_filled' | 'filled' } }).data;
         if (!data?.reportDayId || !data.routineId) {
           await renderDailyReportRoot(ctx);
           return;
         }
+        const telegramId = String(ctx.from?.id ?? '');
+        const awaiting = userStates.get(telegramId)?.awaitingValue;
+        const resolvedOrigin = (data.origin as 'next' | 'status' | undefined) ?? awaiting?.origin;
+        const resolvedStatusFilter = (data.statusFilter as 'all' | 'not_filled' | 'filled' | undefined) ?? awaiting?.statusFilter;
         const reportDay = await getReportDayById(data.reportDayId);
         if (!reportDay) {
           await renderDailyReportRoot(ctx);
@@ -4427,16 +4494,25 @@ bot.callbackQuery(/^[A-Za-z0-9_-]{8,12}$/, async (ctx) => {
             });
           }
         }
-        await renderDailyReportRoot(ctx, reportDay.local_date);
+        const updatedState = { ...(userStates.get(telegramId) || {}) };
+        if (updatedState.awaitingValue?.itemId === routineItem.id && updatedState.awaitingValue?.reportDayId === reportDay.id) delete updatedState.awaitingValue;
+        delete updatedState.numericDraft;
+        delete updatedState.timeDraft;
+        userStates.set(telegramId, updatedState);
+        await continueFlowAfterAction(ctx, reportDay, resolvedOrigin, resolvedStatusFilter);
         return;
       }
 
       case 'dr.routine_undo': {
-        const data = (payload as { data?: { reportDayId?: string; routineId?: string; itemId?: string } }).data;
+        const data = (payload as { data?: { reportDayId?: string; routineId?: string; itemId?: string; origin?: 'next' | 'status'; statusFilter?: 'all' | 'not_filled' | 'filled' } }).data;
         if (!data?.reportDayId || !data.routineId) {
           await renderDailyReportRoot(ctx);
           return;
         }
+        const telegramId = String(ctx.from?.id ?? '');
+        const awaiting = userStates.get(telegramId)?.awaitingValue;
+        const resolvedOrigin = (data.origin as 'next' | 'status' | undefined) ?? awaiting?.origin;
+        const resolvedStatusFilter = (data.statusFilter as 'all' | 'not_filled' | 'filled' | undefined) ?? awaiting?.statusFilter;
         const reportDay = await getReportDayById(data.reportDayId);
         if (!reportDay) {
           await renderDailyReportRoot(ctx);
@@ -4500,7 +4576,12 @@ bot.callbackQuery(/^[A-Za-z0-9_-]{8,12}$/, async (ctx) => {
             });
           }
         }
-        await renderDailyReportRoot(ctx, reportDay.local_date);
+        const updatedState = { ...(userStates.get(telegramId) || {}) };
+        if (updatedState.awaitingValue?.itemId === routineItem.id && updatedState.awaitingValue?.reportDayId === reportDay.id) delete updatedState.awaitingValue;
+        delete updatedState.numericDraft;
+        delete updatedState.timeDraft;
+        userStates.set(telegramId, updatedState);
+        await continueFlowAfterAction(ctx, reportDay, resolvedOrigin, resolvedStatusFilter);
         return;
       }
 
