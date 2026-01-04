@@ -135,6 +135,13 @@ type CategoryFlow =
 type TemplateRenameFlow = { templateId: string };
 type TemplateCreateFlow = { step: 'title' };
 
+type BuilderNavigationState = {
+  active: true;
+  templateId: string;
+  step: string;
+  returnStep?: string;
+};
+
 type ReminderlessState = {
   awaitingValue?: { reportDayId: string; itemId: string };
 
@@ -164,6 +171,7 @@ type ReminderlessState = {
   categoryFlow?: CategoryFlow;
   templateRename?: TemplateRenameFlow;
   templateCreate?: TemplateCreateFlow;
+  builder?: BuilderNavigationState;
 };
 
 const userStates = new Map<string, ReminderlessState>();
@@ -243,6 +251,140 @@ const clearTemplateCreateFlow = (telegramId: string): void => {
   const st = { ...(userStates.get(telegramId) || {}) };
   delete st.templateCreate;
   userStates.set(telegramId, st);
+};
+
+const clearBuilderState = (telegramId: string): void => {
+  const st = { ...(userStates.get(telegramId) || {}) };
+  delete st.builder;
+  userStates.set(telegramId, st);
+};
+
+const updateBuilderStep = (telegramId: string, templateId: string, step: string, returnStep?: string): void => {
+  const st = { ...(userStates.get(telegramId) || {}) };
+  const activeBuilder: BuilderNavigationState = { active: true, templateId, step, returnStep };
+  st.builder = activeBuilder;
+  userStates.set(telegramId, st);
+};
+
+const builderIsActiveForTemplate = (telegramId: string, templateId: string): boolean => {
+  const st = userStates.get(telegramId);
+  return Boolean(st?.builder?.active && st.builder.templateId === templateId);
+};
+
+const setBuilderStepForFlow = (ctx: Context, templateId: string, step: string): void => {
+  const telegramId = String(ctx.from?.id ?? '');
+  const st = userStates.get(telegramId);
+  if (st?.templateItemFlow?.mode === 'create') {
+    updateBuilderStep(telegramId, templateId, step);
+  }
+};
+
+const makeBuilderBackButton = async (ctx: Context, params: { templateId: string; fallbackAction: string; fallbackData?: Record<string, unknown> }) => {
+  const telegramId = String(ctx.from?.id ?? '');
+  if (builderIsActiveForTemplate(telegramId, params.templateId)) {
+    return makeActionButton(ctx, { label: t('buttons.back'), action: 'builder.back', data: { templateId: params.templateId } });
+  }
+  return makeActionButton(ctx, { label: t('buttons.back'), action: params.fallbackAction, data: params.fallbackData ?? { templateId: params.templateId } });
+};
+
+const setTemplateFlowStepFromBuilder = (telegramId: string, builderStep: string): void => {
+  const st = userStates.get(telegramId);
+  if (!st?.templateItemFlow || st.templateItemFlow.mode !== 'create') return;
+  const map: Record<string, TemplateItemFlow['step']> = {
+    'builder.enterLabel': 'label',
+    'builder.chooseType': 'type',
+    'builder.chooseCategory': 'category',
+    'builder.configureXP': 'xp_mode',
+    'builder.configureXPValue': 'xp_value',
+    'builder.configureXPMax': 'xp_max'
+  };
+  const nextStep = map[builderStep];
+  if (nextStep) {
+    setTemplateItemFlow(telegramId, { ...st.templateItemFlow, step: nextStep });
+  }
+};
+
+const resolvePreviousBuilderStep = (builder: BuilderNavigationState, flow?: TemplateItemFlow): string | null => {
+  if (builder.returnStep) return builder.returnStep;
+
+  switch (builder.step) {
+    case 'builder.chooseType':
+      return 'builder.enterLabel';
+    case 'builder.chooseCategory':
+      return 'builder.chooseType';
+    case 'builder.configureXP':
+      return 'builder.chooseCategory';
+    case 'builder.configureXPValue':
+      return 'builder.configureXP';
+    case 'builder.configureXPMax':
+      return 'builder.configureXPValue';
+    case 'builder.summary': {
+      const xpMode = flow?.draft.xpMode ?? 'none';
+      if (xpMode === 'per_minute' || xpMode === 'per_number') return 'builder.configureXPMax';
+      if (xpMode !== 'none') return 'builder.configureXPValue';
+      return 'builder.configureXP';
+    }
+    default:
+      return null;
+  }
+};
+
+const renderBuilderStep = async (ctx: Context, templateId: string, step: string, flow?: TemplateItemFlow): Promise<void> => {
+  switch (step) {
+    case 'builder.enterLabel':
+      await promptLabelInput(ctx, { templateId, backToItemId: flow?.itemId });
+      return;
+    case 'builder.chooseType':
+      await promptTypeSelection(ctx, { templateId, itemId: flow?.itemId, backToItem: flow?.mode === 'edit' });
+      return;
+    case 'builder.chooseCategory':
+      await promptCategorySelection(ctx, { templateId, itemId: flow?.itemId, backToItem: flow?.mode === 'edit' });
+      return;
+    case 'builder.configureXP':
+      await promptXpModeSelection(ctx, { templateId, itemId: flow?.itemId, backToItem: flow?.mode === 'edit', itemType: flow?.draft.itemType });
+      return;
+    case 'builder.configureXPValue':
+      await promptXpValueInput(ctx, { templateId, itemId: flow?.itemId, backToItem: flow?.mode === 'edit' });
+      return;
+    case 'builder.configureXPMax':
+      await promptXpMaxInput(ctx, { templateId, itemId: flow?.itemId });
+      return;
+    case 'builder.summary':
+      await renderTemplateEdit(ctx, templateId);
+      return;
+    default:
+      await renderTemplateEdit(ctx, templateId);
+  }
+};
+
+const handleBuilderBackNavigation = async (ctx: Context, templateId: string): Promise<void> => {
+  const telegramId = String(ctx.from?.id ?? '');
+  const st = userStates.get(telegramId);
+  const builder = st?.builder;
+
+  if (!builder || builder.templateId !== templateId) {
+    await renderTemplateEdit(ctx, templateId);
+    return;
+  }
+
+  if (builder.returnStep) {
+    setTemplateFlowStepFromBuilder(telegramId, builder.returnStep);
+    updateBuilderStep(telegramId, templateId, builder.returnStep);
+    await renderBuilderStep(ctx, templateId, builder.returnStep, st?.templateItemFlow);
+    return;
+  }
+
+  const prevStep = resolvePreviousBuilderStep(builder, st?.templateItemFlow);
+  if (!prevStep) {
+    clearBuilderState(telegramId);
+    clearTemplateItemFlow(telegramId);
+    await renderTemplateEdit(ctx, templateId);
+    return;
+  }
+
+  setTemplateFlowStepFromBuilder(telegramId, prevStep);
+  updateBuilderStep(telegramId, templateId, prevStep);
+  await renderBuilderStep(ctx, templateId, prevStep, st?.templateItemFlow);
 };
 
 const greetings = ['👋 Hey there!', '🙌 Welcome!', '🚀 Ready to plan your day?', '🌟 Let’s make today productive!', '💪 Keep going!'];
@@ -1608,7 +1750,11 @@ const buildTypeKeyboard = async (ctx: Context, params: { templateId: string; ite
     kb.text(btn.text, btn.callback_data).row();
   }
   const backAction = params.backAction ?? 'dr.template_edit';
-  const backBtn = await makeActionButton(ctx, { label: t('buttons.back'), action: backAction, data: params.backData ?? { templateId: params.templateId } });
+  const backBtn = await makeBuilderBackButton(ctx, {
+    templateId: params.templateId,
+    fallbackAction: backAction,
+    fallbackData: params.backData ?? { templateId: params.templateId }
+  });
   kb.text(backBtn.text, backBtn.callback_data);
   return kb;
 };
@@ -1631,7 +1777,11 @@ const buildCategoryKeyboard = async (ctx: Context, params: { templateId: string;
     kb.text(btn.text, btn.callback_data).row();
   }
   const backAction = params.backAction ?? 'dr.template_edit';
-  const backBtn = await makeActionButton(ctx, { label: t('buttons.back'), action: backAction, data: params.backData ?? { templateId: params.templateId } });
+  const backBtn = await makeBuilderBackButton(ctx, {
+    templateId: params.templateId,
+    fallbackAction: backAction,
+    fallbackData: params.backData ?? { templateId: params.templateId }
+  });
   kb.text(backBtn.text, backBtn.callback_data);
   return kb;
 };
@@ -1657,7 +1807,11 @@ const buildXpModeKeyboard = async (
     kb.text(btn.text, btn.callback_data).row();
   }
   const backAction = params.backAction ?? 'dr.template_edit';
-  const backBtn = await makeActionButton(ctx, { label: t('buttons.back'), action: backAction, data: params.backData ?? { templateId: params.templateId } });
+  const backBtn = await makeBuilderBackButton(ctx, {
+    templateId: params.templateId,
+    fallbackAction: backAction,
+    fallbackData: params.backData ?? { templateId: params.templateId }
+  });
   kb.text(backBtn.text, backBtn.callback_data);
   return kb;
 };
@@ -1665,7 +1819,8 @@ const buildXpModeKeyboard = async (
 const promptLabelInput = async (ctx: Context, params: { templateId: string; backToItemId?: string }) => {
   const backAction = params.backToItemId ? 'dr.template_item_menu' : 'dr.template_edit';
   const backData = params.backToItemId ? { templateId: params.templateId, itemId: params.backToItemId } : { templateId: params.templateId };
-  const backBtn = await makeActionButton(ctx, { label: t('buttons.back'), action: backAction, data: backData });
+  setBuilderStepForFlow(ctx, params.templateId, 'builder.enterLabel');
+  const backBtn = await makeBuilderBackButton(ctx, { templateId: params.templateId, fallbackAction: backAction, fallbackData: backData });
   const kb = new InlineKeyboard().text(backBtn.text, backBtn.callback_data);
   await renderScreen(ctx, {
     titleKey: t('screens.daily_report.template_builder_title'),
@@ -1685,6 +1840,7 @@ const promptKeyInput = async (ctx: Context, params: { templateId: string; itemId
 };
 
 const promptTypeSelection = async (ctx: Context, params: { templateId: string; itemId?: string; backToItem?: boolean }) => {
+  setBuilderStepForFlow(ctx, params.templateId, 'builder.chooseType');
   const kb = await buildTypeKeyboard(ctx, {
     templateId: params.templateId,
     itemId: params.itemId,
@@ -1705,6 +1861,7 @@ const promptTypeSelection = async (ctx: Context, params: { templateId: string; i
 };
 
 const promptCategorySelection = async (ctx: Context, params: { templateId: string; itemId?: string; backToItem?: boolean }) => {
+  setBuilderStepForFlow(ctx, params.templateId, 'builder.chooseCategory');
   const kb = await buildCategoryKeyboard(ctx, {
     templateId: params.templateId,
     itemId: params.itemId,
@@ -1725,6 +1882,7 @@ const promptCategorySelection = async (ctx: Context, params: { templateId: strin
 };
 
 const promptXpModeSelection = async (ctx: Context, params: { templateId: string; itemId?: string; backToItem?: boolean; itemType?: string }) => {
+  setBuilderStepForFlow(ctx, params.templateId, 'builder.configureXP');
   const kb = await buildXpModeKeyboard(ctx, {
     templateId: params.templateId,
     itemId: params.itemId,
@@ -1746,9 +1904,10 @@ const promptXpModeSelection = async (ctx: Context, params: { templateId: string;
 };
 
 const promptXpValueInput = async (ctx: Context, params: { templateId: string; itemId?: string; backToItem?: boolean }) => {
+  setBuilderStepForFlow(ctx, params.templateId, 'builder.configureXPValue');
   const backAction = params.backToItem ? 'dr.template_item_menu' : 'dr.template_edit';
   const backData = params.backToItem ? { templateId: params.templateId, itemId: params.itemId } : { templateId: params.templateId };
-  const backBtn = await makeActionButton(ctx, { label: t('buttons.back'), action: backAction, data: backData });
+  const backBtn = await makeBuilderBackButton(ctx, { templateId: params.templateId, fallbackAction: backAction, fallbackData: backData });
   const kb = new InlineKeyboard().text(backBtn.text, backBtn.callback_data);
   await renderScreen(ctx, {
     titleKey: t('screens.daily_report.template_builder_title'),
@@ -1758,7 +1917,12 @@ const promptXpValueInput = async (ctx: Context, params: { templateId: string; it
 };
 
 const promptXpMaxInput = async (ctx: Context, params: { templateId: string; itemId?: string }) => {
-  const backBtn = await makeActionButton(ctx, { label: t('buttons.back'), action: 'dr.template_item_menu', data: { templateId: params.templateId, itemId: params.itemId } });
+  setBuilderStepForFlow(ctx, params.templateId, 'builder.configureXPMax');
+  const backBtn = await makeBuilderBackButton(ctx, {
+    templateId: params.templateId,
+    fallbackAction: 'dr.template_item_menu',
+    fallbackData: { templateId: params.templateId, itemId: params.itemId }
+  });
   const kb = new InlineKeyboard().text(backBtn.text, backBtn.callback_data);
   await renderScreen(ctx, {
     titleKey: t('screens.daily_report.template_builder_title'),
@@ -1778,7 +1942,15 @@ const renderTemplateHelp = async (
   };
   const backAction = params.backToItem ? 'dr.template_item_menu' : 'dr.template_edit';
   const backData = params.backToItem ? { templateId: params.templateId, itemId: params.itemId } : { templateId: params.templateId };
-  const backBtn = await makeActionButton(ctx, { label: t('buttons.back'), action: backAction, data: backData });
+  const telegramId = String(ctx.from?.id ?? '');
+  const currentBuilder = userStates.get(telegramId)?.builder;
+  if (currentBuilder?.active && currentBuilder.templateId === params.templateId) {
+    const currentStep = currentBuilder.step?.startsWith('builder.help') ? currentBuilder.returnStep : currentBuilder?.step;
+    updateBuilderStep(telegramId, params.templateId, `builder.help.${params.topic}`, currentStep);
+  }
+  const backBtn = await (builderIsActiveForTemplate(telegramId, params.templateId)
+    ? makeActionButton(ctx, { label: t('buttons.back'), action: 'builder.back', data: { templateId: params.templateId } })
+    : makeActionButton(ctx, { label: t('buttons.back'), action: backAction, data: backData }));
   const kb = new InlineKeyboard().text(backBtn.text, backBtn.callback_data);
   await renderScreen(ctx, {
     titleKey: t('screens.form_builder.help.title'),
@@ -1966,6 +2138,7 @@ const renderTemplateEdit = async (ctx: Context, templateId: string, flashLine?: 
   }
   const telegramId = String(ctx.from?.id ?? '');
   clearTemplateItemFlow(telegramId);
+  clearBuilderState(telegramId);
 
   const items = await listAllItems(templateId);
   const visibleItems = items.filter((item) => !isRoutineItem(item));
@@ -2117,11 +2290,13 @@ const finalizeNewTemplateItem = async (ctx: Context, telegramId: string, flow: T
       sortOrder
     });
     clearTemplateItemFlow(telegramId);
+    clearBuilderState(telegramId);
     clearReportContextCache();
     await renderTemplateEdit(ctx, flow.templateId, t('screens.daily_report.item_saved'));
   } catch (error) {
     console.error({ scope: 'daily_report', event: 'template_item_finalize_failed', error, flow });
     clearTemplateItemFlow(telegramId);
+    clearBuilderState(telegramId);
     await renderTemplateEdit(ctx, flow.templateId);
   }
 };
@@ -3575,6 +3750,16 @@ bot.callbackQuery(/^[A-Za-z0-9_-]{8,12}$/, async (ctx) => {
         return;
       }
 
+      case 'builder.back': {
+        const templateId = (payload as { data?: { templateId?: string } }).data?.templateId;
+        if (!templateId) {
+          await renderTemplatesScreen(ctx);
+          return;
+        }
+        await handleBuilderBackNavigation(ctx, templateId);
+        return;
+      }
+
       case 'dr.template_item_add': {
         const templateId = (payload as { data?: { templateId?: string } }).data?.templateId;
         if (!templateId) {
@@ -3590,6 +3775,7 @@ bot.callbackQuery(/^[A-Za-z0-9_-]{8,12}$/, async (ctx) => {
         const telegramId = String(ctx.from?.id ?? '');
         clearTemplateItemFlow(telegramId);
         setTemplateItemFlow(telegramId, { mode: 'create', templateId, step: 'label', draft: {} });
+        updateBuilderStep(telegramId, templateId, 'builder.enterLabel');
         await promptLabelInput(ctx, { templateId });
         return;
       }
