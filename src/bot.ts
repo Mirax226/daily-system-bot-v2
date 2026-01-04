@@ -18,7 +18,7 @@ import {
   deleteReward
 } from './services/rewards';
 
-import { getXpBalance, getXpSummary } from './services/xpLedger';
+import { addXpDelta, getXpBalance, getXpSummary } from './services/xpLedger';
 
 import {
   ensureDefaultItems,
@@ -123,6 +123,7 @@ type RoutineTaskFlow = {
     xpMode?: 'fixed' | 'per_minute' | 'per_number' | 'none';
     xpValue?: number | null;
     xpMaxPerDay?: number | null;
+    optionsJson?: Record<string, unknown> | null;
   };
 };
 
@@ -599,6 +600,35 @@ const formatItemLabel = (item: ReportItemRow): string => {
   return base;
 };
 
+const filterRoutineDisplayItems = (items: ReportItemRow[]): ReportItemRow[] => items.filter((i) => !isRoutineTaskItem(i));
+
+const routineValueState = (valueJson: Record<string, unknown> | null): 'pending' | 'done' | 'partial' | 'skipped' => {
+  if (!valueJson) return 'pending';
+  if ((valueJson as { skipped?: boolean }).skipped) return 'skipped';
+  if ((valueJson as { completed_all?: boolean }).completed_all || (valueJson as { status?: string }).status === 'done' || valueIsTrue((valueJson as { value?: unknown }).value)) {
+    return 'done';
+  }
+  if ((valueJson as { status?: string }).status === 'partial' || Array.isArray((valueJson as { completed_task_ids?: unknown }).completed_task_ids)) {
+    return 'partial';
+  }
+  return 'pending';
+};
+
+const routineMetaFromItem = (item: ReportItemRow): { routineId?: string; routineTaskId?: string } => {
+  const opts = (item.options_json ?? {}) as { routine_id?: string; routine_task_id?: string };
+  return { routineId: opts.routine_id, routineTaskId: opts.routine_task_id };
+};
+
+const computeRoutineParentXp = (item: ReportItemRow, valueJson: Record<string, unknown> | null): number => {
+  if (!isRoutineParentItem(item)) return 0;
+  const xpMode = item.xp_mode;
+  const xpValue = item.xp_value ?? 0;
+  const checked = valueIsTrue((valueJson as { value?: unknown })?.value) || Boolean((valueJson as { completed_all?: boolean }).completed_all);
+  if (!checked) return 0;
+  if (xpMode === 'fixed') return Math.max(0, xpValue);
+  return 0;
+};
+
 const STANDARD_CATEGORIES: { name: string; emoji: string; labelKey: string }[] = [
   { name: 'sleep', emoji: '😴', labelKey: 'screens.templates.category_sleep' },
   { name: 'routine', emoji: '🔁', labelKey: 'screens.templates.category_routine' },
@@ -614,6 +644,13 @@ const allowedXpModesForItemType = (itemType?: string): ('none' | 'fixed' | 'per_
   if (itemType === 'time_hhmm' || itemType === 'duration_minutes') return ['none', 'fixed', 'per_minute'];
   if (itemType === 'number') return ['none', 'fixed', 'per_number'];
   return ['none', 'fixed', 'per_minute', 'per_number'];
+};
+
+const allowedRoutineTaskXpModes = (itemType?: string): ('none' | 'fixed' | 'per_minute' | 'per_number')[] => {
+  if (itemType === 'boolean') return ['fixed'];
+  if (itemType === 'duration_minutes') return ['fixed', 'per_minute'];
+  if (itemType === 'number') return ['fixed', 'per_number'];
+  return ['fixed'];
 };
 
 const normalizeXpModeForItemType = (itemType: string | undefined, xpMode: string | null | undefined): 'none' | 'fixed' | 'per_minute' | 'per_number' | null => {
@@ -721,6 +758,25 @@ const parseNonNegativeNumber = (input: string): number | null => {
   return n;
 };
 
+const parseXpRatio = (input: string): { per: number; xp: number } | null => {
+  const normalized = input.trim();
+  if (!normalized) return null;
+  if (normalized.includes(':')) {
+    const [perStr, xpStr] = normalized.split(':').map((s) => s.trim());
+    const per = Number(perStr);
+    const xp = Number(xpStr);
+    if (Number.isFinite(per) && Number.isFinite(xp) && per > 0 && xp >= 0) {
+      return { per, xp };
+    }
+    return null;
+  }
+  const single = Number(normalized);
+  if (Number.isFinite(single) && single >= 0) {
+    return { per: 1, xp: single };
+  }
+  return null;
+};
+
 const convertToMinutes = (value: number, unit: 'minutes' | 'seconds' = 'minutes'): { minutes: number; seconds?: number } => {
   if (!Number.isFinite(value) || value < 0) return { minutes: 0 };
   if (unit === 'seconds') {
@@ -787,28 +843,19 @@ const syncRoutineItemsForTemplate = async (
   const result = [...items];
   const seenRoutineItemIds = new Set<string>();
 
-  const computeRoutineFullXp = (tasks: RoutineTaskRow[], fallbackRoutine: RoutineRow): number => {
-    if (tasks.length === 0) return fallbackRoutine.xp_value ?? 0;
-    return tasks.reduce((acc, task) => {
-      if (task.xp_mode === 'fixed') return acc + (task.xp_value ?? 0);
-      if (task.xp_mode === 'per_minute') {
-        const base = (task.xp_value ?? 0) * 60;
-        const capped = task.xp_max_per_day && task.xp_max_per_day > 0 ? Math.min(base, task.xp_max_per_day) : base;
-        return acc + capped;
-      }
-      if (task.xp_mode === 'per_number') {
-        const base = task.xp_value ?? 0;
-        const capped = task.xp_max_per_day && task.xp_max_per_day > 0 ? Math.min(base, task.xp_max_per_day) : base;
-        return acc + capped;
-      }
-      return acc;
-    }, 0);
+  const taskRatio = (task: RoutineTaskRow): { per: number; xp: number } => {
+    const opts = (task.options_json ?? {}) as { per?: unknown; xp?: unknown; perNumber?: unknown; xpPerUnit?: unknown };
+    const per = Number((opts.per as number) ?? (opts.perNumber as number));
+    const xp = Number((opts.xp as number) ?? (opts.xpPerUnit as number));
+    return {
+      per: Number.isFinite(per) && per > 0 ? per : 1,
+      xp: Number.isFinite(xp) && xp > 0 ? xp : task.xp_value ?? 0
+    };
   };
 
   for (const routine of routines) {
     const itemKey = `routine_${routine.id}`;
     const routineTasks = tasksMap.get(routine.id) ?? [];
-    const parentXpValue = computeRoutineFullXp(routineTasks, routine);
     const parentType: ReportItemRow['item_type'] = 'boolean';
     const existingIdx = result.findIndex((i) => i.item_key === itemKey);
     const optionsJson = {
@@ -829,19 +876,20 @@ const syncRoutineItemsForTemplate = async (
         existing.label !== routine.title ||
         existing.item_type !== parentType ||
         existing.category !== 'routine' ||
-        existing.xp_value !== parentXpValue ||
+        existing.xp_mode !== routine.xp_mode ||
+        existing.xp_value !== (routine.xp_value ?? null) ||
         existing.enabled !== routine.is_active ||
         (existing.sort_order ?? 0) !== parentSort ||
-        (existing as ReportItemRow & { xp_max_per_day?: number | null }).xp_max_per_day !== null;
+        (existing as ReportItemRow & { xp_max_per_day?: number | null }).xp_max_per_day !== (routine.xp_max_per_day ?? null);
 
       if (needsUpdate) {
         const updated = await updateItem(existing.id, {
           label: routine.title,
           item_type: parentType,
           category: 'routine',
-          xp_mode: 'fixed',
-          xp_value: parentXpValue,
-          xp_max_per_day: null,
+          xp_mode: routine.xp_mode,
+          xp_value: routine.xp_value ?? null,
+          xp_max_per_day: routine.xp_max_per_day ?? null,
           options_json: optionsJson,
           enabled: routine.is_active,
           sort_order: parentSort
@@ -857,9 +905,9 @@ const syncRoutineItemsForTemplate = async (
         itemKey,
         itemType: parentType,
         category: 'routine',
-        xpMode: 'fixed',
-        xpValue: parentXpValue,
-        xpMaxPerDay: null,
+        xpMode: routine.xp_mode,
+        xpValue: routine.xp_value ?? null,
+        xpMaxPerDay: routine.xp_max_per_day ?? null,
         optionsJson,
         sortOrder: parentSort
       });
@@ -877,8 +925,10 @@ const syncRoutineItemsForTemplate = async (
         routine_id: routine.id,
         routine_task_id: task.id,
         routine_role: 'task',
-        routine_title: routine.title
+        routine_title: routine.title,
+        ...taskRatio(task)
       };
+      const ratio = taskRatio(task);
       if (existingTaskIdx >= 0) {
         const existing = result[existingTaskIdx];
         const needsUpdate =
@@ -886,7 +936,7 @@ const syncRoutineItemsForTemplate = async (
           existing.item_type !== task.item_type ||
           existing.category !== 'routine' ||
           existing.xp_mode !== task.xp_mode ||
-          existing.xp_value !== task.xp_value ||
+          existing.xp_value !== (ratio.xp ?? null) ||
           (existing as ReportItemRow & { xp_max_per_day?: number | null }).xp_max_per_day !== (task.xp_max_per_day ?? null) ||
           existing.enabled !== routine.is_active ||
           (existing.sort_order ?? 0) !== taskSort;
@@ -897,7 +947,7 @@ const syncRoutineItemsForTemplate = async (
             item_type: task.item_type,
             category: 'routine',
             xp_mode: task.xp_mode,
-            xp_value: task.xp_value,
+            xp_value: ratio.xp ?? null,
             xp_max_per_day: task.xp_max_per_day ?? null,
             options_json: taskOptions,
             enabled: routine.is_active,
@@ -914,7 +964,7 @@ const syncRoutineItemsForTemplate = async (
           itemType: task.item_type,
           category: 'routine',
           xpMode: task.xp_mode,
-          xpValue: task.xp_value,
+          xpValue: ratio.xp ?? null,
           xpMaxPerDay: task.xp_max_per_day ?? null,
           optionsJson: taskOptions,
           sortOrder: taskSort
@@ -963,7 +1013,7 @@ const buildDailyReportKeyboard = async (
   let hasPending = true;
   try {
     const items = options?.items ?? (await ensureContextByReportDayId(ctx, reportDay.id)).items;
-    const statuses = options?.statuses ?? (await listCompletionStatus(reportDay.id, items));
+    const statuses = (options?.statuses ?? (await listCompletionStatus(reportDay.id, items))).filter((s) => !isRoutineTaskItem(s.item));
     hasPending = statuses.some((s) => !s.filled && !s.skipped);
   } catch (error) {
     console.warn({ scope: 'daily_report', event: 'keyboard_pending_check_failed', reportDayId: reportDay.id, error });
@@ -1280,14 +1330,18 @@ const routineXpLabel = (routine: RoutineRow): string => {
 };
 
 const routineTaskXpLabel = (task: RoutineTaskRow): string => {
+  const opts = (task.options_json ?? {}) as { per?: unknown; xp?: unknown; perNumber?: unknown; xpPerUnit?: unknown };
+  const per = Number((opts.per as number) ?? (opts.perNumber as number));
+  const xp = Number((opts.xp as number) ?? (opts.xpPerUnit as number) ?? task.xp_value ?? 0);
+  const ratioPer = Number.isFinite(per) && per > 0 ? per : 1;
   if (task.xp_mode === 'fixed') return t('screens.routines.xp_fixed', { xp: task.xp_value ?? 0 });
   if (task.xp_mode === 'per_minute') {
     const maxPart = task.xp_max_per_day && task.xp_max_per_day > 0 ? t('screens.routines.xp_max_suffix', { xp: task.xp_max_per_day }) : '';
-    return t('screens.routines.xp_per_minute', { xp: task.xp_value ?? 0, max: maxPart });
+    return t('screens.routines.xp_per_minute_ratio', { ratio: `${ratioPer}:${xp}`, max: maxPart });
   }
   if (task.xp_mode === 'per_number') {
     const maxPart = task.xp_max_per_day && task.xp_max_per_day > 0 ? t('screens.routines.xp_max_suffix', { xp: task.xp_max_per_day }) : '';
-    return t('screens.routines.xp_per_number', { xp: task.xp_value ?? 0, max: maxPart });
+    return t('screens.routines.xp_per_number_ratio', { ratio: `${ratioPer}:${xp}`, max: maxPart });
   }
   return t('screens.routines.xp_none');
 };
@@ -1295,24 +1349,23 @@ const routineTaskXpLabel = (task: RoutineTaskRow): string => {
 const renderRoutinesRoot = async (ctx: Context, flash?: string): Promise<void> => {
   const { user } = await ensureUserAndSettings(ctx);
   const routines = await listRoutines(user.id);
-  const lines: string[] = [t('screens.routines.title'), t('screens.routines.description')];
+  const lines: string[] = [t('screens.routines.title')];
   if (flash) lines.push(flash);
-  lines.push('');
-
   if (routines.length === 0) {
     lines.push(t('screens.routines.empty'));
   } else {
     routines.forEach((routine) => {
-      const status = routine.is_active ? '✅' : '🚫';
-      lines.push(`${status} ${routine.title} — ${routineXpLabel(routine)}`);
+      lines.push(`• ${routine.title}`);
     });
+    lines.push('');
+    lines.push(t('screens.routines.tap_to_edit'));
   }
 
   const kb = new InlineKeyboard();
   const addBtn = await makeActionButton(ctx, { label: t('buttons.routines_add'), action: 'routines.add' });
   kb.text(addBtn.text, addBtn.callback_data).row();
   for (const routine of routines) {
-    const btn = await makeActionButton(ctx, { label: `${routine.is_active ? '✅' : '🚫'} ${routine.title}`, action: 'routines.view', data: { routineId: routine.id } });
+    const btn = await makeActionButton(ctx, { label: routine.title, action: 'routines.view', data: { routineId: routine.id } });
     kb.text(btn.text, btn.callback_data).row();
   }
   const back = await makeActionButton(ctx, { label: t('buttons.back'), action: 'nav.dashboard' });
@@ -1328,27 +1381,21 @@ const renderRoutineDetails = async (ctx: Context, routineId: string, flash?: str
     await renderRoutinesRoot(ctx);
     return;
   }
-  const lines: string[] = [t('screens.routines.detail_title', { title: routine.title }), routine.description || t('screens.routines.no_description'), routineTypeLabel(routine), routineXpLabel(routine)];
+  const lines: string[] = [];
   if (flash) lines.push(flash);
 
   const kb = new InlineKeyboard();
-  const toggleBtn = await makeActionButton(ctx, { label: t('buttons.routines_toggle_active'), action: 'routines.toggle', data: { routineId } });
   const editTitleBtn = await makeActionButton(ctx, { label: t('buttons.routines_edit_title'), action: 'routines.edit_title', data: { routineId } });
-  const editDescBtn = await makeActionButton(ctx, { label: t('buttons.routines_edit_description'), action: 'routines.edit_description', data: { routineId } });
-  const editTypeBtn = await makeActionButton(ctx, { label: t('buttons.routines_edit_type'), action: 'routines.edit_type', data: { routineId } });
-  const editXpBtn = await makeActionButton(ctx, { label: t('buttons.routines_edit_xp'), action: 'routines.edit_xp_mode', data: { routineId } });
   const editTasksBtn = await makeActionButton(ctx, { label: t('buttons.routine_tasks_manage'), action: 'routines.tasks', data: { routineId } });
   const deleteBtn = await makeActionButton(ctx, { label: t('buttons.routines_delete'), action: 'routines.delete_confirm', data: { routineId } });
   const backBtn = await makeActionButton(ctx, { label: t('buttons.back'), action: 'routines.root' });
 
-  kb.text(toggleBtn.text, toggleBtn.callback_data).row();
-  kb.text(editTitleBtn.text, editTitleBtn.callback_data).text(editDescBtn.text, editDescBtn.callback_data).row();
-  kb.text(editTypeBtn.text, editTypeBtn.callback_data).text(editXpBtn.text, editXpBtn.callback_data).row();
+  kb.text(editTitleBtn.text, editTitleBtn.callback_data).row();
   kb.text(editTasksBtn.text, editTasksBtn.callback_data).row();
   kb.text(deleteBtn.text, deleteBtn.callback_data).row();
   kb.text(backBtn.text, backBtn.callback_data);
 
-  await renderScreen(ctx, { titleKey: t('screens.routines.title'), bodyLines: lines, inlineKeyboard: kb });
+  await renderScreen(ctx, { title: `🧩 ${routine.title}`, bodyLines: lines, inlineKeyboard: kb });
 };
 
 const renderRoutineDeleteConfirm = async (ctx: Context, routineId: string): Promise<void> => {
@@ -1366,14 +1413,14 @@ const renderRoutineTasks = async (ctx: Context, routineId: string, flash?: strin
     return;
   }
   const tasks = await listRoutineTasks(routineId);
-  const lines: string[] = [t('screens.routine_tasks.title', { title: routine.title })];
+  const lines: string[] = [];
   if (flash) lines.push(flash);
-  lines.push('');
   if (tasks.length === 0) {
     lines.push(t('screens.routine_tasks.list_empty'));
   } else {
     tasks.forEach((task, idx) => {
-      lines.push(`${idx + 1}) ${task.title} — ${routineTaskXpLabel(task)}`);
+      const typeIcon = task.item_type === 'boolean' ? '⭐' : task.item_type === 'duration_minutes' ? '⏱' : '🔢';
+      lines.push(`${idx + 1}) ${task.title} — ${typeIcon} ${routineTaskXpLabel(task)}`);
     });
   }
 
@@ -1388,7 +1435,7 @@ const renderRoutineTasks = async (ctx: Context, routineId: string, flash?: strin
   const backBtn = await makeActionButton(ctx, { label: t('buttons.back'), action: 'routines.view', data: { routineId } });
   kb.text(backBtn.text, backBtn.callback_data);
 
-  await renderScreen(ctx, { titleKey: t('screens.routine_tasks.title', { title: routine.title }), bodyLines: lines, inlineKeyboard: kb });
+  await renderScreen(ctx, { title: `🧩 ${routine.title}`, bodyLines: lines, inlineKeyboard: kb });
 };
 
 const promptRoutineTaskTitle = async (ctx: Context, params: { routineId: string; taskId?: string }) => {
@@ -1428,9 +1475,8 @@ const promptRoutineTaskType = async (ctx: Context, params: { routineId: string; 
 };
 
 const promptRoutineTaskXpMode = async (ctx: Context, params: { routineId: string; taskId?: string; itemType?: RoutineTaskRow['item_type'] }) => {
-  const allowed = allowedXpModesForItemType(params.itemType);
+  const allowed = allowedRoutineTaskXpModes(params.itemType);
   const modes = [
-    { key: 'none', label: t('screens.routines.xp_mode_none') },
     { key: 'fixed', label: t('screens.routines.xp_mode_fixed') },
     { key: 'per_minute', label: t('screens.routines.xp_mode_time') },
     { key: 'per_number', label: t('screens.routines.xp_mode_number') }
@@ -1455,8 +1501,8 @@ const promptRoutineTaskXpValue = async (
     params.xpMode === 'fixed'
       ? t('screens.routines.ask_fixed_xp')
       : params.xpMode === 'per_number'
-        ? t('screens.routines.ask_number_xp')
-        : t('screens.routines.ask_time_xp');
+        ? t('screens.routines.ask_number_ratio')
+        : t('screens.routines.ask_time_ratio');
   await renderScreen(ctx, { titleKey: t('screens.routine_tasks.title_short'), bodyLines: [body], inlineKeyboard: kb });
 };
 
@@ -1730,26 +1776,53 @@ const renderRoutineDailyEntry = async (ctx: Context, reportDay: ReportDayRow, ro
   const routineId = opts.routine_id;
   const taskItems = items.filter((it) => isRoutineTaskItem(it) && ((it.options_json ?? {}) as { routine_id?: string }).routine_id === routineId);
   const statuses = taskItems.length ? await listCompletionStatus(reportDay.id, taskItems) : [];
-  const doneCount = statuses.filter((s) => s.filled).length;
-  const lines: string[] = [
-    t('screens.daily_report.routine_detail_title', { title: routineItem.label ?? '' }),
-    t('screens.daily_report.routine_detail_hint', { completed: doneCount, total: statuses.length }),
-    ''
-  ];
+  const doneCount = statuses.filter((s) => s.filled && !s.skipped).length;
+  const [routineStatus] = await listCompletionStatus(reportDay.id, [routineItem]);
+  const state = routineValueState(routineStatus?.value?.value_json ?? null);
+  const lines: string[] = [`🧩 ${routineItem.label ?? ''}`, t('screens.daily_report.routine_task_progress', { completed: doneCount, total: statuses.length })];
+  if (state === 'done') {
+    lines.push(t('screens.daily_report.routine_status_done'));
+  } else if (state === 'partial') {
+    lines.push(t('screens.daily_report.routine_status_partial'));
+  } else if (state === 'skipped') {
+    lines.push(t('screens.daily_report.routine_status_skipped'));
+  } else {
+    lines.push(t('screens.daily_report.routine_status_pending'));
+    lines.push(t('screens.daily_report.routine_prompt_question'));
+  }
 
   const kb = new InlineKeyboard();
   if (!reportDay.locked && routineId) {
-    const doneBtn = await makeActionButton(ctx, {
-      label: t('buttons.routine_mark_done'),
-      action: 'dr.routine_mark_done',
-      data: { reportDayId: reportDay.id, routineId, itemId: routineItem.id }
-    });
-    const detailsBtn = await makeActionButton(ctx, {
-      label: t('buttons.routine_open_tasks'),
-      action: 'dr.routine_open_tasks',
-      data: { reportDayId: reportDay.id, routineId, itemId: routineItem.id }
-    });
-    kb.text(doneBtn.text, doneBtn.callback_data).row().text(detailsBtn.text, detailsBtn.callback_data).row();
+    if (state === 'done') {
+      const undoBtn = await makeActionButton(ctx, {
+        label: t('buttons.routine_undo'),
+        action: 'dr.routine_undo',
+        data: { reportDayId: reportDay.id, routineId, itemId: routineItem.id }
+      });
+      const detailsBtn = await makeActionButton(ctx, {
+        label: t('buttons.routine_open_tasks'),
+        action: 'dr.routine_open_tasks',
+        data: { reportDayId: reportDay.id, routineId, itemId: routineItem.id }
+      });
+      kb.text(undoBtn.text, undoBtn.callback_data).row().text(detailsBtn.text, detailsBtn.callback_data).row();
+    } else {
+      const doneBtn = await makeActionButton(ctx, {
+        label: t('buttons.routine_mark_done'),
+        action: 'dr.routine_done',
+        data: { reportDayId: reportDay.id, routineId, itemId: routineItem.id }
+      });
+      const partialBtn = await makeActionButton(ctx, {
+        label: t('buttons.routine_mark_partial'),
+        action: 'dr.routine_partial',
+        data: { reportDayId: reportDay.id, routineId, itemId: routineItem.id }
+      });
+      const skipBtn = await makeActionButton(ctx, {
+        label: t('buttons.routine_skip'),
+        action: 'dr.routine_skip',
+        data: { reportDayId: reportDay.id, routineId, itemId: routineItem.id }
+      });
+      kb.text(doneBtn.text, doneBtn.callback_data).row().text(partialBtn.text, partialBtn.callback_data).row().text(skipBtn.text, skipBtn.callback_data).row();
+    }
   }
   const backBtn = await makeActionButton(ctx, { label: t('buttons.back'), action: 'dr.menu', data: { reportDayId: reportDay.id } });
   kb.text(backBtn.text, backBtn.callback_data);
@@ -1862,7 +1935,7 @@ const continueFlowAfterAction = async (
 ): Promise<void> => {
   if (origin === 'next') {
     const context = await ensureContextByReportDayId(ctx, reportDay.id);
-    const statuses = await listCompletionStatus(reportDay.id, context.items);
+    const statuses = await listCompletionStatus(reportDay.id, filterRoutineDisplayItems(context.items));
     const next = statuses.find((s) => !s.filled && !s.skipped);
     if (next) {
       await promptForItem(ctx, context.reportDay, next.item, { origin: 'next' });
@@ -1886,8 +1959,8 @@ const renderDailyReportRoot = async (ctx: Context, localDate?: string): Promise<
 
   const targetDate = localDate ?? local.date;
   const { reportDay, items } = await ensureSpecificReportContext(ctx, targetDate);
-
-  const statuses = await listCompletionStatus(reportDay.id, items);
+  const displayItems = filterRoutineDisplayItems(items);
+  const statuses = await listCompletionStatus(reportDay.id, displayItems);
   const completed = statuses.filter((s) => s.filled).length;
   const total = statuses.length;
 
@@ -1910,7 +1983,7 @@ const renderDailyReportRoot = async (ctx: Context, localDate?: string): Promise<
   const hourNow = Number((local.time || '00:00').split(':')[0] ?? 0);
   const showYesterdayCheck = hourNow >= 0; // always true, but kept for clarity
 
-  const kb = await buildDailyReportKeyboard(ctx, reportDay, { items, statuses });
+  const kb = await buildDailyReportKeyboard(ctx, reportDay, { items: displayItems, statuses });
 
   if (showYesterdayCheck) {
     // Compute yesterday date (YYYY-MM-DD). We do simple date arithmetic in UTC and accept that formatLocalTime is the main source.
@@ -1926,7 +1999,7 @@ const renderDailyReportRoot = async (ctx: Context, localDate?: string): Promise<
       try {
         const yd = await getReportDayByDate({ userId: user.id, templateId: template.id, localDate: yesterday });
         if (yd) {
-          const ydItems = await ensureDefaultItems(user.id);
+          const ydItems = filterRoutineDisplayItems(await ensureDefaultItems(user.id));
           const ydStatuses = await listCompletionStatus(yd.id, ydItems);
           const hasPending = ydStatuses.some((s) => !s.filled && !s.skipped);
           if (hasPending) {
@@ -1957,12 +2030,19 @@ const renderDailyStatusWithFilter = async (ctx: Context, reportDayId: string, fi
   }
 
   const context = cached ?? (await ensureSpecificReportContext(ctx, reportDay.local_date));
-  const items = context.items;
+  const items = filterRoutineDisplayItems(context.items);
   const statuses = await listCompletionStatus(reportDay.id, items);
+  const decorated = statuses.map((s) => ({ ...s, routineState: isRoutineParentItem(s.item) ? routineValueState(s.value?.value_json ?? null) : null }));
 
-  let filtered = statuses;
-  if (filter === 'not_filled') filtered = statuses.filter((s) => !s.filled && !s.skipped);
-  if (filter === 'filled') filtered = statuses.filter((s) => s.filled);
+  let filtered = decorated;
+  if (filter === 'not_filled')
+    filtered = decorated.filter((s) =>
+      isRoutineParentItem(s.item) ? s.routineState !== 'done' : !s.filled && !s.skipped
+    );
+  if (filter === 'filled')
+    filtered = decorated.filter((s) =>
+      isRoutineParentItem(s.item) ? s.routineState === 'done' : s.filled
+    );
 
   const lines: string[] = [t('screens.daily_report.root_header', { date: reportDay.local_date }), t('screens.daily_report.status_header')];
 
@@ -1970,8 +2050,29 @@ const renderDailyStatusWithFilter = async (ctx: Context, reportDayId: string, fi
     lines.push(filter === 'filled' ? t('screens.daily_report.none_filled') : t('screens.daily_report.none_pending'));
   } else {
     filtered.forEach((s, idx) => {
-      const icon = s.filled ? '✅' : s.skipped ? '⏭' : '⬜️';
-      lines.push(`${icon} ${idx + 1}) ${formatItemLabel(s.item)}`);
+      const icon = isRoutineParentItem(s.item)
+        ? s.routineState === 'done'
+          ? '✅'
+          : s.routineState === 'partial'
+            ? '🌓'
+            : s.routineState === 'skipped'
+              ? '⏭'
+              : '⬜️'
+        : s.filled
+          ? '✅'
+          : s.skipped
+            ? '⏭'
+            : '⬜️';
+      const statusLabel = isRoutineParentItem(s.item)
+        ? s.routineState === 'done'
+          ? t('screens.daily_report.routine_status_done')
+          : s.routineState === 'partial'
+            ? t('screens.daily_report.routine_status_partial')
+            : s.routineState === 'skipped'
+              ? t('screens.daily_report.routine_status_skipped')
+              : t('screens.daily_report.routine_status_pending')
+        : formatItemLabel(s.item);
+      lines.push(`${icon} ${idx + 1}) ${isRoutineParentItem(s.item) ? `${formatItemLabel(s.item)} — ${statusLabel}` : statusLabel}`);
     });
   }
 
@@ -1985,7 +2086,20 @@ const renderDailyStatusWithFilter = async (ctx: Context, reportDayId: string, fi
 
   // Only allow edit actions if NOT locked.
   for (const status of filtered) {
-    const label = `${status.filled ? '✅' : status.skipped ? '⏭' : '⬜️'} ${formatItemLabel(status.item)}`;
+    const icon = isRoutineParentItem(status.item)
+      ? status.routineState === 'done'
+        ? '✅'
+        : status.routineState === 'partial'
+          ? '🌓'
+          : status.routineState === 'skipped'
+            ? '⏭'
+            : '⬜️'
+      : status.filled
+        ? '✅'
+        : status.skipped
+          ? '⏭'
+          : '⬜️';
+    const label = `${icon} ${formatItemLabel(status.item)}`;
     const action = reportDay.locked ? 'noop' : 'dr.item';
     const btn = await makeActionButton(ctx, { label, action, data: { reportDayId: reportDay.id, itemId: status.item.id, filter } });
     kb.text(btn.text, btn.callback_data).row();
@@ -3057,7 +3171,8 @@ bot.callbackQuery(/^[A-Za-z0-9_-]{8,12}$/, async (ctx) => {
             itemType: task.item_type,
             xpMode: task.xp_mode,
             xpValue: task.xp_value,
-            xpMaxPerDay: task.xp_max_per_day ?? null
+            xpMaxPerDay: task.xp_max_per_day ?? null,
+            optionsJson: task.options_json ?? {}
           }
         });
         await promptRoutineTaskTitle(ctx, { routineId: data.routineId, taskId: data.taskId });
@@ -3119,7 +3234,7 @@ bot.callbackQuery(/^[A-Za-z0-9_-]{8,12}$/, async (ctx) => {
         if (flow && flow.routineId === data.routineId) {
           const normalizedMode: RoutineTaskRow['xp_mode'] = (normalizeXpModeForItemType(flow.draft.itemType, data.xpMode) as RoutineTaskRow['xp_mode']) ?? 'none';
           if (normalizedMode === 'none') {
-            const draft = { ...flow.draft, xpMode: normalizedMode, xpValue: null, xpMaxPerDay: null };
+            const draft = { ...flow.draft, xpMode: normalizedMode, xpValue: null, xpMaxPerDay: null, optionsJson: {} };
             setRoutineTaskFlow(telegramId, { ...flow, draft, step: 'xp_value' });
             // save immediately
             const saved = flow.taskId
@@ -3129,7 +3244,8 @@ bot.callbackQuery(/^[A-Za-z0-9_-]{8,12}$/, async (ctx) => {
                   itemType: draft.itemType ?? 'boolean',
                   xpMode: normalizedMode,
                   xpValue: null,
-                  xpMaxPerDay: null
+                  xpMaxPerDay: null,
+                  optionsJson: {}
                 })
               : await createRoutineTask({
                   routineId: flow.routineId,
@@ -3138,14 +3254,15 @@ bot.callbackQuery(/^[A-Za-z0-9_-]{8,12}$/, async (ctx) => {
                   itemType: draft.itemType ?? 'boolean',
                   xpMode: normalizedMode,
                   xpValue: null,
-                  xpMaxPerDay: null
+                  xpMaxPerDay: null,
+                  optionsJson: {}
                 });
             clearRoutineTaskFlow(telegramId);
             clearReportContextCache();
             await renderRoutineTasks(ctx, data.routineId, t('screens.routines.saved'));
             return;
           }
-          const draft = { ...flow.draft, xpMode: normalizedMode };
+          const draft = { ...flow.draft, xpMode: normalizedMode, optionsJson: {} };
           setRoutineTaskFlow(telegramId, { ...flow, draft, step: 'xp_value' });
           await promptRoutineTaskXpValue(ctx, { routineId: data.routineId, taskId: flow.taskId, xpMode: normalizedMode, itemType: draft.itemType });
           return;
@@ -3572,7 +3689,7 @@ bot.callbackQuery(/^[A-Za-z0-9_-]{8,12}$/, async (ctx) => {
           return;
         }
 
-        const statuses = await listCompletionStatus(reportDay.id, items);
+        const statuses = await listCompletionStatus(reportDay.id, filterRoutineDisplayItems(items));
         const next = statuses.find((s) => !s.filled && !s.skipped);
         if (!next) {
           await renderScreen(ctx, { titleKey: t('screens.daily_report.title'), bodyLines: [t('screens.daily_report.all_done')], inlineKeyboard: await buildDailyReportKeyboard(ctx, reportDay) });
@@ -4050,6 +4167,7 @@ bot.callbackQuery(/^[A-Za-z0-9_-]{8,12}$/, async (ctx) => {
         return;
       }
 
+      case 'dr.routine_done':
       case 'dr.routine_mark_done': {
         const data = (payload as { data?: { reportDayId?: string; routineId?: string; itemId?: string } }).data;
         if (!data?.reportDayId || !data.routineId) {
@@ -4078,13 +4196,192 @@ bot.callbackQuery(/^[A-Za-z0-9_-]{8,12}$/, async (ctx) => {
           return;
         }
         const routineId = ((routineItem.options_json ?? {}) as { routine_id?: string }).routine_id;
-        await saveValue({ reportDayId: reportDay.id, item: routineItem, valueJson: { value: true, completed_all: true }, userId: reportDay.user_id });
+        await saveValue({
+          reportDayId: reportDay.id,
+          item: routineItem,
+          valueJson: { value: true, completed_all: true, status: 'done' },
+          userId: reportDay.user_id
+        });
         if (routineId) {
           const taskItems = context.items.filter(
             (i) => isRoutineTaskItem(i) && ((i.options_json ?? {}) as { routine_id?: string }).routine_id === routineId
           );
           for (const task of taskItems) {
-            await saveValue({ reportDayId: reportDay.id, item: task, valueJson: { skipped: true }, userId: reportDay.user_id });
+            await saveValue({
+              reportDayId: reportDay.id,
+              item: task,
+              valueJson: { value: true, auto_completed: true },
+              userId: reportDay.user_id,
+              applyXp: false,
+              resetXpApplied: true
+            });
+          }
+        }
+        await renderDailyReportRoot(ctx, reportDay.local_date);
+        return;
+      }
+
+      case 'dr.routine_partial': {
+        const data = (payload as { data?: { reportDayId?: string; routineId?: string; itemId?: string } }).data;
+        if (!data?.reportDayId || !data.routineId) {
+          await renderDailyReportRoot(ctx);
+          return;
+        }
+        const reportDay = await getReportDayById(data.reportDayId);
+        if (!reportDay) {
+          await renderDailyReportRoot(ctx);
+          return;
+        }
+        if (reportDay.locked) {
+          await renderScreen(ctx, { titleKey: t('screens.daily_report.title'), bodyLines: isLockedMessageLines(reportDay), inlineKeyboard: await buildDailyReportKeyboard(ctx, reportDay) });
+          return;
+        }
+        const context = await ensureSpecificReportContext(ctx, reportDay.local_date);
+        const routineItem =
+          (data.itemId && context.items.find((i) => i.id === data.itemId)) ||
+          context.items.find(
+            (i) =>
+              isRoutineParentItem(i) &&
+              ((i.options_json ?? {}) as { routine_id?: string }).routine_id === data.routineId
+          );
+        if (!routineItem) {
+          await renderDailyReportRoot(ctx, reportDay.local_date);
+          return;
+        }
+        await saveValue({
+          reportDayId: reportDay.id,
+          item: routineItem,
+          valueJson: { status: 'partial', completed_all: false, value: false },
+          userId: reportDay.user_id,
+          applyXp: false,
+          resetXpApplied: true
+        });
+        await renderRoutineDailyTasks(ctx, { reportDay, routineItem, items: context.items });
+        return;
+      }
+
+      case 'dr.routine_skip': {
+        const data = (payload as { data?: { reportDayId?: string; routineId?: string; itemId?: string } }).data;
+        if (!data?.reportDayId || !data.routineId) {
+          await renderDailyReportRoot(ctx);
+          return;
+        }
+        const reportDay = await getReportDayById(data.reportDayId);
+        if (!reportDay) {
+          await renderDailyReportRoot(ctx);
+          return;
+        }
+        if (reportDay.locked) {
+          await renderScreen(ctx, { titleKey: t('screens.daily_report.title'), bodyLines: isLockedMessageLines(reportDay), inlineKeyboard: await buildDailyReportKeyboard(ctx, reportDay) });
+          return;
+        }
+        const context = await ensureSpecificReportContext(ctx, reportDay.local_date);
+        const routineItem =
+          (data.itemId && context.items.find((i) => i.id === data.itemId)) ||
+          context.items.find(
+            (i) =>
+              isRoutineParentItem(i) &&
+              ((i.options_json ?? {}) as { routine_id?: string }).routine_id === data.routineId
+          );
+        if (!routineItem) {
+          await renderDailyReportRoot(ctx, reportDay.local_date);
+          return;
+        }
+        const routineId = ((routineItem.options_json ?? {}) as { routine_id?: string }).routine_id;
+        await saveValue({
+          reportDayId: reportDay.id,
+          item: routineItem,
+          valueJson: { skipped: true, status: 'skipped' },
+          userId: reportDay.user_id,
+          applyXp: false,
+          resetXpApplied: true
+        });
+        if (routineId) {
+          const taskItems = context.items.filter(
+            (i) => isRoutineTaskItem(i) && ((i.options_json ?? {}) as { routine_id?: string }).routine_id === routineId
+          );
+          for (const task of taskItems) {
+            await saveValue({
+              reportDayId: reportDay.id,
+              item: task,
+              valueJson: { skipped: true },
+              userId: reportDay.user_id,
+              applyXp: false,
+              resetXpApplied: true
+            });
+          }
+        }
+        await renderDailyReportRoot(ctx, reportDay.local_date);
+        return;
+      }
+
+      case 'dr.routine_undo': {
+        const data = (payload as { data?: { reportDayId?: string; routineId?: string; itemId?: string } }).data;
+        if (!data?.reportDayId || !data.routineId) {
+          await renderDailyReportRoot(ctx);
+          return;
+        }
+        const reportDay = await getReportDayById(data.reportDayId);
+        if (!reportDay) {
+          await renderDailyReportRoot(ctx);
+          return;
+        }
+        if (reportDay.locked) {
+          await renderScreen(ctx, { titleKey: t('screens.daily_report.title'), bodyLines: isLockedMessageLines(reportDay), inlineKeyboard: await buildDailyReportKeyboard(ctx, reportDay) });
+          return;
+        }
+        const context = await ensureSpecificReportContext(ctx, reportDay.local_date);
+        const routineItem =
+          (data.itemId && context.items.find((i) => i.id === data.itemId)) ||
+          context.items.find(
+            (i) =>
+              isRoutineParentItem(i) &&
+              ((i.options_json ?? {}) as { routine_id?: string }).routine_id === data.routineId
+          );
+        if (!routineItem) {
+          await renderDailyReportRoot(ctx, reportDay.local_date);
+          return;
+        }
+        const [statusRow] = await listCompletionStatus(reportDay.id, [routineItem]);
+        const xpApplied = computeRoutineParentXp(routineItem, statusRow?.value?.value_json ?? null);
+        const meta = routineMetaFromItem(routineItem);
+        if (xpApplied > 0) {
+          await addXpDelta({
+            userId: reportDay.user_id,
+            delta: -xpApplied,
+            reason: `routine_undo:${reportDay.id}:${routineItem.id}`,
+            refType: 'daily_report',
+            refId: routineItem.id,
+            metadata: {
+              source_type: 'routine',
+              routine_id: meta.routineId ?? null,
+              routine_task_id: null,
+              report_day_id: reportDay.id
+            }
+          });
+        }
+        await saveValue({
+          reportDayId: reportDay.id,
+          item: routineItem,
+          valueJson: null,
+          userId: reportDay.user_id,
+          applyXp: false,
+          resetXpApplied: true
+        });
+        const routineId = ((routineItem.options_json ?? {}) as { routine_id?: string }).routine_id;
+        if (routineId) {
+          const taskItems = context.items.filter(
+            (i) => isRoutineTaskItem(i) && ((i.options_json ?? {}) as { routine_id?: string }).routine_id === routineId
+          );
+          for (const task of taskItems) {
+            await saveValue({
+              reportDayId: reportDay.id,
+              item: task,
+              valueJson: null,
+              userId: reportDay.user_id,
+              applyXp: false,
+              resetXpApplied: true
+            });
           }
         }
         await renderDailyReportRoot(ctx, reportDay.local_date);
@@ -5025,13 +5322,19 @@ bot.on('message:text', async (ctx: Context) => {
     const telegramId = stateKey;
     const saveTask = async (draft: RoutineTaskFlow['draft']): Promise<void> => {
       const xpMode = normalizeXpModeForItemType(draft.itemType, draft.xpMode ?? null) ?? 'none';
+      const ratioOpts = draft.optionsJson ?? {};
+      const ratioPerRaw = Number((ratioOpts as { per?: unknown; perNumber?: unknown }).per ?? (ratioOpts as { perNumber?: unknown }).perNumber);
+      const ratioXpRaw = Number((ratioOpts as { xp?: unknown; xpPerUnit?: unknown }).xp ?? (ratioOpts as { xpPerUnit?: unknown }).xpPerUnit);
+      const normalizedPer = Number.isFinite(ratioPerRaw) && ratioPerRaw > 0 ? ratioPerRaw : 1;
+      const normalizedXp = Number.isFinite(ratioXpRaw) && ratioXpRaw >= 0 ? ratioXpRaw : draft.xpValue ?? 0;
       const payload = {
         title: draft.title ?? t('screens.routine_tasks.default_title'),
         description: draft.description ?? null,
         itemType: draft.itemType ?? 'boolean',
         xpMode,
-        xpValue: xpMode === 'none' ? null : draft.xpValue ?? 0,
-        xpMaxPerDay: xpMode === 'per_minute' || xpMode === 'per_number' ? draft.xpMaxPerDay ?? null : null
+        xpValue: xpMode === 'none' ? null : normalizedXp,
+        xpMaxPerDay: xpMode === 'per_minute' || xpMode === 'per_number' ? draft.xpMaxPerDay ?? null : null,
+        optionsJson: xpMode === 'none' ? {} : { per: normalizedPer, xp: normalizedXp }
       };
       if (routineTaskFlow.mode === 'edit' && routineTaskFlow.taskId) {
         await updateRoutineTask(routineTaskFlow.taskId, payload);
@@ -5063,19 +5366,41 @@ bot.on('message:text', async (ctx: Context) => {
     }
 
     if (routineTaskFlow.step === 'xp_value') {
-      const xpVal = Number(text);
-      if (!Number.isInteger(xpVal)) {
+      const xpMode = routineTaskFlow.draft.xpMode ?? 'none';
+      if (xpMode === 'fixed') {
+        const xpVal = parseNonNegativeNumber(text);
+        if (xpVal === null) {
+          await ctx.reply(t('screens.daily_report.invalid_number'));
+          return;
+        }
+        if (routineTaskFlow.draft.itemType === 'duration_minutes') {
+          const draft = { ...routineTaskFlow.draft, xpValue: xpVal, optionsJson: { per: 1, xp: xpVal } };
+          setRoutineTaskFlow(telegramId, { ...routineTaskFlow, draft, step: 'xp_max' });
+          await promptRoutineTaskXpMax(ctx, { routineId: routineTaskFlow.routineId, taskId: routineTaskFlow.taskId });
+          return;
+        }
+        await saveTask({ ...routineTaskFlow.draft, xpValue: xpVal, optionsJson: { per: 1, xp: xpVal } });
+        return;
+      }
+
+      const ratio = parseXpRatio(text);
+      if (!ratio) {
         await ctx.reply(t('screens.daily_report.invalid_number'));
         return;
       }
-      const xpMode = routineTaskFlow.draft.xpMode ?? 'none';
-      if (xpMode === 'per_minute' || xpMode === 'per_number') {
-        const draft = { ...routineTaskFlow.draft, xpValue: xpVal };
+      if (xpMode === 'per_minute') {
+        const draft = { ...routineTaskFlow.draft, xpValue: ratio.xp, optionsJson: { per: ratio.per, xp: ratio.xp } };
         setRoutineTaskFlow(telegramId, { ...routineTaskFlow, draft, step: 'xp_max' });
         await promptRoutineTaskXpMax(ctx, { routineId: routineTaskFlow.routineId, taskId: routineTaskFlow.taskId });
         return;
       }
-      await saveTask({ ...routineTaskFlow.draft, xpValue: xpVal });
+      if (xpMode === 'per_number') {
+        const draft = { ...routineTaskFlow.draft, xpValue: ratio.xp, optionsJson: { per: ratio.per, xp: ratio.xp } };
+        setRoutineTaskFlow(telegramId, { ...routineTaskFlow, draft, step: 'xp_max' });
+        await promptRoutineTaskXpMax(ctx, { routineId: routineTaskFlow.routineId, taskId: routineTaskFlow.taskId });
+        return;
+      }
+      await saveTask({ ...routineTaskFlow.draft, xpValue: ratio.xp, optionsJson: { per: ratio.per, xp: ratio.xp } });
       return;
     }
 

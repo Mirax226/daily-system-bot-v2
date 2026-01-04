@@ -598,6 +598,7 @@ export type Database = {
           xp_mode: 'none' | 'fixed' | 'per_minute' | 'per_number';
           xp_value: number | null;
           xp_max_per_day: number | null;
+          options_json: Record<string, unknown>;
           sort_order: number;
           created_at: string;
           updated_at: string;
@@ -611,6 +612,7 @@ export type Database = {
           xp_mode?: 'none' | 'fixed' | 'per_minute' | 'per_number';
           xp_value?: number | null;
           xp_max_per_day?: number | null;
+          options_json?: Record<string, unknown>;
           sort_order?: number;
           created_at?: string;
           updated_at?: string;
@@ -624,6 +626,7 @@ export type Database = {
           xp_mode?: 'none' | 'fixed' | 'per_minute' | 'per_number';
           xp_value?: number | null;
           xp_max_per_day?: number | null;
+          options_json?: Record<string, unknown>;
           sort_order?: number;
           created_at?: string;
           updated_at?: string;

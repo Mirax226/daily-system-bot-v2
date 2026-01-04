@@ -13,6 +13,7 @@ export type RoutineTaskInput = {
   xpMode: RoutineTaskRow['xp_mode'];
   xpValue?: number | null;
   xpMaxPerDay?: number | null;
+  optionsJson?: Record<string, unknown> | null;
   sortOrder?: number;
 };
 
@@ -74,6 +75,7 @@ export async function createRoutineTask(input: RoutineTaskInput, client: Client 
     xp_mode: input.xpMode,
     xp_value: input.xpValue ?? null,
     xp_max_per_day: input.xpMaxPerDay ?? null,
+    options_json: input.optionsJson ?? {},
     sort_order: input.sortOrder ?? 1000
   };
 
@@ -98,6 +100,7 @@ export async function updateRoutineTask(
     ...(patch.xpMode ? { xp_mode: patch.xpMode } : {}),
     ...(patch.xpValue !== undefined ? { xp_value: patch.xpValue } : {}),
     ...(patch.xpMaxPerDay !== undefined ? { xp_max_per_day: patch.xpMaxPerDay } : {}),
+    ...(patch.optionsJson !== undefined ? { options_json: patch.optionsJson ?? {} } : {}),
     ...(patch.sortOrder !== undefined ? { sort_order: patch.sortOrder } : {}),
     updated_at: new Date().toISOString()
   };
