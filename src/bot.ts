@@ -2256,7 +2256,7 @@ const renderTemplateDeleteConfirm = async (ctx: Context, templateId: string): Pr
     return;
   }
 
-  const lines: string[] = [t('screens.daily_report.templates_title'), '', t('screens.daily_report.template_delete_confirm', { title: tpl.title ?? t('screens.templates.default_title') })];
+  const lines: string[] = ['', t('screens.daily_report.template_delete_confirm', { title: tpl.title ?? t('screens.templates.default_title') })];
 
   const confirmBtn = await makeActionButton(ctx, { label: t('buttons.dr_template_delete'), action: 'dr.template_delete', data: { templateId } });
   const backBtn = await makeActionButton(ctx, { label: t('buttons.tpl_actions_back'), action: 'dr.template_actions', data: { templateId } });
