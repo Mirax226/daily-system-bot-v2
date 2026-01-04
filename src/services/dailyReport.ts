@@ -276,7 +276,11 @@ export async function listRecentReportDays(
     }
 
     const items = (itemsData as ReportItemRow[]) ?? [];
-    const statuses = await listCompletionStatus(day.id, items, client);
+    const displayItems = items.filter((i) => {
+      const opts = (i.options_json ?? {}) as { routine_role?: string; routine_task_id?: string };
+      return opts.routine_role !== 'task' && !opts.routine_task_id;
+    });
+    const statuses = await listCompletionStatus(day.id, displayItems, client);
     const completed = statuses.filter((s) => s.filled).length;
     const skipped = statuses.filter((s) => s.skipped).length;
     result.push({ day, completed, skipped, total: statuses.length });
