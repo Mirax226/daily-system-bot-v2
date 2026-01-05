@@ -69,6 +69,7 @@ import { renderScreen, ensureUserAndSettings as renderEnsureUserAndSettings, upd
 import { aiEnabledForUser, sendMainMenu } from './ui/mainMenu';
 
 import { formatLocalTime } from './utils/time';
+import { logError } from './utils/logger';
 import { resolveLocale, t, withLocale, type Locale } from './i18n';
 
 import type { ReportItemRow, ReportDayRow, RewardRow, RoutineRow, RoutineTaskRow } from './types/supabase';
@@ -5865,5 +5866,7 @@ bot.on('message:text', async (ctx: Context) => {
 
 bot.catch((err: BotError<Context>) => {
   const { ctx, error } = err;
-  console.error('Bot error:', { updateId: ctx.update?.update_id, error });
+  const errorMessage = error instanceof Error ? error.message : String(error);
+  const updatePayload = ctx.update ? { updateId: ctx.update.update_id, updateType: Object.keys(ctx.update)[0] } : undefined;
+  logError('Telegram bot error', { error: errorMessage, update: updatePayload });
 });

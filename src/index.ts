@@ -4,8 +4,29 @@ import { bot } from './bot';
 import { config } from './config';
 import { getSupabaseClient } from './db';
 import { processDueReminders } from './services/reminders';
+import { logError } from './utils/logger';
 
 const server = Fastify({ logger: true });
+
+server.setErrorHandler((err, request, reply) => {
+  logError('HTTP request error', {
+    method: request.method,
+    url: request.url,
+    statusCode: reply.statusCode,
+    error: err.message,
+    stack: err.stack
+  });
+
+  reply.status(500).send({ ok: false });
+});
+
+process.on('unhandledRejection', (reason) => {
+  logError('Unhandled promise rejection', { reason });
+});
+
+process.on('uncaughtException', (err) => {
+  logError('Uncaught exception', { error: err.message, stack: err.stack });
+});
 
 server.get('/health', async () => {
   return { status: 'ok' };
