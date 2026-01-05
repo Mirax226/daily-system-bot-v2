@@ -22,6 +22,8 @@ CRON_SECRET=your-cron-secret
 SUPABASE_URL=https://your-project.supabase.co
 SUPABASE_SERVICE_ROLE_KEY=your-service-role-key
 DEFAULT_TIMEZONE=Asia/Tehran
+PATH_APPLIER_LOG_URL=https://path-applier.example.com/project-log/daily-system
+PATH_APPLIER_LOG_MIN_LEVEL=error
 ```
 
 ## Local Development
@@ -47,3 +49,8 @@ DEFAULT_TIMEZONE=Asia/Tehran
 - Endpoint: `POST /cron/tick`
 - Header: `X-CRON-SECRET: <CRON_SECRET>`
 - Configure cron-job.org to call this endpoint. The handler is currently a stub and just acknowledges the request.
+
+## Log forwarding to Path Applier
+If `PATH_APPLIER_LOG_URL` is set, the bot will forward logs to Path Applier in addition to console output.
+Use `PATH_APPLIER_LOG_MIN_LEVEL` to control which levels are sent:
+`error` (default), `warn`, or `info`.
