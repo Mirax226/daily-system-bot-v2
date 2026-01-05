@@ -1,0 +1,3 @@
+This is a test file created by a git patch.
+You can safely delete it after verifying Path Applier works.
+No behavior of the bot is changed.
