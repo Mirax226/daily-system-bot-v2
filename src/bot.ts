@@ -59,6 +59,7 @@ import {
   unlockReportDay,
   listRecentReportDays
 } from './services/dailyReport';
+import { clearNoteForDate, getNoteForDate, getTodayDateString, listRecentNotes, upsertNoteForDate } from './services/dailyReports';
 
 import { consumeCallbackToken } from './services/callbackTokens';
 import { getRecentTelemetryEvents, isTelemetryEnabled, logTelemetryEvent } from './services/telemetry';
@@ -176,6 +177,15 @@ type ReminderFlow = {
   };
 };
 
+type NotesFlow =
+  | {
+      mode: 'edit_today';
+    }
+  | {
+      mode: 'edit_specific';
+      targetDate: string;
+    };
+
 type ReminderlessState = {
   awaitingValue?: AwaitingValueState;
 
@@ -185,6 +195,7 @@ type ReminderlessState = {
 
   timeDraft?: TimeDraftState;
   reminderFlow?: ReminderFlow;
+  notesFlow?: NotesFlow;
   statusFilter?: { reportDayId: string; filter: 'all' | 'not_filled' | 'filled' };
 
   rewardEdit?: {
@@ -255,6 +266,18 @@ const setReminderFlow = (telegramId: string, flow: ReminderFlow): void => {
 const clearReminderFlow = (telegramId: string): void => {
   const st = { ...(userStates.get(telegramId) || {}) };
   delete st.reminderFlow;
+  userStates.set(telegramId, st);
+};
+
+const setNotesFlow = (telegramId: string, flow: NotesFlow): void => {
+  const st = { ...(userStates.get(telegramId) || {}) };
+  st.notesFlow = flow;
+  userStates.set(telegramId, st);
+};
+
+const clearNotesFlow = (telegramId: string): void => {
+  const st = { ...(userStates.get(telegramId) || {}) };
+  delete st.notesFlow;
   userStates.set(telegramId, st);
 };
 
@@ -1401,6 +1424,76 @@ const renderRewardEditMenu = async (ctx: Context, reward: RewardRow): Promise<vo
 const renderReportsMenu = async (ctx: Context): Promise<void> => {
   const kb = await buildReportsMenuKeyboard(ctx);
   await renderScreen(ctx, { titleKey: 'screens.reports.title', bodyLines: ['screens.reports.choose_category'], inlineKeyboard: kb });
+};
+
+const renderNotesToday = async (ctx: Context): Promise<void> => {
+  const { user } = await ensureUserAndSettings(ctx);
+  const today = getTodayDateString(user.timezone ?? config.defaultTimezone);
+  const note = await getNoteForDate(user.id, today);
+
+  const lines: string[] = [];
+  if (!note || note.trim() === '') {
+    lines.push(t('screens.notes.today_empty'));
+  } else {
+    lines.push(t('screens.notes.today_preview_header'), '');
+    const preview = note.split('\n').slice(0, 3).join('\n');
+    lines.push(preview);
+  }
+
+  const kb = new InlineKeyboard();
+  const editLabel = note && note.trim() !== '' ? t('buttons.edit') : t('buttons.add');
+  const editBtn = await makeActionButton(ctx, { label: editLabel, action: 'notes.edit_today' });
+  const clearBtn = await makeActionButton(ctx, { label: t('buttons.clear'), action: 'notes.clear_today' });
+  const historyBtn = await makeActionButton(ctx, { label: t('buttons.history'), action: 'notes.history' });
+  const backBtn = await makeActionButton(ctx, { label: t('buttons.back'), action: 'nav.dashboard' });
+
+  kb.text(editBtn.text, editBtn.callback_data).row();
+  kb.text(clearBtn.text, clearBtn.callback_data).row();
+  kb.text(historyBtn.text, historyBtn.callback_data).row();
+  kb.text(backBtn.text, backBtn.callback_data);
+
+  await renderScreen(ctx, {
+    titleKey: t('screens.notes.title_today'),
+    bodyLines: lines,
+    inlineKeyboard: kb
+  });
+};
+
+const renderNotesHistory = async (ctx: Context): Promise<void> => {
+  const { user } = await ensureUserAndSettings(ctx);
+  const days = 7;
+  const notes = await listRecentNotes(user.id, days, user.timezone ?? config.defaultTimezone);
+
+  const lines: string[] = [];
+  if (notes.length === 0) {
+    lines.push(t('screens.notes.history_empty', { days: String(days) }));
+  } else {
+    lines.push(t('screens.notes.history_header'), '');
+    for (const entry of notes) {
+      const preview = entry.note.split('\n')[0]?.slice(0, 40) ?? '';
+      lines.push(
+        t('screens.notes.history_item_line', {
+          date: entry.date,
+          preview
+        })
+      );
+    }
+    lines.push('', t('screens.notes.history_open_hint'));
+  }
+
+  const kb = new InlineKeyboard();
+  for (const entry of notes) {
+    const btn = await makeActionButton(ctx, { label: entry.date, action: 'notes.view', data: { date: entry.date } });
+    kb.text(btn.text, btn.callback_data).row();
+  }
+  const backBtn = await makeActionButton(ctx, { label: t('buttons.back'), action: 'nav.notes' });
+  kb.text(backBtn.text, backBtn.callback_data);
+
+  await renderScreen(ctx, {
+    titleKey: t('screens.notes.title_history'),
+    bodyLines: lines,
+    inlineKeyboard: kb
+  });
 };
 
 const renderXpSummary = async (ctx: Context): Promise<void> => {
@@ -3229,6 +3322,7 @@ bot.callbackQuery('dbg:test', async (ctx) => {
 [
   { key: 'buttons.nav_dashboard', handler: renderDashboard },
   { key: 'buttons.nav_daily_report', handler: async (ctx: Context) => renderDailyReportRoot(ctx) },
+  { key: 'buttons.notes', handler: renderNotesToday },
   { key: 'buttons.nav_reportcar', handler: renderReportcar },
   { key: 'buttons.nav_tasks', handler: renderTasks },
   { key: 'buttons.nav_todo', handler: renderTodo },
@@ -3281,6 +3375,9 @@ bot.callbackQuery(/^[A-Za-z0-9_-]{8,12}$/, async (ctx) => {
         return;
       case 'nav.daily_report':
         await renderDailyReportRoot(ctx);
+        return;
+      case 'nav.notes':
+        await renderNotesToday(ctx);
         return;
       case 'dr.back':
         await renderDashboard(ctx);
@@ -3349,6 +3446,75 @@ bot.callbackQuery(/^[A-Za-z0-9_-]{8,12}$/, async (ctx) => {
       case 'nav.settings':
         await renderSettingsRoot(ctx);
         return;
+      case 'notes.edit_today': {
+        if (ctx.from) {
+          setNotesFlow(String(ctx.from.id), { mode: 'edit_today' });
+        }
+        await renderScreen(ctx, {
+          titleKey: t('screens.notes.title_today'),
+          bodyLines: [t('screens.notes.edit_prompt'), '', t('screens.notes.edit_hint')]
+        });
+        return;
+      }
+      case 'notes.clear_today': {
+        const { user } = await ensureUserAndSettings(ctx);
+        const today = getTodayDateString(user.timezone ?? config.defaultTimezone);
+        await clearNoteForDate(user.id, today);
+        await renderScreen(ctx, {
+          titleKey: t('screens.notes.title_today'),
+          bodyLines: [t('screens.notes.today_cleared')]
+        });
+        await renderNotesToday(ctx);
+        return;
+      }
+      case 'notes.history':
+        await renderNotesHistory(ctx);
+        return;
+      case 'notes.view': {
+        const data = (payload as { data?: { date?: string } }).data;
+        const date = data?.date;
+        if (!date) {
+          await renderNotesHistory(ctx);
+          return;
+        }
+        const { user } = await ensureUserAndSettings(ctx);
+        const note = await getNoteForDate(user.id, date);
+        const lines: string[] = [];
+        if (!note || note.trim() === '') {
+          lines.push(t('screens.notes.view_empty'));
+        } else {
+          lines.push(note);
+        }
+
+        const kb = new InlineKeyboard();
+        const editBtn = await makeActionButton(ctx, { label: t('buttons.edit'), action: 'notes.edit_specific', data: { date } });
+        const backBtn = await makeActionButton(ctx, { label: t('buttons.back'), action: 'notes.history' });
+        kb.text(editBtn.text, editBtn.callback_data).row();
+        kb.text(backBtn.text, backBtn.callback_data);
+
+        await renderScreen(ctx, {
+          titleKey: t('screens.notes.view_title', { date }),
+          bodyLines: lines,
+          inlineKeyboard: kb
+        });
+        return;
+      }
+      case 'notes.edit_specific': {
+        const data = (payload as { data?: { date?: string } }).data;
+        const date = data?.date;
+        if (!date || !ctx.from) {
+          await renderNotesHistory(ctx);
+          return;
+        }
+
+        setNotesFlow(String(ctx.from.id), { mode: 'edit_specific', targetDate: date });
+
+        await renderScreen(ctx, {
+          titleKey: t('screens.notes.view_title', { date }),
+          bodyLines: [t('screens.notes.edit_prompt'), '', t('screens.notes.edit_hint')]
+        });
+        return;
+      }
       case 'settings.language': {
         const { settings, locale } = await ensureUserAndSettings(ctx);
         await renderLanguageSelection(ctx, {
@@ -5530,9 +5696,40 @@ bot.callbackQuery(/^[A-Za-z0-9_-]{8,12}$/, async (ctx) => {
 bot.on('message:text', async (ctx: Context) => {
   if (!ctx.from || !ctx.message || typeof ctx.message.text !== 'string') return;
 
-  const text = ctx.message.text.trim();
+  const rawText = ctx.message.text;
+  const text = rawText.trim();
   const stateKey = String(ctx.from.id);
   const state = userStates.get(stateKey) ?? {};
+
+  if (state.notesFlow) {
+    const flow = state.notesFlow;
+    const { user } = await ensureUserAndSettings(ctx);
+
+    if (flow.mode === 'edit_today') {
+      const today = getTodayDateString(user.timezone ?? config.defaultTimezone);
+      await upsertNoteForDate(user.id, today, rawText);
+      clearNotesFlow(stateKey);
+
+      const preview = rawText.split('\n').slice(0, 3).join('\n');
+      await renderScreen(ctx, {
+        titleKey: t('screens.notes.title_today'),
+        bodyLines: [t('screens.notes.today_saved'), '', t('screens.notes.today_preview_header'), '', preview]
+      });
+      await renderNotesToday(ctx);
+      return;
+    }
+
+    if (flow.mode === 'edit_specific') {
+      const date = flow.targetDate;
+      await upsertNoteForDate(user.id, date, rawText);
+      clearNotesFlow(stateKey);
+      await renderScreen(ctx, {
+        titleKey: t('screens.notes.view_title', { date }),
+        bodyLines: [t('screens.notes.today_saved'), '', rawText]
+      });
+      return;
+    }
+  }
 
   // 1) Daily Report free text input (when explicitly requested)
   if (state.awaitingValue) {

@@ -377,6 +377,22 @@
     "main_menu": {
       "title": "Main menu"
     },
+    "notes": {
+      "title_today": "Today’s Notes",
+      "title_history": "Notes history",
+      "today_empty": "You have not written any notes for today yet.",
+      "today_preview_header": "Today’s note:",
+      "today_saved": "Note saved for today.",
+      "today_cleared": "Today’s note has been cleared.",
+      "history_header": "Notes from recent days:",
+      "history_empty": "No notes found for the last {{days}} days.",
+      "history_item_line": "{{date}} – {{preview}}",
+      "history_open_hint": "Choose a date to view the full note.",
+      "view_title": "Notes for {{date}}",
+      "view_empty": "No note was saved for this day.",
+      "edit_prompt": "Send the text for today’s note.",
+      "edit_hint": "You can send multiple lines. The whole message will be saved as today’s note."
+    },
     "coming_soon_generic": "Coming soon: {feature}"
   },
   "buttons": {
@@ -448,6 +464,11 @@
     "dr_yesterday_catchup": "📅 Complete yesterday",
     "dr_fill_yesterday": "📅 Fill yesterday",
     "dr_open_date": "Open day",
+    "notes": "Notes",
+    "edit": "Edit",
+    "add": "Add",
+    "clear": "Clear",
+    "history": "History",
     "skip": "⏭ Skip",
     "cancel": "Cancel",
     "help": "❓ Help",

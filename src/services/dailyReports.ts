@@ -35,6 +35,100 @@ export const getTodayDateString = (timezone?: string | null): string => {
   return formatDateParts(new Date(), tz).date;
 };
 
+const getDateStringForOffset = (offsetDays: number, timezone?: string | null): string => {
+  const tz = normalizeTimezone(timezone);
+  const target = new Date(Date.now() + offsetDays * 24 * 60 * 60 * 1000);
+  return formatDateParts(target, tz).date;
+};
+
+export async function getNoteForDate(
+  userId: string,
+  localDate: string,
+  client = getSupabaseClient()
+): Promise<string | null> {
+  const { data, error } = await client
+    .from(DAILY_REPORTS_TABLE)
+    .select('notes')
+    .eq('user_id', userId)
+    .eq('report_date', localDate)
+    .maybeSingle();
+
+  if (error) {
+    console.error({ scope: 'daily_reports', event: 'note_get_error', userId, localDate, error });
+    throw new Error(`Failed to load note: ${error.message}`);
+  }
+
+  return (data as { notes: string | null } | null)?.notes ?? null;
+}
+
+export async function upsertNoteForDate(
+  userId: string,
+  localDate: string,
+  text: string,
+  client = getSupabaseClient()
+): Promise<void> {
+  const payload = {
+    user_id: userId,
+    report_date: localDate,
+    notes: text,
+    updated_at: new Date().toISOString()
+  };
+
+  const { error } = await client.from(DAILY_REPORTS_TABLE).upsert(payload, { onConflict: 'user_id,report_date' });
+
+  if (error) {
+    console.error({ scope: 'daily_reports', event: 'note_upsert_error', userId, localDate, error });
+    throw new Error(`Failed to save note: ${error.message}`);
+  }
+}
+
+export async function clearNoteForDate(
+  userId: string,
+  localDate: string,
+  client = getSupabaseClient()
+): Promise<void> {
+  const payload = {
+    user_id: userId,
+    report_date: localDate,
+    notes: null,
+    updated_at: new Date().toISOString()
+  };
+
+  const { error } = await client.from(DAILY_REPORTS_TABLE).upsert(payload, { onConflict: 'user_id,report_date' });
+
+  if (error) {
+    console.error({ scope: 'daily_reports', event: 'note_clear_error', userId, localDate, error });
+    throw new Error(`Failed to clear note: ${error.message}`);
+  }
+}
+
+export async function listRecentNotes(
+  userId: string,
+  days: number,
+  timezone?: string | null,
+  client = getSupabaseClient()
+): Promise<Array<{ date: string; note: string }>> {
+  const startDate = getDateStringForOffset(-(days - 1), timezone);
+
+  const { data, error } = await client
+    .from(DAILY_REPORTS_TABLE)
+    .select('report_date, notes')
+    .eq('user_id', userId)
+    .gte('report_date', startDate)
+    .not('notes', 'is', null)
+    .neq('notes', '')
+    .order('report_date', { ascending: false });
+
+  if (error) {
+    console.error({ scope: 'daily_reports', event: 'notes_list_error', userId, error });
+    throw new Error(`Failed to list notes: ${error.message}`);
+  }
+
+  return (
+    (data as { report_date: string; notes: string | null }[] | null) ?? []
+  ).map((row) => ({ date: row.report_date, note: row.notes ?? '' }));
+}
+
 export async function upsertTodayReport(
   params: { userId: string; timezone?: string | null },
   client = getSupabaseClient()
