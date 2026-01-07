@@ -270,8 +270,20 @@
       "coming_soon": "My Day is coming soon."
     },
     "free_text": {
-      "title": "Free Text",
-      "coming_soon": "Free Text is coming soon."
+      "title_today": "Today’s Notes",
+      "title_history": "Notes history",
+      "today_empty": "You have not written any notes for today yet.",
+      "today_preview_header": "Today’s note:",
+      "today_saved": "Note saved for today.",
+      "today_cleared": "Today’s note has been cleared.",
+      "history_header": "Notes from recent days:",
+      "history_empty": "No notes found for the last {days} days.",
+      "history_item_line": "{date} – {preview}",
+      "history_open_hint": "Choose a date to view the full note.",
+      "view_title": "Notes for {date}",
+      "view_empty": "No note was saved for this day.",
+      "edit_prompt": "Send the text for today’s note.",
+      "edit_hint": "You can send multiple lines. The whole message will be saved as today’s note."
     },
     "reminders": {
       "title": "Reminders",
@@ -377,22 +389,6 @@
     "main_menu": {
       "title": "Main menu"
     },
-    "notes": {
-      "title_today": "Today’s Notes",
-      "title_history": "Notes history",
-      "today_empty": "You have not written any notes for today yet.",
-      "today_preview_header": "Today’s note:",
-      "today_saved": "Note saved for today.",
-      "today_cleared": "Today’s note has been cleared.",
-      "history_header": "Notes from recent days:",
-      "history_empty": "No notes found for the last {{days}} days.",
-      "history_item_line": "{{date}} – {{preview}}",
-      "history_open_hint": "Choose a date to view the full note.",
-      "view_title": "Notes for {{date}}",
-      "view_empty": "No note was saved for this day.",
-      "edit_prompt": "Send the text for today’s note.",
-      "edit_hint": "You can send multiple lines. The whole message will be saved as today’s note."
-    },
     "coming_soon_generic": "Coming soon: {feature}"
   },
   "buttons": {
@@ -403,7 +399,7 @@
     "nav_todo": "📋 To-Do List",
     "nav_planning": "🗓 Planning",
     "nav_my_day": "🧭 My Day",
-    "nav_free_text": "📝 Free Text",
+    "nav_free_text": "📝 Notes",
     "nav_reminders": "⏰ Reminders",
     "nav_rewards": "🎁 Reward Center",
     "nav_reports": "📊 Reports",

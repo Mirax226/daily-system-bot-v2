@@ -58,6 +58,34 @@ export async function upsertTodayLog(
   return data as DailyReportRow;
 }
 
+export async function upsertNoteForDate(
+  params: { userId: string; reportDate: string; summary: string },
+  client = getSupabaseClient()
+): Promise<DailyReportRow> {
+  const { userId, reportDate, summary } = params;
+
+  const payload = {
+    user_id: userId,
+    report_date: reportDate,
+    notes: summary,
+    updated_at: new Date().toISOString()
+  } as const;
+
+  const { data, error } = await client
+    .from(DAILY_REPORTS_TABLE)
+    .upsert(payload, { onConflict: 'user_id,report_date' })
+    .select('*')
+    .single();
+
+  if (error) {
+    console.error({ scope: 'daily_reports', event: 'upsert_error', userId, error });
+    throw new Error(`Failed to upsert daily report: ${error.message}`);
+  }
+
+  console.log({ scope: 'daily_reports', event: 'upsert_for_date', userId, reportDate });
+  return data as DailyReportRow;
+}
+
 export async function listRecentLogs(
   params: { userId: string; limit?: number },
   client = getSupabaseClient()
@@ -78,4 +106,20 @@ export async function listRecentLogs(
   }
 
   return (data as DailyReportRow[]) ?? [];
+}
+
+export async function getTodayNote(params: { userId: string; timezone?: string | null }): Promise<DailyReportRow | null> {
+  const { date } = getTodayDateString(params.timezone ?? config.defaultTimezone);
+  const logs = await listRecentLogs({ userId: params.userId, limit: 7 });
+  return logs.find((row) => row.report_date === date) ?? null;
+}
+
+export async function clearTodayNote(params: { userId: string; timezone?: string | null }): Promise<void> {
+  await upsertTodayLog({ userId: params.userId, timezone: params.timezone, summary: '' });
+}
+
+export async function listRecentNotes(params: { userId: string; days?: number }): Promise<DailyReportRow[]> {
+  const { userId, days = 7 } = params;
+  const rows = await listRecentLogs({ userId, limit: days });
+  return rows.filter((row) => row.notes && row.notes.trim().length > 0);
 }
