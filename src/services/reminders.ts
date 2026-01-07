@@ -243,3 +243,38 @@ export async function deleteReminder(reminderId: string, client = getSupabaseCli
     throw new Error(`Failed to delete reminder: ${error.message}`);
   }
 }
+
+export async function getRemindersCronStatus(
+  client = getSupabaseClient()
+): Promise<{ lastRunUtc: string | null; processedCount: number }> {
+  const { data: agg, error } = await client
+    .from(REMINDERS_TABLE)
+    .select('last_sent_at_utc')
+    .not('last_sent_at_utc', 'is', null)
+    .order('last_sent_at_utc', { ascending: false })
+    .limit(1)
+    .maybeSingle();
+
+  if (error) {
+    throw new Error(`Failed to load cron status: ${error.message}`);
+  }
+
+  if (!agg || !agg.last_sent_at_utc) {
+    return { lastRunUtc: null, processedCount: 0 };
+  }
+
+  const lastRunUtc = agg.last_sent_at_utc as string;
+
+  const { data: countRows, error: countError } = await client
+    .from(REMINDERS_TABLE)
+    .select('id', { count: 'exact', head: true })
+    .eq('last_sent_at_utc', lastRunUtc);
+
+  if (countError) {
+    throw new Error(`Failed to count processed reminders: ${countError.message}`);
+  }
+
+  const processedCount = (countRows as unknown as { length?: number } | null)?.length ?? 0;
+
+  return { lastRunUtc, processedCount };
+}

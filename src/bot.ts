@@ -63,12 +63,20 @@ import {
 import { consumeCallbackToken } from './services/callbackTokens';
 import { getRecentTelemetryEvents, isTelemetryEnabled, logTelemetryEvent } from './services/telemetry';
 import { getErrorReportByCode, logErrorReport } from './services/errorReports';
+import {
+  createReminder,
+  deleteReminder,
+  getReminderById,
+  getRemindersCronStatus,
+  listRemindersForUser,
+  toggleReminderEnabled
+} from './services/reminders';
 
 import { makeActionButton } from './ui/inlineButtons';
 import { renderScreen, ensureUserAndSettings as renderEnsureUserAndSettings, updateCachedUserContext } from './ui/renderScreen';
 import { aiEnabledForUser, sendMainMenu } from './ui/mainMenu';
 
-import { formatLocalTime } from './utils/time';
+import { formatInstantToLocal, formatLocalTime, localDateTimeToUtcIso } from './utils/time';
 import { logError } from './utils/logger';
 import { resolveLocale, t, withLocale, type Locale } from './i18n';
 
@@ -159,6 +167,15 @@ type TimeDraftState = {
   startValue?: { hhmm: string; minutesTotal: number };
 };
 
+type ReminderFlow = {
+  step: 'date' | 'custom_date' | 'time' | 'title';
+  draft: {
+    localDate?: string;
+    localTime?: string;
+    title?: string;
+  };
+};
+
 type ReminderlessState = {
   awaitingValue?: AwaitingValueState;
 
@@ -167,6 +184,7 @@ type ReminderlessState = {
   numericDraft?: NumericDraftState;
 
   timeDraft?: TimeDraftState;
+  reminderFlow?: ReminderFlow;
   statusFilter?: { reportDayId: string; filter: 'all' | 'not_filled' | 'filled' };
 
   rewardEdit?: {
@@ -225,6 +243,18 @@ const setRoutineTaskFlow = (telegramId: string, flow: RoutineTaskFlow): void => 
 const clearRoutineTaskFlow = (telegramId: string): void => {
   const st = { ...(userStates.get(telegramId) || {}) };
   delete st.routineTaskFlow;
+  userStates.set(telegramId, st);
+};
+
+const setReminderFlow = (telegramId: string, flow: ReminderFlow): void => {
+  const st = { ...(userStates.get(telegramId) || {}) };
+  st.reminderFlow = flow;
+  userStates.set(telegramId, st);
+};
+
+const clearReminderFlow = (telegramId: string): void => {
+  const st = { ...(userStates.get(telegramId) || {}) };
+  delete st.reminderFlow;
   userStates.set(telegramId, st);
 };
 
@@ -1642,8 +1672,73 @@ const renderFreeText = async (ctx: Context): Promise<void> => {
 };
 
 const renderReminders = async (ctx: Context): Promise<void> => {
+  const { user } = await ensureUserAndSettings(ctx);
+
+  const reminders = await listRemindersForUser(user.id);
+  const cronStatus = await getRemindersCronStatus();
+
+  const lines: string[] = [];
+
+  if (reminders.length === 0) {
+    lines.push(t('screens.reminders.empty'));
+  } else {
+    lines.push(t('screens.reminders.list_header'), '');
+    for (const r of reminders) {
+      const status = r.enabled ? t('screens.reminders.status_on') : t('screens.reminders.status_off');
+      const local = r.next_run_at_utc ? formatInstantToLocal(r.next_run_at_utc, user.timezone ?? config.defaultTimezone) : null;
+      const timePart = local ? `${local.date} ${local.time}` : t('screens.reminders.no_time');
+      lines.push(
+        t('screens.reminders.item_line', {
+          status,
+          time: timePart,
+          title: r.title
+        })
+      );
+    }
+  }
+
+  lines.push('');
+  if (!cronStatus.lastRunUtc) {
+    lines.push(t('screens.reminders.cron_status_unknown'));
+  } else {
+    const localCron = formatInstantToLocal(cronStatus.lastRunUtc, user.timezone ?? config.defaultTimezone);
+    lines.push(
+      t('screens.reminders.cron_status_line', {
+        local_time: `${localCron.date} ${localCron.time}`,
+        count: String(cronStatus.processedCount)
+      })
+    );
+  }
+
+  lines.push('', t('screens.reminders.actions_hint'));
+
+  const kb = new InlineKeyboard();
+
+  const newBtn = await makeActionButton(ctx, { label: t('buttons.new_reminder') ?? 'New', action: 'reminders.new' });
+  kb.text(newBtn.text, newBtn.callback_data).row();
+
+  for (const r of reminders) {
+    const toggleBtn = await makeActionButton(ctx, {
+      label: r.enabled ? (t('buttons.disable') ?? 'Disable') : (t('buttons.enable') ?? 'Enable'),
+      action: 'reminders.toggle',
+      data: { reminderId: r.id }
+    });
+    const deleteBtn = await makeActionButton(ctx, {
+      label: t('buttons.delete') ?? 'Delete',
+      action: 'reminders.delete',
+      data: { reminderId: r.id }
+    });
+    kb.text(toggleBtn.text, toggleBtn.callback_data).text(deleteBtn.text, deleteBtn.callback_data).row();
+  }
+
   const back = await makeActionButton(ctx, { label: t('buttons.back'), action: 'nav.dashboard' });
-  await renderScreen(ctx, { titleKey: t('screens.reminders.title'), bodyLines: [t('screens.reminders.coming_soon')], inlineKeyboard: new InlineKeyboard().text(back.text, back.callback_data) });
+  kb.text(back.text, back.callback_data);
+
+  await renderScreen(ctx, {
+    titleKey: t('screens.reminders.title'),
+    bodyLines: lines,
+    inlineKeyboard: kb
+  });
 };
 
 const renderCalendarEvents = async (ctx: Context): Promise<void> => {
@@ -1676,6 +1771,16 @@ const parseTimeHhmm = (input: string): { hhmm: string; minutes: number } | null 
   const total = hours * 60 + minutes;
 
   return { hhmm: `${hh}:${mm}`, minutes: total };
+};
+
+const isValidLocalDate = (input: string): boolean => {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(input)) return false;
+  const [year, month, day] = input.split('-').map(Number);
+  if (!Number.isInteger(year) || !Number.isInteger(month) || !Number.isInteger(day)) return false;
+  if (month < 1 || month > 12) return false;
+  if (day < 1 || day > 31) return false;
+  const probe = new Date(Date.UTC(year, month - 1, day));
+  return probe.getUTCFullYear() === year && probe.getUTCMonth() === month - 1 && probe.getUTCDate() === day;
 };
 
 const timeDraftToDisplay = (draft: {
@@ -3189,6 +3294,52 @@ bot.callbackQuery(/^[A-Za-z0-9_-]{8,12}$/, async (ctx) => {
       case 'nav.reminders':
         await renderReminders(ctx);
         return;
+      case 'reminders.new': {
+        if (!ctx.from) break;
+        const stateKey = String(ctx.from.id);
+        setReminderFlow(stateKey, { step: 'date', draft: {} });
+
+        const todayBtn = await makeActionButton(ctx, { label: t('buttons.today') ?? 'Today', action: 'reminders.new.date_today' });
+        const tomorrowBtn = await makeActionButton(ctx, { label: t('buttons.tomorrow') ?? 'Tomorrow', action: 'reminders.new.date_tomorrow' });
+        const customBtn = await makeActionButton(ctx, { label: t('buttons.custom_date') ?? 'Pick date', action: 'reminders.new.date_custom' });
+
+        const kb = new InlineKeyboard().text(todayBtn.text, todayBtn.callback_data).text(tomorrowBtn.text, tomorrowBtn.callback_data).row().text(customBtn.text, customBtn.callback_data);
+
+        await renderScreen(ctx, {
+          titleKey: t('screens.reminders.new_title'),
+          bodyLines: [t('screens.reminders.new_choose_date')],
+          inlineKeyboard: kb
+        });
+        return;
+      }
+      case 'reminders.new.date_today':
+      case 'reminders.new.date_tomorrow':
+      case 'reminders.new.date_custom': {
+        if (!ctx.from) break;
+        const stateKey = String(ctx.from.id);
+        const { user } = await ensureUserAndSettings(ctx);
+        const timezone = user.timezone ?? config.defaultTimezone;
+
+        if (action === 'reminders.new.date_custom') {
+          setReminderFlow(stateKey, { step: 'custom_date', draft: {} });
+          await renderScreen(ctx, {
+            titleKey: t('screens.reminders.new_title'),
+            bodyLines: [t('screens.reminders.new_choose_date')]
+          });
+          return;
+        }
+
+        const offset = action === 'reminders.new.date_today' ? 0 : 1;
+        const target = new Date(Date.now() + offset * 24 * 60 * 60 * 1000);
+        const local = formatInstantToLocal(target.toISOString(), timezone);
+        setReminderFlow(stateKey, { step: 'time', draft: { localDate: local.date } });
+
+        await renderScreen(ctx, {
+          titleKey: t('screens.reminders.new_title'),
+          bodyLines: [t('screens.reminders.new_choose_time')]
+        });
+        return;
+      }
       case 'nav.rewards':
         await renderRewardCenter(ctx);
         return;
@@ -3258,6 +3409,63 @@ bot.callbackQuery(/^[A-Za-z0-9_-]{8,12}$/, async (ctx) => {
           clearReportContextCache();
         }
         await renderRoutineDetails(ctx, routineId);
+        return;
+      }
+      case 'reminders.toggle': {
+        const data = (payload as { data?: { reminderId?: string } }).data;
+        const reminderId = data?.reminderId;
+        if (!reminderId) {
+          await renderReminders(ctx);
+          return;
+        }
+        const { user } = await ensureUserAndSettings(ctx);
+        const reminder = await getReminderById(reminderId);
+        if (!reminder || reminder.user_id !== user.id) {
+          await renderReminders(ctx);
+          return;
+        }
+        await toggleReminderEnabled(reminderId);
+        await renderReminders(ctx);
+        return;
+      }
+      case 'reminders.delete': {
+        const data = (payload as { data?: { reminderId?: string } }).data;
+        const reminderId = data?.reminderId;
+        if (!reminderId) {
+          await renderReminders(ctx);
+          return;
+        }
+
+        const confirmBtn = await makeActionButton(ctx, {
+          label: t('buttons.confirm_delete') ?? 'Confirm delete',
+          action: 'reminders.delete_confirm',
+          data: { reminderId }
+        });
+        const cancelBtn = await makeActionButton(ctx, {
+          label: t('buttons.cancel') ?? 'Cancel',
+          action: 'nav.reminders'
+        });
+
+        const kb = new InlineKeyboard().text(confirmBtn.text, confirmBtn.callback_data).text(cancelBtn.text, cancelBtn.callback_data);
+
+        await renderScreen(ctx, {
+          titleKey: t('screens.reminders.title'),
+          bodyLines: [t('screens.reminders.delete_confirm')],
+          inlineKeyboard: kb
+        });
+        return;
+      }
+      case 'reminders.delete_confirm': {
+        const data = (payload as { data?: { reminderId?: string } }).data;
+        const reminderId = data?.reminderId;
+        if (reminderId) {
+          const { user } = await ensureUserAndSettings(ctx);
+          const reminder = await getReminderById(reminderId);
+          if (reminder && reminder.user_id === user.id) {
+            await deleteReminder(reminderId);
+          }
+        }
+        await renderReminders(ctx);
         return;
       }
       case 'routines.edit_title': {
@@ -5369,6 +5577,86 @@ bot.on('message:text', async (ctx: Context) => {
     userStates.set(stateKey, { ...state, settingsRoutine: undefined });
     await renderSettingsRoot(ctx);
     return;
+  }
+
+  if (state.reminderFlow) {
+    const flow = state.reminderFlow;
+    const raw = text.trim();
+    const { user } = await ensureUserAndSettings(ctx);
+    const timezone = user.timezone ?? config.defaultTimezone;
+
+    if (flow.step === 'custom_date') {
+      if (!isValidLocalDate(raw)) {
+        await renderScreen(ctx, {
+          titleKey: t('screens.reminders.new_title'),
+          bodyLines: [t('screens.reminders.new_invalid_date'), t('screens.reminders.new_choose_date')]
+        });
+        return;
+      }
+      setReminderFlow(stateKey, { step: 'time', draft: { ...flow.draft, localDate: raw } });
+      await renderScreen(ctx, {
+        titleKey: t('screens.reminders.new_title'),
+        bodyLines: [t('screens.reminders.new_choose_time')]
+      });
+      return;
+    }
+
+    if (flow.step === 'time') {
+      const validTime = /^([01]\d|2[0-3]):[0-5]\d$/.test(raw);
+      if (!validTime) {
+        await renderScreen(ctx, {
+          titleKey: t('screens.reminders.new_title'),
+          bodyLines: [t('screens.reminders.new_invalid_time'), t('screens.reminders.new_choose_time')]
+        });
+        return;
+      }
+      setReminderFlow(stateKey, { step: 'title', draft: { ...flow.draft, localTime: raw } });
+      await renderScreen(ctx, {
+        titleKey: t('screens.reminders.new_title'),
+        bodyLines: [t('screens.reminders.new_enter_title')]
+      });
+      return;
+    }
+
+    if (flow.step === 'title') {
+      const title = raw;
+      if (!title) {
+        await renderScreen(ctx, {
+          titleKey: t('screens.reminders.new_title'),
+          bodyLines: [t('screens.reminders.new_enter_title')]
+        });
+        return;
+      }
+
+      const localDate = flow.draft.localDate;
+      const localTime = flow.draft.localTime;
+      if (!localDate || !localTime) {
+        clearReminderFlow(stateKey);
+        await renderReminders(ctx);
+        return;
+      }
+
+      const nextRunUtcIso = localDateTimeToUtcIso(localDate, localTime, timezone);
+      const nextRunUtc = new Date(nextRunUtcIso);
+
+      await createReminder(user.id, title, null, nextRunUtc);
+      clearReminderFlow(stateKey);
+
+      const local = formatInstantToLocal(nextRunUtcIso, timezone);
+
+      await renderScreen(ctx, {
+        titleKey: t('screens.reminders.new_title'),
+        bodyLines: [
+          t('screens.reminders.new_created', {
+            local_date: local.date,
+            local_time: local.time
+          })
+        ]
+      });
+
+      await renderReminders(ctx);
+      return;
+    }
   }
 
   if (state.templateCreate) {

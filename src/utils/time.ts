@@ -53,3 +53,23 @@ export function formatInstantToLocal(isoUtc: string, timezone?: string | null): 
   const date = new Date(isoUtc);
   return extractParts(formatter, date);
 }
+
+export function localDateTimeToUtcIso(localDate: string, localTime: string, timezone?: string | null): string {
+  const tz = normalizeTimezone(timezone);
+  const [year, month, day] = localDate.split('-').map(Number);
+  const [hour, minute] = localTime.split(':').map(Number);
+
+  const baseUtc = new Date(Date.UTC(year, month - 1, day, hour, minute));
+  const formatter = buildFormatter(tz);
+  const observed = extractParts(formatter, baseUtc);
+
+  const [obsYear, obsMonth, obsDay] = observed.date.split('-').map(Number);
+  const [obsHour, obsMinute] = observed.time.split(':').map(Number);
+
+  const intendedUtc = Date.UTC(year, month - 1, day, hour, minute);
+  const observedUtc = Date.UTC(obsYear, obsMonth - 1, obsDay, obsHour, obsMinute);
+
+  const offsetMs = observedUtc - intendedUtc;
+  const adjusted = new Date(baseUtc.getTime() - offsetMs);
+  return adjusted.toISOString();
+}
