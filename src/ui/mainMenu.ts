@@ -10,6 +10,8 @@ export const buildMainMenuKeyboard = (options: { aiEnabled: boolean }): ReplyKey
     .text(t('buttons.nav_daily_report'))
     .text(t('buttons.nav_reportcar'))
     .row()
+    .text(t('buttons.notes'))
+    .row()
     .text(t('buttons.nav_tasks'))
     .text(t('buttons.nav_todo'))
     .row()
