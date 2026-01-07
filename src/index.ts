@@ -1,8 +1,9 @@
 import Fastify, { type FastifyReply, type FastifyRequest } from 'fastify';
-import { webhookCallback } from 'grammy';
+import { GrammyError, webhookCallback } from 'grammy';
 import { bot } from './bot';
 import { config } from './config';
 import { getSupabaseClient } from './db';
+import { runMigrations } from './db/migrations';
 import { processDueReminders } from './services/reminders';
 import { logError } from './utils/logger';
 
@@ -51,10 +52,24 @@ server.post('/cron/tick', async (request: FastifyRequest, reply: FastifyReply) =
   return { status: 'ok', processed: result.processed };
 });
 
-const start = async () => {
-  getSupabaseClient();
+const isTelegramTooManyRequests = (error: unknown): boolean => {
+  if (error instanceof GrammyError) {
+    return error.error_code === 429;
+  }
 
+  if (typeof error === 'object' && error !== null && 'error_code' in error) {
+    const errorCode = (error as { error_code?: number }).error_code;
+    return errorCode === 429;
+  }
+
+  return false;
+};
+
+const start = async () => {
   try {
+    await runMigrations();
+    getSupabaseClient();
+
     await server.listen({ host: config.server.host, port: config.server.port });
     server.log.info(`Server listening on ${config.server.host}:${config.server.port}`);
 
@@ -67,7 +82,14 @@ const start = async () => {
           await bot.api.setWebhook(config.telegram.webhookUrl);
           server.log.info('Webhook registered with Telegram.');
         } catch (error) {
-          server.log.error({ err: error }, 'Failed to set Telegram webhook.');
+          if (isTelegramTooManyRequests(error)) {
+            server.log.warn(
+              { err: error, scope: 'telegram/webhook' },
+              'Telegram setWebhook rate limited.'
+            );
+          } else {
+            server.log.error({ err: error }, 'Failed to set Telegram webhook.');
+          }
         }
       }
 
