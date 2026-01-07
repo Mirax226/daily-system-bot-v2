@@ -72,6 +72,7 @@ import {
 import { consumeCallbackToken } from './services/callbackTokens';
 import { getRecentTelemetryEvents, isTelemetryEnabled, logTelemetryEvent } from './services/telemetry';
 import { getErrorReportByCode, logErrorReport } from './services/errorReports';
+import { escapeMarkdown } from './utils/markdown';
 import {
   createReminder,
   deleteReminder,
@@ -5679,8 +5680,15 @@ bot.callbackQuery(/^[A-Za-z0-9_-]{8,12}$/, async (ctx) => {
                   .join('\n')
               : 'No events captured.';
 
-          const message = ['*Error report*', `Code: ${report.error_code}`, `Trace: ${report.trace_id}`, `Created: ${report.created_at}`, `User: ${report.user_id}`, '', 'Recent events:', events].join('\n');
-          await ctx.api.sendMessage(targetId, message, { parse_mode: 'Markdown' });
+          const rawText = ['*Error report*', `Code: ${report.error_code}`, `Trace: ${report.trace_id}`, `Created: ${report.created_at}`, `User: ${report.user_id}`, '', 'Recent events:', events].join('\n');
+          const truncatedText = rawText.length > 3500 ? `${rawText.slice(0, 3500)}... (truncated)` : rawText;
+          const safeText = escapeMarkdown(truncatedText);
+          try {
+            await ctx.api.sendMessage(targetId, safeText, { parse_mode: 'Markdown' });
+          } catch (error) {
+            console.error({ scope: 'error_report', event: 'send_failure', error, text: rawText });
+            await ctx.api.sendMessage(targetId, truncatedText);
+          }
         }
 
         await ctx.answerCallbackQuery({ text: t('screens.error_report.sent'), show_alert: true });
