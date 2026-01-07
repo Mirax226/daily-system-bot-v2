@@ -270,8 +270,20 @@
       "coming_soon": "بخش روز من به زودی می‌آید."
     },
     "free_text": {
-      "title": "متن آزاد",
-      "coming_soon": "بخش متن آزاد به زودی می‌آید."
+      "title_today": "نوت‌های امروز",
+      "title_history": "تاریخچه نوت‌ها",
+      "today_empty": "برای امروز هنوز نوتی ننوشته‌ای.",
+      "today_preview_header": "نوت امروز:",
+      "today_saved": "نوت امروز ذخیره شد.",
+      "today_cleared": "نوت امروز پاک شد.",
+      "history_header": "نوت‌های چند روز اخیر:",
+      "history_empty": "در {days} روز اخیر نوتی پیدا نشد.",
+      "history_item_line": "{date} – {preview}",
+      "history_open_hint": "برای دیدن نوت کامل، یک تاریخ را انتخاب کن.",
+      "view_title": "نوت‌های {date}",
+      "view_empty": "برای این روز نوتی ثبت نشده.",
+      "edit_prompt": "متن نوت امروز را بفرست.",
+      "edit_hint": "می‌توانی چند خط بفرستی؛ کل پیام به عنوان نوت ذخیره می‌شود."
     },
     "reminders": {
       "title": "یادآورها",
@@ -377,22 +389,6 @@
     "main_menu": {
       "title": "منوی اصلی"
     },
-    "notes": {
-      "title_today": "نوت‌های امروز",
-      "title_history": "تاریخچه نوت‌ها",
-      "today_empty": "برای امروز هنوز نوتی ننوشتی.",
-      "today_preview_header": "نوت امروز:",
-      "today_saved": "نوت امروز ذخیره شد.",
-      "today_cleared": "نوت امروز پاک شد.",
-      "history_header": "نوت‌های چند روز اخیر:",
-      "history_empty": "در {{days}} روز اخیر نوتی پیدا نشد.",
-      "history_item_line": "{{date}} – {{preview}}",
-      "history_open_hint": "برای دیدن نوت کامل، یک تاریخ را انتخاب کن.",
-      "view_title": "نوت‌های {{date}}",
-      "view_empty": "برای این روز نوتی ثبت نشده.",
-      "edit_prompt": "متن نوت امروز را بفرست.",
-      "edit_hint": "می‌توانی چند خط بفرستی؛ کل پیام به‌عنوان نوت ذخیره می‌شود."
-    },
     "coming_soon_generic": "به زودی: {feature}"
   },
   "buttons": {
@@ -403,7 +399,7 @@
     "nav_todo": "📋 فهرست کارها",
     "nav_planning": "🗓 برنامه‌ریزی",
     "nav_my_day": "🧭 روز من",
-    "nav_free_text": "📝 متن آزاد",
+    "nav_free_text": "📝 نوت‌ها",
     "nav_reminders": "⏰ یادآورها",
     "nav_rewards": "🎁 مرکز پاداش",
     "nav_reports": "📊 گزارش‌ها",
