@@ -61,12 +61,12 @@ import {
 } from './services/dailyReport';
 import { getTodayDateString } from './services/dailyLogs';
 import {
-  clearDate,
   createNote,
   createNoteAttachment,
   deleteNote,
   getNoteAttachmentById,
   getNoteById,
+  listNoteAttachments,
   listNoteAttachmentKinds,
   listNoteAttachmentsByKind,
   listNoteDateSummaries,
@@ -1501,6 +1501,38 @@ const getNoteAttachmentKindEmoji = (kind: NoteAttachmentKind): string => {
   return '📄';
 };
 
+const getNotesArchiveChatId = (): number | null => {
+  if (!config.notes.archive.enabled) return null;
+  const raw = config.notes.archive.chatId;
+  if (!raw) return null;
+  const parsed = Number(raw);
+  if (!Number.isFinite(parsed)) return null;
+  return parsed;
+};
+
+const sendNoteArchiveDeleteLabels = async (ctx: Context, noteId: string): Promise<void> => {
+  const attachments = await listNoteAttachments({ noteId });
+  const fallbackChatId = getNotesArchiveChatId();
+  for (const attachment of attachments) {
+    const archiveChatId = attachment.archive_chat_id ?? fallbackChatId;
+    if (!archiveChatId || !attachment.archive_message_id) continue;
+    try {
+      await ctx.api.sendMessage(archiveChatId, 'Deleted by user', {
+        reply_to_message_id: attachment.archive_message_id,
+        disable_notification: true
+      });
+    } catch (error) {
+      console.error({
+        scope: 'notes',
+        event: 'archive_delete_label_failed',
+        error,
+        attachmentId: attachment.id,
+        archiveChatId
+      });
+    }
+  }
+};
+
 const renderNotesToday = async (ctx: Context): Promise<void> => {
   const { user } = await ensureUserAndSettings(ctx);
   const { date } = getTodayDateString(user.timezone ?? config.defaultTimezone);
@@ -1813,12 +1845,27 @@ const handleNoteAttachmentMessage = async (
   if (!flow || flow.mode !== 'create' || flow.step !== 'attachments') return;
 
   try {
+    const archiveChatId = getNotesArchiveChatId();
+    const messageId = ctx.message?.message_id;
+    const sourceChatId = ctx.chat?.id;
+    let archiveMessageId: number | null = null;
+    if (archiveChatId && sourceChatId && messageId) {
+      try {
+        const archived = await ctx.api.copyMessage(archiveChatId, sourceChatId, messageId);
+        archiveMessageId = archived.message_id;
+      } catch (error) {
+        console.error({ scope: 'notes', event: 'archive_copy_failed', error, archiveChatId, messageId });
+      }
+    }
+
     const attachment = await createNoteAttachment({
       noteId: flow.noteId,
       kind: params.kind,
       fileId: params.fileId,
       fileUniqueId: params.fileUniqueId ?? null,
-      caption: params.caption ?? null
+      caption: params.caption ?? null,
+      archiveChatId: archiveMessageId ? archiveChatId : null,
+      archiveMessageId
     });
 
     if (params.kind === 'voice') {
@@ -4080,7 +4127,11 @@ bot.callbackQuery(/^[A-Za-z0-9_-]{8,12}$/, async (ctx) => {
         const flow = userStates.get(stateKey)?.notesFlow;
         if (flow?.mode === 'clear_date') {
           const { user } = await ensureUserAndSettings(ctx);
-          await clearDate({ userId: user.id, noteDate: flow.noteDate });
+          const notes = await listNotesByDate({ userId: user.id, noteDate: flow.noteDate });
+          for (const note of notes) {
+            await sendNoteArchiveDeleteLabels(ctx, note.id);
+            await deleteNote({ userId: user.id, id: note.id });
+          }
         }
         clearNotesFlow(stateKey);
         await renderNotesToday(ctx);
@@ -4148,6 +4199,7 @@ bot.callbackQuery(/^[A-Za-z0-9_-]{8,12}$/, async (ctx) => {
         const { user } = await ensureUserAndSettings(ctx);
         const note = await getNoteById({ userId: user.id, id: noteId });
         if (note) {
+          await sendNoteArchiveDeleteLabels(ctx, noteId);
           await deleteNote({ userId: user.id, id: noteId });
           const page = Number(data?.page ?? 0);
           const historyPage = Number(data?.historyPage ?? 0);
@@ -4342,7 +4394,10 @@ bot.callbackQuery(/^[A-Za-z0-9_-]{8,12}$/, async (ctx) => {
             await renderScreen(ctx, { titleKey: t('screens.notes.detail_title_label'), bodyLines: [t('screens.notes.attachment_send_failed')] });
             return;
           }
-          if (attachment.kind === 'photo') {
+          const archiveChatId = attachment.archive_chat_id ?? getNotesArchiveChatId();
+          if (archiveChatId && attachment.archive_message_id) {
+            await ctx.api.copyMessage(targetId, archiveChatId, attachment.archive_message_id);
+          } else if (attachment.kind === 'photo') {
             await ctx.api.sendPhoto(targetId, attachment.file_id, { caption: attachment.caption ?? undefined });
           } else if (attachment.kind === 'video') {
             await ctx.api.sendVideo(targetId, attachment.file_id, { caption: attachment.caption ?? undefined });

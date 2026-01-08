@@ -73,6 +73,17 @@ const isTelegramTooManyRequests = (error: unknown): boolean => {
   return false;
 };
 
+const logNotesArchiveStatus = (logger: typeof server.log): void => {
+  const chatId = config.notes.archive.chatId;
+  const enabled = config.notes.archive.enabled;
+  const looksValid = Boolean(chatId && /^-100\\d+$/.test(chatId));
+  if (enabled && looksValid) {
+    logger.info('[notes] archive channel configured');
+  } else {
+    logger.info('[notes] archive channel missing');
+  }
+};
+
 const start = async () => {
   try {
     const port = Number(process.env.PORT ?? config.server.port);
@@ -85,6 +96,7 @@ const start = async () => {
         server.log.info('Init start');
         await runMigrations();
         getSupabaseClient();
+        logNotesArchiveStatus(server.log);
 
         if (config.telegram.devPolling) {
           server.log.info('Running in DEV_POLLING mode: starting bot via long polling.');

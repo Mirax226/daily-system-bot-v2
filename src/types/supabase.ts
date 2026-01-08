@@ -81,6 +81,8 @@ export type Database = {
           title: string | null;
           body: string;
           created_at: string;
+          deleted_at: string | null;
+          deleted_by: string | null;
         };
         Insert: {
           id?: string;
@@ -89,6 +91,8 @@ export type Database = {
           title?: string | null;
           body: string;
           created_at?: string;
+          deleted_at?: string | null;
+          deleted_by?: string | null;
         };
         Update: {
           id?: string;
@@ -97,6 +101,8 @@ export type Database = {
           title?: string | null;
           body?: string;
           created_at?: string;
+          deleted_at?: string | null;
+          deleted_by?: string | null;
         };
         Relationships: [];
       };
@@ -109,6 +115,8 @@ export type Database = {
           file_unique_id: string | null;
           caption: string | null;
           created_at: string;
+          archive_chat_id: number | null;
+          archive_message_id: number | null;
         };
         Insert: {
           id?: string;
@@ -118,6 +126,8 @@ export type Database = {
           file_unique_id?: string | null;
           caption?: string | null;
           created_at?: string;
+          archive_chat_id?: number | null;
+          archive_message_id?: number | null;
         };
         Update: {
           id?: string;
@@ -127,6 +137,8 @@ export type Database = {
           file_unique_id?: string | null;
           caption?: string | null;
           created_at?: string;
+          archive_chat_id?: number | null;
+          archive_message_id?: number | null;
         };
         Relationships: [
           {
@@ -781,7 +793,19 @@ export type Database = {
       };
     };
     Views: {};
-    Functions: {};
+    Functions: {
+      list_note_date_counts: {
+        Args: {
+          p_user_id: string;
+          p_limit: number;
+          p_offset: number;
+        };
+        Returns: {
+          note_date: string;
+          count: number;
+        }[];
+      };
+    };
     Enums: {};
     CompositeTypes: {};
   };
