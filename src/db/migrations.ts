@@ -46,6 +46,12 @@ export async function runMigrations(): Promise<void> {
 
       await client.query('BEGIN');
       try {
+        await preflightPatchForMigration(client, file);
+        logInfo('Migration SQL head', {
+          scope: 'migrations',
+          file,
+          sql_head: sql.slice(0, 300)
+        });
         await client.query(sql);
         await client.query(`INSERT INTO ${MIGRATIONS_TABLE} (filename) VALUES ($1)`, [file]);
         await client.query('COMMIT');
@@ -81,4 +87,31 @@ async function loadAppliedMigrations(client: Client): Promise<MigrationRow[]> {
   );
 
   return rows;
+}
+
+async function preflightPatchForMigration(client: Client, filename: string): Promise<void> {
+  if (filename !== '0002_reminders.sql') {
+    return;
+  }
+
+  const sql = `
+DO $$
+BEGIN
+  IF EXISTS (
+    SELECT 1 FROM information_schema.tables
+    WHERE table_schema = 'public' AND table_name = 'reminders'
+  ) THEN
+    IF NOT EXISTS (
+      SELECT 1 FROM information_schema.columns
+      WHERE table_schema = 'public' AND table_name = 'reminders' AND column_name = 'enabled'
+    ) THEN
+      ALTER TABLE public.reminders
+        ADD COLUMN enabled boolean NOT NULL DEFAULT true;
+    END IF;
+  END IF;
+END
+$$;
+  `;
+
+  await client.query(sql);
 }
