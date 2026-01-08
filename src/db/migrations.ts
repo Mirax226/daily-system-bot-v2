@@ -53,6 +53,8 @@ export async function runMigrations(): Promise<void> {
         });
         const needsRemindersEnabled = sql.includes('public.reminders') && sql.includes('enabled');
         const needsRewardsEnabled = sql.includes('public.rewards') && sql.includes('enabled');
+        const needsRewardsSortOrder =
+          sql.includes('public.rewards') && sql.includes('sort_order');
 
         if (needsRemindersEnabled) {
           await ensureEnabledColumn(client, 'reminders');
@@ -62,6 +64,11 @@ export async function runMigrations(): Promise<void> {
         if (needsRewardsEnabled) {
           await ensureEnabledColumn(client, 'rewards');
           await assertEnabledExists(client, 'rewards');
+        }
+
+        if (needsRewardsSortOrder) {
+          await ensureSortOrderColumn(client, 'rewards');
+          await assertColumnExists(client, 'rewards', 'sort_order');
         }
 
         await client.query(sql);
@@ -125,6 +132,27 @@ $$;
   `);
 }
 
+async function ensureSortOrderColumn(client: Client, table: 'rewards'): Promise<void> {
+  await client.query(`
+DO $$
+BEGIN
+  IF EXISTS (
+    SELECT 1 FROM information_schema.tables
+    WHERE table_schema='public' AND table_name='${table}'
+  ) THEN
+    IF NOT EXISTS (
+      SELECT 1 FROM information_schema.columns
+      WHERE table_schema='public' AND table_name='${table}' AND column_name='sort_order'
+    ) THEN
+      ALTER TABLE public.${table}
+        ADD COLUMN sort_order int NOT NULL DEFAULT 0;
+    END IF;
+  END IF;
+END
+$$;
+  `);
+}
+
 async function assertEnabledExists(
   client: Client,
   table: 'reminders' | 'rewards'
@@ -141,5 +169,28 @@ SELECT EXISTS (
 
   if (!rows?.[0]?.ok) {
     throw new Error(`Migration preflight failed: public.${table}.enabled is still missing`);
+  }
+}
+
+async function assertColumnExists(
+  client: Client,
+  table: string,
+  column: string
+): Promise<void> {
+  const { rows } = await client.query<{ ok: boolean }>(
+    `
+SELECT EXISTS (
+  SELECT 1
+  FROM information_schema.columns
+  WHERE table_schema='public'
+    AND table_name=$1
+    AND column_name=$2
+) AS ok;
+`,
+    [table, column]
+  );
+
+  if (!rows?.[0]?.ok) {
+    throw new Error(`Migration preflight failed: public.${table}.${column} is missing`);
   }
 }
