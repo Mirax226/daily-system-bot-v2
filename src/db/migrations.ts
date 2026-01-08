@@ -46,12 +46,24 @@ export async function runMigrations(): Promise<void> {
 
       await client.query('BEGIN');
       try {
-        await preflightPatchForMigration(client, file);
         logInfo('Migration SQL head', {
           scope: 'migrations',
           file,
           sql_head: sql.slice(0, 300)
         });
+        const needsRemindersEnabled = sql.includes('public.reminders') && sql.includes('enabled');
+        const needsRewardsEnabled = sql.includes('public.rewards') && sql.includes('enabled');
+
+        if (needsRemindersEnabled) {
+          await ensureEnabledColumn(client, 'reminders');
+          await assertEnabledExists(client, 'reminders');
+        }
+
+        if (needsRewardsEnabled) {
+          await ensureEnabledColumn(client, 'rewards');
+          await assertEnabledExists(client, 'rewards');
+        }
+
         await client.query(sql);
         await client.query(`INSERT INTO ${MIGRATIONS_TABLE} (filename) VALUES ($1)`, [file]);
         await client.query('COMMIT');
@@ -89,29 +101,45 @@ async function loadAppliedMigrations(client: Client): Promise<MigrationRow[]> {
   return rows;
 }
 
-async function preflightPatchForMigration(client: Client, filename: string): Promise<void> {
-  if (filename !== '0002_reminders.sql') {
-    return;
-  }
-
-  const sql = `
+async function ensureEnabledColumn(
+  client: Client,
+  table: 'reminders' | 'rewards'
+): Promise<void> {
+  await client.query(`
 DO $$
 BEGIN
   IF EXISTS (
     SELECT 1 FROM information_schema.tables
-    WHERE table_schema = 'public' AND table_name = 'reminders'
+    WHERE table_schema='public' AND table_name='${table}'
   ) THEN
     IF NOT EXISTS (
       SELECT 1 FROM information_schema.columns
-      WHERE table_schema = 'public' AND table_name = 'reminders' AND column_name = 'enabled'
+      WHERE table_schema='public' AND table_name='${table}' AND column_name='enabled'
     ) THEN
-      ALTER TABLE public.reminders
+      ALTER TABLE public.${table}
         ADD COLUMN enabled boolean NOT NULL DEFAULT true;
     END IF;
   END IF;
 END
 $$;
-  `;
+  `);
+}
 
-  await client.query(sql);
+async function assertEnabledExists(
+  client: Client,
+  table: 'reminders' | 'rewards'
+): Promise<void> {
+  const { rows } = await client.query<{ ok: boolean }>(
+    `
+SELECT EXISTS (
+  SELECT 1 FROM information_schema.columns
+  WHERE table_schema='public' AND table_name=$1 AND column_name='enabled'
+) AS ok;
+`,
+    [table]
+  );
+
+  if (!rows?.[0]?.ok) {
+    throw new Error(`Migration preflight failed: public.${table}.enabled is still missing`);
+  }
 }
