@@ -73,6 +73,33 @@ export type Database = {
         };
         Relationships: [];
       };
+      notes: {
+        Row: {
+          id: string;
+          user_id: string;
+          note_date: string;
+          title: string | null;
+          body: string;
+          created_at: string;
+        };
+        Insert: {
+          id?: string;
+          user_id: string;
+          note_date: string;
+          title?: string | null;
+          body: string;
+          created_at?: string;
+        };
+        Update: {
+          id?: string;
+          user_id?: string;
+          note_date?: string;
+          title?: string | null;
+          body?: string;
+          created_at?: string;
+        };
+        Relationships: [];
+      };
       daily_reports: {
         Row: {
           id: string;
@@ -723,6 +750,7 @@ export type Database = {
 };
 
 export type ReminderRow = Database['public']['Tables']['reminders']['Row'];
+export type NoteRow = Database['public']['Tables']['notes']['Row'];
 export type DailyReportRow = Database['public']['Tables']['daily_reports']['Row'];
 export type DailyReportInsert = Database['public']['Tables']['daily_reports']['Insert'];
 export type DailyReportUpdate = Database['public']['Tables']['daily_reports']['Update'];

@@ -5,7 +5,7 @@ import type { BotError, Context } from 'grammy';
 import { config } from './config';
 
 import { ensureUser } from './services/users';
-import { getOrCreateUserSettings, setUserLanguageCode, setUserOnboarded } from './services/userSettings';
+import { getOrCreateUserSettings, setUserLanguageCode, setUserOnboarded, updateUserSettingsJson } from './services/userSettings';
 
 import {
   seedDefaultRewardsIfEmpty,
@@ -59,15 +59,8 @@ import {
   unlockReportDay,
   listRecentReportDays
 } from './services/dailyReport';
-import {
-  clearTodayNote,
-  getTodayDateString,
-  getTodayNote,
-  listRecentLogs,
-  listRecentNotes,
-  upsertNoteForDate,
-  upsertTodayLog
-} from './services/dailyLogs';
+import { getTodayDateString } from './services/dailyLogs';
+import { clearDate, createNote, deleteNote, getNoteById, listNotesByDate, listRecentDates } from './services/notes';
 
 import { consumeCallbackToken } from './services/callbackTokens';
 import { getRecentTelemetryEvents, isTelemetryEnabled, logTelemetryEvent } from './services/telemetry';
@@ -77,9 +70,9 @@ import {
   createReminder,
   deleteReminder,
   getReminderById,
-  getRemindersCronStatus,
   listRemindersForUser,
-  toggleReminderEnabled
+  toggleReminderEnabled,
+  updateReminder
 } from './services/reminders';
 
 import { makeActionButton } from './ui/inlineButtons';
@@ -87,6 +80,7 @@ import { renderScreen, ensureUserAndSettings as renderEnsureUserAndSettings, upd
 import { aiEnabledForUser, sendMainMenu } from './ui/mainMenu';
 
 import { formatInstantToLocal, formatLocalTime, localDateTimeToUtcIso } from './utils/time';
+import { gregorianToJalali, isValidJalaliDate, jalaliToGregorian } from './utils/jalali';
 import { logError } from './utils/logger';
 import { resolveLocale, t, withLocale, type Locale } from './i18n';
 
@@ -177,22 +171,49 @@ type TimeDraftState = {
   startValue?: { hhmm: string; minutesTotal: number };
 };
 
-type ReminderFlow = {
-  step: 'date' | 'custom_date' | 'time' | 'title';
-  draft: {
-    localDate?: string;
-    localTime?: string;
-    title?: string;
-  };
+type ReminderDraft = {
+  localDate?: string;
+  localTime?: string;
+  timeMinutes?: number;
+  title?: string;
+  detail?: string | null;
+  dateMode?: 'gregorian' | 'jalali';
+  year?: number;
+  month?: number;
+  day?: number;
+  dateSource?: 'today' | 'tomorrow' | 'weekend' | 'custom';
 };
+
+type ReminderFlow =
+  | {
+      mode: 'create';
+      step: 'date_select' | 'custom_date' | 'time' | 'time_manual' | 'title' | 'detail';
+      draft: ReminderDraft;
+    }
+  | {
+      mode: 'edit';
+      reminderId: string;
+      step: 'title' | 'detail' | 'date_select' | 'custom_date' | 'time' | 'time_manual';
+      draft: ReminderDraft;
+    };
 
 type NotesFlow =
   | {
-      mode: 'edit_today';
+      mode: 'create';
+      step: 'title' | 'body';
+      draft: { title?: string | null; noteDate: string };
     }
   | {
-      mode: 'edit_specific';
-      targetDate: string;
+      mode: 'view_date';
+      date: string;
+    }
+  | {
+      mode: 'view_note';
+      noteId: string;
+    }
+  | {
+      mode: 'clear_date';
+      noteDate: string;
     };
 
 type ReminderlessState = {
@@ -1438,32 +1459,33 @@ const renderReportsMenu = async (ctx: Context): Promise<void> => {
 const renderNotesToday = async (ctx: Context): Promise<void> => {
   const { user } = await ensureUserAndSettings(ctx);
   const { date } = getTodayDateString(user.timezone ?? config.defaultTimezone);
-  const noteRow = await getTodayNote({ userId: user.id, timezone: user.timezone });
-  const note = noteRow?.report_date === date ? noteRow.notes ?? '' : '';
+  const notes = await listNotesByDate({ userId: user.id, noteDate: date });
 
   const lines: string[] = [];
-  if (!note || note.trim() === '') {
-    lines.push(t('screens.free_text.today_empty'));
+  if (!notes.length) {
+    lines.push(t('screens.notes.today_empty'));
   } else {
-    lines.push(t('screens.free_text.today_preview_header'), '');
-    const preview = note.split('\n').slice(0, 3).join('\n');
-    lines.push(preview);
+    lines.push(t('screens.notes.today_header'), '');
+    for (const note of notes) {
+      const local = formatInstantToLocal(note.created_at, user.timezone ?? config.defaultTimezone);
+      const title = note.title && note.title.trim().length > 0 ? note.title : t('screens.notes.untitled');
+      lines.push(t('screens.notes.today_item_line', { time: local.time, title }));
+    }
   }
 
   const kb = new InlineKeyboard();
-  const editLabel = note && note.trim() !== '' ? t('buttons.edit') : t('buttons.add');
-  const editBtn = await makeActionButton(ctx, { label: editLabel, action: 'notes.edit_today' });
-  const clearBtn = await makeActionButton(ctx, { label: t('buttons.clear'), action: 'notes.clear_today' });
-  const historyBtn = await makeActionButton(ctx, { label: t('buttons.history'), action: 'notes.history' });
-  const backBtn = await makeActionButton(ctx, { label: t('buttons.back'), action: 'nav.dashboard' });
+  const addBtn = await makeActionButton(ctx, { label: t('buttons.notes_add'), action: 'notes.add' });
+  const historyBtn = await makeActionButton(ctx, { label: t('buttons.notes_history'), action: 'notes.history' });
+  const clearBtn = await makeActionButton(ctx, { label: t('buttons.notes_clear_today'), action: 'notes.clear_today' });
+  const backBtn = await makeActionButton(ctx, { label: t('buttons.notes_back'), action: 'nav.dashboard' });
 
-  kb.text(editBtn.text, editBtn.callback_data).row();
-  kb.text(clearBtn.text, clearBtn.callback_data).row();
+  kb.text(addBtn.text, addBtn.callback_data).row();
   kb.text(historyBtn.text, historyBtn.callback_data).row();
+  kb.text(clearBtn.text, clearBtn.callback_data).row();
   kb.text(backBtn.text, backBtn.callback_data);
 
   await renderScreen(ctx, {
-    titleKey: t('screens.free_text.title_today'),
+    titleKey: t('screens.notes.title'),
     bodyLines: lines,
     inlineKeyboard: kb
   });
@@ -1472,35 +1494,97 @@ const renderNotesToday = async (ctx: Context): Promise<void> => {
 const renderNotesHistory = async (ctx: Context): Promise<void> => {
   const { user } = await ensureUserAndSettings(ctx);
   const days = 7;
-  const notes = await listRecentNotes({ userId: user.id, days });
+  const dates = await listRecentDates({ userId: user.id, days, timezone: user.timezone });
 
   const lines: string[] = [];
-  if (notes.length === 0) {
-    lines.push(t('screens.free_text.history_empty', { days: String(days) }));
+  if (dates.every((d) => d.count === 0)) {
+    lines.push(t('screens.notes.history_empty', { days: String(days) }));
   } else {
-    lines.push(t('screens.free_text.history_header'), '');
-    for (const entry of notes) {
-      const preview = entry.notes?.split('\n')[0]?.slice(0, 40) ?? '';
-      lines.push(
-        t('screens.free_text.history_item_line', {
-          date: entry.report_date,
-          preview
-        })
-      );
+    lines.push(t('screens.notes.history_header'), '');
+    for (const entry of dates) {
+      if (entry.count === 0) continue;
+      lines.push(t('screens.notes.history_item_line', { date: entry.date, count: String(entry.count) }));
     }
-    lines.push('', t('screens.free_text.history_open_hint'));
+    lines.push('', t('screens.notes.history_open_hint'));
   }
 
   const kb = new InlineKeyboard();
-  for (const entry of notes) {
-    const btn = await makeActionButton(ctx, { label: entry.report_date, action: 'notes.view', data: { date: entry.report_date } });
+  for (const entry of dates) {
+    if (entry.count === 0) continue;
+    const btn = await makeActionButton(ctx, { label: entry.date, action: 'notes.history_date', data: { date: entry.date } });
     kb.text(btn.text, btn.callback_data).row();
   }
-  const backBtn = await makeActionButton(ctx, { label: t('buttons.back'), action: 'nav.free_text' });
+  const backBtn = await makeActionButton(ctx, { label: t('buttons.notes_back'), action: 'nav.free_text' });
   kb.text(backBtn.text, backBtn.callback_data);
 
   await renderScreen(ctx, {
-    titleKey: t('screens.free_text.title_history'),
+    titleKey: t('screens.notes.history_title'),
+    bodyLines: lines,
+    inlineKeyboard: kb
+  });
+};
+
+const renderNotesDate = async (ctx: Context, noteDate: string): Promise<void> => {
+  const { user } = await ensureUserAndSettings(ctx);
+  const notes = await listNotesByDate({ userId: user.id, noteDate });
+
+  const lines: string[] = [];
+  if (!notes.length) {
+    lines.push(t('screens.notes.view_empty'));
+  } else {
+    for (const note of notes) {
+      const local = formatInstantToLocal(note.created_at, user.timezone ?? config.defaultTimezone);
+      const title = note.title && note.title.trim().length > 0 ? note.title : t('screens.notes.untitled');
+      lines.push(t('screens.notes.date_item_line', { time: local.time, title }));
+    }
+  }
+
+  const kb = new InlineKeyboard();
+  for (const note of notes) {
+    const title = note.title && note.title.trim().length > 0 ? note.title : t('screens.notes.untitled');
+    const local = formatInstantToLocal(note.created_at, user.timezone ?? config.defaultTimezone);
+    const btn = await makeActionButton(ctx, {
+      label: `🕒 ${local.time} — 🗂 ${title}`,
+      action: 'notes.view_note',
+      data: { noteId: note.id }
+    });
+    kb.text(btn.text, btn.callback_data).row();
+  }
+  const backBtn = await makeActionButton(ctx, { label: t('buttons.notes_back'), action: 'notes.history' });
+  kb.text(backBtn.text, backBtn.callback_data);
+
+  await renderScreen(ctx, {
+    titleKey: t('screens.notes.date_title', { date: noteDate }),
+    bodyLines: lines,
+    inlineKeyboard: kb
+  });
+};
+
+const renderNoteDetails = async (ctx: Context, noteId: string): Promise<void> => {
+  const { user } = await ensureUserAndSettings(ctx);
+  const note = await getNoteById({ userId: user.id, id: noteId });
+  if (!note) {
+    await renderNotesHistory(ctx);
+    return;
+  }
+  const local = formatInstantToLocal(note.created_at, user.timezone ?? config.defaultTimezone);
+  const title = note.title && note.title.trim().length > 0 ? note.title : t('screens.notes.untitled');
+  const lines = [
+    t('screens.notes.detail_date', { date: note.note_date }),
+    t('screens.notes.detail_time', { time: local.time }),
+    t('screens.notes.detail_title', { title }),
+    '',
+    note.body
+  ];
+
+  const kb = new InlineKeyboard();
+  const deleteBtn = await makeActionButton(ctx, { label: t('buttons.notes_delete'), action: 'notes.delete_note', data: { noteId: note.id } });
+  const backBtn = await makeActionButton(ctx, { label: t('buttons.notes_back'), action: 'notes.history_date', data: { date: note.note_date } });
+  kb.text(deleteBtn.text, deleteBtn.callback_data).row();
+  kb.text(backBtn.text, backBtn.callback_data);
+
+  await renderScreen(ctx, {
+    titleKey: t('screens.notes.detail_title_label'),
     bodyLines: lines,
     inlineKeyboard: kb
   });
@@ -1777,7 +1861,6 @@ const renderReminders = async (ctx: Context): Promise<void> => {
   const { user } = await ensureUserAndSettings(ctx);
 
   const reminders = await listRemindersForUser(user.id);
-  const cronStatus = await getRemindersCronStatus();
 
   const lines: string[] = [];
 
@@ -1799,45 +1882,235 @@ const renderReminders = async (ctx: Context): Promise<void> => {
     }
   }
 
-  lines.push('');
-  if (!cronStatus.lastRunUtc) {
-    lines.push(t('screens.reminders.cron_status_unknown'));
-  } else {
-    const localCron = formatInstantToLocal(cronStatus.lastRunUtc, user.timezone ?? config.defaultTimezone);
-    lines.push(
-      t('screens.reminders.cron_status_line', {
-        local_time: `${localCron.date} ${localCron.time}`,
-        count: String(cronStatus.processedCount)
-      })
-    );
-  }
-
   lines.push('', t('screens.reminders.actions_hint'));
 
   const kb = new InlineKeyboard();
 
-  const newBtn = await makeActionButton(ctx, { label: t('buttons.new_reminder') ?? 'New', action: 'reminders.new' });
+  const newBtn = await makeActionButton(ctx, { label: t('buttons.reminders_new') ?? '➕ New', action: 'reminders.new' });
   kb.text(newBtn.text, newBtn.callback_data).row();
 
   for (const r of reminders) {
+    const editBtn = await makeActionButton(ctx, { label: t('buttons.reminders_edit') ?? '✏️ Edit', action: 'reminders.edit_open', data: { reminderId: r.id } });
     const toggleBtn = await makeActionButton(ctx, {
-      label: r.enabled ? (t('buttons.disable') ?? 'Disable') : (t('buttons.enable') ?? 'Enable'),
+      label: r.enabled ? (t('buttons.reminders_toggle_off') ?? '🔁 Toggle off') : (t('buttons.reminders_toggle_on') ?? '🔁 Toggle on'),
       action: 'reminders.toggle',
       data: { reminderId: r.id }
     });
     const deleteBtn = await makeActionButton(ctx, {
-      label: t('buttons.delete') ?? 'Delete',
+      label: t('buttons.reminders_delete') ?? '🗑️ Delete',
       action: 'reminders.delete',
       data: { reminderId: r.id }
     });
-    kb.text(toggleBtn.text, toggleBtn.callback_data).text(deleteBtn.text, deleteBtn.callback_data).row();
+    kb.text(editBtn.text, editBtn.callback_data).text(toggleBtn.text, toggleBtn.callback_data).text(deleteBtn.text, deleteBtn.callback_data).row();
   }
 
-  const back = await makeActionButton(ctx, { label: t('buttons.back'), action: 'nav.dashboard' });
+  const back = await makeActionButton(ctx, { label: t('buttons.reminders_back') ?? '🔙 Back', action: 'nav.dashboard' });
   kb.text(back.text, back.callback_data);
 
   await renderScreen(ctx, {
     titleKey: t('screens.reminders.title'),
+    bodyLines: lines,
+    inlineKeyboard: kb
+  });
+};
+
+const renderReminderDetails = async (ctx: Context, reminderId: string, flash?: string): Promise<void> => {
+  const { user } = await ensureUserAndSettings(ctx);
+  const reminder = await getReminderById(reminderId);
+  if (!reminder || reminder.user_id !== user.id) {
+    await renderReminders(ctx);
+    return;
+  }
+
+  const timezone = user.timezone ?? config.defaultTimezone;
+  const local = reminder.next_run_at_utc ? formatInstantToLocal(reminder.next_run_at_utc, timezone) : null;
+
+  const lines = [
+    flash,
+    t('screens.reminders.details_title_line', { title: reminder.title }),
+    t('screens.reminders.details_detail_line', { detail: reminder.detail && reminder.detail.trim().length > 0 ? reminder.detail : t('screens.reminders.details_empty') }),
+    t('screens.reminders.details_scheduled_line', { scheduled: local ? `${local.date} ${local.time}` : t('screens.reminders.no_time') }),
+    t('screens.reminders.details_status_line', { status: reminder.enabled ? t('screens.reminders.status_on') : t('screens.reminders.status_off') })
+  ].filter(Boolean) as string[];
+
+  const kb = new InlineKeyboard();
+  const editTitleBtn = await makeActionButton(ctx, { label: t('buttons.reminders_edit_title'), action: 'reminders.edit_title', data: { reminderId } });
+  const editDetailBtn = await makeActionButton(ctx, { label: t('buttons.reminders_edit_detail'), action: 'reminders.edit_detail', data: { reminderId } });
+  const editDateBtn = await makeActionButton(ctx, { label: t('buttons.reminders_edit_date'), action: 'reminders.edit_date', data: { reminderId } });
+  const editTimeBtn = await makeActionButton(ctx, { label: t('buttons.reminders_edit_time'), action: 'reminders.edit_time', data: { reminderId } });
+  const toggleBtn = await makeActionButton(ctx, {
+    label: reminder.enabled ? t('buttons.reminders_toggle_off') : t('buttons.reminders_toggle_on'),
+    action: 'reminders.toggle',
+    data: { reminderId }
+  });
+  const deleteBtn = await makeActionButton(ctx, { label: t('buttons.reminders_delete'), action: 'reminders.delete', data: { reminderId } });
+  const backBtn = await makeActionButton(ctx, { label: t('buttons.reminders_back'), action: 'nav.reminders' });
+
+  kb.text(editTitleBtn.text, editTitleBtn.callback_data).row();
+  kb.text(editDetailBtn.text, editDetailBtn.callback_data).row();
+  kb.text(editDateBtn.text, editDateBtn.callback_data).row();
+  kb.text(editTimeBtn.text, editTimeBtn.callback_data).row();
+  kb.text(toggleBtn.text, toggleBtn.callback_data).row();
+  kb.text(deleteBtn.text, deleteBtn.callback_data).row();
+  kb.text(backBtn.text, backBtn.callback_data);
+
+  await renderScreen(ctx, {
+    titleKey: t('screens.reminders.details_title'),
+    bodyLines: lines,
+    inlineKeyboard: kb
+  });
+};
+
+const renderReminderDateSelect = async (
+  ctx: Context,
+  params: { mode: ReminderFlow['mode']; reminderId?: string }
+): Promise<void> => {
+  const { user, settings } = await ensureUserAndSettings(ctx);
+  const weekendDay = getWeekendDay(settings.settings_json as Record<string, unknown>);
+  const weekendLabel = getWeekdayLabel(weekendDay);
+
+  const todayBtn = await makeActionButton(ctx, { label: t('buttons.reminders_today'), action: 'reminders.date_select', data: { ...params, choice: 'today' } });
+  const tomorrowBtn = await makeActionButton(ctx, { label: t('buttons.reminders_tomorrow'), action: 'reminders.date_select', data: { ...params, choice: 'tomorrow' } });
+  const weekendBtn = await makeActionButton(ctx, { label: t('buttons.reminders_weekend'), action: 'reminders.date_select', data: { ...params, choice: 'weekend' } });
+  const customBtn = await makeActionButton(ctx, { label: t('buttons.reminders_custom_date'), action: 'reminders.date_select', data: { ...params, choice: 'custom' } });
+  const weekendDayBtn = await makeActionButton(ctx, {
+    label: t('buttons.reminders_weekend_day', { day: weekendLabel }),
+    action: 'reminders.weekend_day',
+    data: params
+  });
+
+  const kb = new InlineKeyboard()
+    .text(todayBtn.text, todayBtn.callback_data)
+    .text(tomorrowBtn.text, tomorrowBtn.callback_data)
+    .row()
+    .text(weekendBtn.text, weekendBtn.callback_data)
+    .text(customBtn.text, customBtn.callback_data)
+    .row()
+    .text(weekendDayBtn.text, weekendDayBtn.callback_data);
+
+  const backAction = params.mode === 'edit' ? 'reminders.edit_open' : 'nav.reminders';
+  const backBtn = await makeActionButton(ctx, { label: t('buttons.reminders_back'), action: backAction, data: params.reminderId ? { reminderId: params.reminderId } : undefined });
+  kb.row().text(backBtn.text, backBtn.callback_data);
+
+  await renderScreen(ctx, {
+    titleKey: t('screens.reminders.new_title'),
+    bodyLines: [t('screens.reminders.new_choose_date')],
+    inlineKeyboard: kb
+  });
+};
+
+const renderReminderCustomDatePicker = async (
+  ctx: Context,
+  params: { mode: ReminderFlow['mode']; reminderId?: string; draft: ReminderDraft }
+): Promise<void> => {
+  const draft = clampCustomDateDraft(params.draft);
+  const dateMode = draft.dateMode ?? 'gregorian';
+  const year = draft.year ?? 0;
+  const month = draft.month ?? 0;
+  const day = draft.day ?? 0;
+  const formatted = dateMode === 'jalali' ? `J${year}-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}` : `${year}-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
+
+  const lines = [
+    t('screens.reminders.custom_date_title', { mode: dateMode === 'jalali' ? t('screens.reminders.custom_date_mode_jalali') : t('screens.reminders.custom_date_mode_gregorian') }),
+    t('screens.reminders.custom_date_current', { date: formatted }),
+    t('screens.reminders.custom_date_hint')
+  ];
+
+  const kb = new InlineKeyboard();
+  const yearMinusBtn = await makeActionButton(ctx, {
+    label: '−1Y',
+    action: 'reminders.date_adjust',
+    data: { ...params, field: 'year', delta: -1 }
+  });
+  const yearPlusBtn = await makeActionButton(ctx, {
+    label: '+1Y',
+    action: 'reminders.date_adjust',
+    data: { ...params, field: 'year', delta: 1 }
+  });
+  const monthMinusBtn = await makeActionButton(ctx, {
+    label: '−1M',
+    action: 'reminders.date_adjust',
+    data: { ...params, field: 'month', delta: -1 }
+  });
+  const monthPlusBtn = await makeActionButton(ctx, {
+    label: '+1M',
+    action: 'reminders.date_adjust',
+    data: { ...params, field: 'month', delta: 1 }
+  });
+  const dayMinusBtn = await makeActionButton(ctx, {
+    label: '−1D',
+    action: 'reminders.date_adjust',
+    data: { ...params, field: 'day', delta: -1 }
+  });
+  const dayPlusBtn = await makeActionButton(ctx, {
+    label: '+1D',
+    action: 'reminders.date_adjust',
+    data: { ...params, field: 'day', delta: 1 }
+  });
+  kb.text(yearMinusBtn.text, yearMinusBtn.callback_data).text(yearPlusBtn.text, yearPlusBtn.callback_data).row();
+  kb.text(monthMinusBtn.text, monthMinusBtn.callback_data).text(monthPlusBtn.text, monthPlusBtn.callback_data).row();
+  kb.text(dayMinusBtn.text, dayMinusBtn.callback_data).text(dayPlusBtn.text, dayPlusBtn.callback_data).row();
+
+  const toggleBtn = await makeActionButton(ctx, {
+    label:
+      dateMode === 'jalali' ? t('buttons.reminders_use_gregorian') : t('buttons.reminders_use_jalali'),
+    action: 'reminders.date_toggle',
+    data: params
+  });
+  const manualBtn = await makeActionButton(ctx, { label: t('buttons.reminders_type_date'), action: 'reminders.date_manual', data: params });
+  const confirmBtn = await makeActionButton(ctx, { label: t('buttons.reminders_date_confirm'), action: 'reminders.date_confirm', data: params });
+  kb.text(toggleBtn.text, toggleBtn.callback_data).row();
+  kb.text(manualBtn.text, manualBtn.callback_data).row();
+  kb.text(confirmBtn.text, confirmBtn.callback_data).row();
+
+  const backAction = params.mode === 'edit' ? 'reminders.edit_open' : 'nav.reminders';
+  const backBtn = await makeActionButton(ctx, { label: t('buttons.reminders_back'), action: backAction, data: params.reminderId ? { reminderId: params.reminderId } : undefined });
+  kb.text(backBtn.text, backBtn.callback_data);
+
+  await renderScreen(ctx, {
+    titleKey: t('screens.reminders.new_title'),
+    bodyLines: lines,
+    inlineKeyboard: kb
+  });
+};
+
+const renderReminderTimePicker = async (
+  ctx: Context,
+  params: { mode: ReminderFlow['mode']; reminderId?: string; draft: ReminderDraft }
+): Promise<void> => {
+  const { user } = await ensureUserAndSettings(ctx);
+  const timezone = user.timezone ?? config.defaultTimezone;
+  const draft = ensureReminderTimeDraft(params.draft, timezone);
+  const timeLabel = minutesToHhmm(draft.timeMinutes ?? getDefaultReminderTimeMinutes(timezone));
+
+  const lines = [t('screens.reminders.time_title'), t('screens.reminders.time_current', { time: timeLabel })];
+
+  const kb = new InlineKeyboard();
+  const minusHourBtn = await makeActionButton(ctx, { label: '−1h', action: 'reminders.time_adjust', data: { ...params, delta: -60 } });
+  const plusHourBtn = await makeActionButton(ctx, { label: '+1h', action: 'reminders.time_adjust', data: { ...params, delta: 60 } });
+  const minus15Btn = await makeActionButton(ctx, { label: '−15m', action: 'reminders.time_adjust', data: { ...params, delta: -15 } });
+  const plus15Btn = await makeActionButton(ctx, { label: '+15m', action: 'reminders.time_adjust', data: { ...params, delta: 15 } });
+  kb.text(minusHourBtn.text, minusHourBtn.callback_data).text(plusHourBtn.text, plusHourBtn.callback_data).row();
+  kb.text(minus15Btn.text, minus15Btn.callback_data).text(plus15Btn.text, plus15Btn.callback_data).row();
+
+  const presets = ['08:00', '12:00', '18:00', '21:00'];
+  for (const preset of presets) {
+    const btn = await makeActionButton(ctx, { label: preset, action: 'reminders.time_preset', data: { ...params, preset } });
+    kb.text(btn.text, btn.callback_data);
+  }
+  kb.row();
+
+  const manualBtn = await makeActionButton(ctx, { label: t('buttons.reminders_type_time'), action: 'reminders.time_manual', data: params });
+  const confirmBtn = await makeActionButton(ctx, { label: t('buttons.reminders_time_confirm'), action: 'reminders.time_confirm', data: params });
+  kb.text(manualBtn.text, manualBtn.callback_data).row();
+  kb.text(confirmBtn.text, confirmBtn.callback_data).row();
+
+  const backAction = params.mode === 'edit' ? 'reminders.edit_open' : 'nav.reminders';
+  const backBtn = await makeActionButton(ctx, { label: t('buttons.reminders_back'), action: backAction, data: params.reminderId ? { reminderId: params.reminderId } : undefined });
+  kb.text(backBtn.text, backBtn.callback_data);
+
+  await renderScreen(ctx, {
+    titleKey: t('screens.reminders.new_title'),
     bodyLines: lines,
     inlineKeyboard: kb
   });
@@ -1883,6 +2156,98 @@ const isValidLocalDate = (input: string): boolean => {
   if (day < 1 || day > 31) return false;
   const probe = new Date(Date.UTC(year, month - 1, day));
   return probe.getUTCFullYear() === year && probe.getUTCMonth() === month - 1 && probe.getUTCDate() === day;
+};
+
+const WEEKDAY_KEYS = ['sun', 'mon', 'tue', 'wed', 'thu', 'fri', 'sat'] as const;
+
+const getWeekendDay = (settingsJson?: Record<string, unknown>): number => {
+  const raw = (settingsJson as { weekend_day?: number | string } | undefined)?.weekend_day;
+  if (typeof raw === 'number' && Number.isInteger(raw) && raw >= 0 && raw <= 6) return raw;
+  if (typeof raw === 'string') {
+    const idx = WEEKDAY_KEYS.indexOf(raw.toLowerCase() as (typeof WEEKDAY_KEYS)[number]);
+    if (idx >= 0) return idx;
+  }
+  return 5;
+};
+
+const getWeekdayLabel = (dayIndex: number): string => {
+  const key = WEEKDAY_KEYS[dayIndex] ?? 'fri';
+  return t(`screens.reminders.weekday_${key}`);
+};
+
+const getLocalWeekdayIndex = (date: Date, timezone: string): number => {
+  const label = new Intl.DateTimeFormat('en-US', { timeZone: timezone, weekday: 'short' }).format(date);
+  const map: Record<string, number> = { Sun: 0, Mon: 1, Tue: 2, Wed: 3, Thu: 4, Fri: 5, Sat: 6 };
+  return map[label] ?? 0;
+};
+
+const addDaysToLocalDate = (localDate: string, days: number, timezone: string): string => {
+  const utcIso = localDateTimeToUtcIso(localDate, '00:00', timezone);
+  const next = new Date(new Date(utcIso).getTime() + days * 24 * 60 * 60 * 1000);
+  return formatInstantToLocal(next.toISOString(), timezone).date;
+};
+
+const getNextWeekendLocalDate = (timezone: string, weekendDay: number): string => {
+  const now = new Date();
+  const localNow = formatInstantToLocal(now.toISOString(), timezone);
+  const currentDow = getLocalWeekdayIndex(now, timezone);
+  const delta = (weekendDay - currentDow + 7) % 7;
+  return addDaysToLocalDate(localNow.date, delta, timezone);
+};
+
+const minutesToHhmm = (minutes: number): string => {
+  const total = ((minutes % 1440) + 1440) % 1440;
+  const hh = Math.floor(total / 60)
+    .toString()
+    .padStart(2, '0');
+  const mm = Math.floor(total % 60)
+    .toString()
+    .padStart(2, '0');
+  return `${hh}:${mm}`;
+};
+
+const normalizeTimeMinutes = (minutes: number): number => {
+  const total = minutes % 1440;
+  return total < 0 ? total + 1440 : total;
+};
+
+const getDefaultReminderTimeMinutes = (timezone: string): number => {
+  const local = formatLocalTime(timezone);
+  const parsed = parseTimeHhmm(local.time);
+  if (!parsed) return 9 * 60;
+  const rounded = Math.ceil(parsed.minutes / 15) * 15;
+  return normalizeTimeMinutes(rounded);
+};
+
+const ensureReminderTimeDraft = (draft: ReminderDraft, timezone: string): ReminderDraft => {
+  if (typeof draft.timeMinutes === 'number') return draft;
+  if (draft.localTime) {
+    const parsed = parseTimeHhmm(draft.localTime);
+    if (parsed) return { ...draft, timeMinutes: parsed.minutes };
+  }
+  const minutes = getDefaultReminderTimeMinutes(timezone);
+  return { ...draft, timeMinutes: minutes, localTime: minutesToHhmm(minutes) };
+};
+
+const buildCustomDateDraft = (localDate: string, mode: 'gregorian' | 'jalali'): ReminderDraft => {
+  const [year, month, day] = localDate.split('-').map(Number);
+  if (mode === 'jalali') {
+    const jalali = gregorianToJalali(year, month, day);
+    return { dateMode: 'jalali', year: jalali.year, month: jalali.month, day: jalali.day };
+  }
+  return { dateMode: 'gregorian', year, month, day };
+};
+
+const clampCustomDateDraft = (draft: ReminderDraft): ReminderDraft => {
+  if (!draft.year || !draft.month || !draft.day || !draft.dateMode) return draft;
+  if (draft.dateMode === 'gregorian') {
+    const daysInMonth = new Date(Date.UTC(draft.year, draft.month, 0)).getUTCDate();
+    const nextDay = Math.min(Math.max(1, draft.day), daysInMonth);
+    return { ...draft, day: nextDay };
+  }
+  const maxDay = draft.month <= 6 ? 31 : draft.month <= 11 ? 30 : isValidJalaliDate(draft.year, 12, 30) ? 30 : 29;
+  const nextDay = Math.min(Math.max(1, draft.day), maxDay);
+  return { ...draft, day: nextDay };
 };
 
 const timeDraftToDisplay = (draft: {
@@ -3403,47 +3768,8 @@ bot.callbackQuery(/^[A-Za-z0-9_-]{8,12}$/, async (ctx) => {
       case 'reminders.new': {
         if (!ctx.from) break;
         const stateKey = String(ctx.from.id);
-        setReminderFlow(stateKey, { step: 'date', draft: {} });
-
-        const todayBtn = await makeActionButton(ctx, { label: t('buttons.today') ?? 'Today', action: 'reminders.new.date_today' });
-        const tomorrowBtn = await makeActionButton(ctx, { label: t('buttons.tomorrow') ?? 'Tomorrow', action: 'reminders.new.date_tomorrow' });
-        const customBtn = await makeActionButton(ctx, { label: t('buttons.custom_date') ?? 'Pick date', action: 'reminders.new.date_custom' });
-
-        const kb = new InlineKeyboard().text(todayBtn.text, todayBtn.callback_data).text(tomorrowBtn.text, tomorrowBtn.callback_data).row().text(customBtn.text, customBtn.callback_data);
-
-        await renderScreen(ctx, {
-          titleKey: t('screens.reminders.new_title'),
-          bodyLines: [t('screens.reminders.new_choose_date')],
-          inlineKeyboard: kb
-        });
-        return;
-      }
-      case 'reminders.new.date_today':
-      case 'reminders.new.date_tomorrow':
-      case 'reminders.new.date_custom': {
-        if (!ctx.from) break;
-        const stateKey = String(ctx.from.id);
-        const { user } = await ensureUserAndSettings(ctx);
-        const timezone = user.timezone ?? config.defaultTimezone;
-
-        if (action === 'reminders.new.date_custom') {
-          setReminderFlow(stateKey, { step: 'custom_date', draft: {} });
-          await renderScreen(ctx, {
-            titleKey: t('screens.reminders.new_title'),
-            bodyLines: [t('screens.reminders.new_choose_date')]
-          });
-          return;
-        }
-
-        const offset = action === 'reminders.new.date_today' ? 0 : 1;
-        const target = new Date(Date.now() + offset * 24 * 60 * 60 * 1000);
-        const local = formatInstantToLocal(target.toISOString(), timezone);
-        setReminderFlow(stateKey, { step: 'time', draft: { localDate: local.date } });
-
-        await renderScreen(ctx, {
-          titleKey: t('screens.reminders.new_title'),
-          bodyLines: [t('screens.reminders.new_choose_time')]
-        });
+        setReminderFlow(stateKey, { mode: 'create', step: 'date_select', draft: {} });
+        await renderReminderDateSelect(ctx, { mode: 'create' });
         return;
       }
       case 'nav.rewards':
@@ -3455,73 +3781,101 @@ bot.callbackQuery(/^[A-Za-z0-9_-]{8,12}$/, async (ctx) => {
       case 'nav.settings':
         await renderSettingsRoot(ctx);
         return;
-      case 'notes.edit_today': {
-        if (ctx.from) {
-          setNotesFlow(String(ctx.from.id), { mode: 'edit_today' });
-        }
+      case 'notes.add': {
+        if (!ctx.from) break;
+        const { user } = await ensureUserAndSettings(ctx);
+        const { date } = getTodayDateString(user.timezone ?? config.defaultTimezone);
+        setNotesFlow(String(ctx.from.id), { mode: 'create', step: 'title', draft: { noteDate: date } });
+
+        const skipBtn = await makeActionButton(ctx, { label: t('buttons.notes_skip'), action: 'notes.skip_title' });
+        const cancelBtn = await makeActionButton(ctx, { label: t('buttons.notes_cancel'), action: 'notes.cancel_add' });
+        const kb = new InlineKeyboard().text(skipBtn.text, skipBtn.callback_data).row().text(cancelBtn.text, cancelBtn.callback_data);
+
         await renderScreen(ctx, {
-          titleKey: t('screens.free_text.title_today'),
-          bodyLines: [t('screens.free_text.edit_prompt'), '', t('screens.free_text.edit_hint')]
+          titleKey: t('screens.notes.title'),
+          bodyLines: [t('screens.notes.ask_title')],
+          inlineKeyboard: kb
         });
         return;
       }
+      case 'notes.skip_title': {
+        if (!ctx.from) break;
+        const stateKey = String(ctx.from.id);
+        const state = userStates.get(stateKey);
+        if (state?.notesFlow && state.notesFlow.mode === 'create') {
+          setNotesFlow(stateKey, { mode: 'create', step: 'body', draft: { ...state.notesFlow.draft, title: null } });
+        }
+        await renderScreen(ctx, { titleKey: t('screens.notes.title'), bodyLines: [t('screens.notes.ask_body')] });
+        return;
+      }
+      case 'notes.cancel_add': {
+        if (ctx.from) clearNotesFlow(String(ctx.from.id));
+        await renderNotesToday(ctx);
+        return;
+      }
       case 'notes.clear_today': {
+        if (!ctx.from) break;
         const { user } = await ensureUserAndSettings(ctx);
-        await clearTodayNote({ userId: user.id, timezone: user.timezone });
-        await renderScreen(ctx, {
-          titleKey: t('screens.free_text.title_today'),
-          bodyLines: [t('screens.free_text.today_cleared')]
-        });
+        const { date } = getTodayDateString(user.timezone ?? config.defaultTimezone);
+        setNotesFlow(String(ctx.from.id), { mode: 'clear_date', noteDate: date });
+        const confirmBtn = await makeActionButton(ctx, { label: t('buttons.notes_confirm_clear'), action: 'notes.clear_confirm' });
+        const cancelBtn = await makeActionButton(ctx, { label: t('buttons.notes_cancel'), action: 'notes.clear_cancel' });
+        const kb = new InlineKeyboard().text(confirmBtn.text, confirmBtn.callback_data).text(cancelBtn.text, cancelBtn.callback_data);
+        await renderScreen(ctx, { titleKey: t('screens.notes.title'), bodyLines: [t('screens.notes.clear_confirm')], inlineKeyboard: kb });
+        return;
+      }
+      case 'notes.clear_confirm': {
+        if (!ctx.from) break;
+        const stateKey = String(ctx.from.id);
+        const flow = userStates.get(stateKey)?.notesFlow;
+        if (flow?.mode === 'clear_date') {
+          const { user } = await ensureUserAndSettings(ctx);
+          await clearDate({ userId: user.id, noteDate: flow.noteDate });
+        }
+        clearNotesFlow(stateKey);
+        await renderNotesToday(ctx);
+        return;
+      }
+      case 'notes.clear_cancel': {
+        if (ctx.from) clearNotesFlow(String(ctx.from.id));
         await renderNotesToday(ctx);
         return;
       }
       case 'notes.history':
         await renderNotesHistory(ctx);
         return;
-      case 'notes.view': {
-        const data = (payload as { data?: { date?: string } }).data;
-        const date = data?.date;
+      case 'notes.history_date': {
+        const date = (payload as { data?: { date?: string } }).data?.date;
         if (!date) {
           await renderNotesHistory(ctx);
           return;
         }
-        const { user } = await ensureUserAndSettings(ctx);
-        const recentLogs = await listRecentLogs({ userId: user.id, limit: 7 });
-        const note = recentLogs.find((row) => row.report_date === date)?.notes ?? null;
-        const lines: string[] = [];
-        if (!note || note.trim() === '') {
-          lines.push(t('screens.free_text.view_empty'));
-        } else {
-          lines.push(note);
-        }
-
-        const kb = new InlineKeyboard();
-        const editBtn = await makeActionButton(ctx, { label: t('buttons.edit'), action: 'notes.edit_specific', data: { date } });
-        const backBtn = await makeActionButton(ctx, { label: t('buttons.back'), action: 'notes.history' });
-        kb.text(editBtn.text, editBtn.callback_data).row();
-        kb.text(backBtn.text, backBtn.callback_data);
-
-        await renderScreen(ctx, {
-          titleKey: t('screens.free_text.view_title', { date }),
-          bodyLines: lines,
-          inlineKeyboard: kb
-        });
+        await renderNotesDate(ctx, date);
         return;
       }
-      case 'notes.edit_specific': {
-        const data = (payload as { data?: { date?: string } }).data;
-        const date = data?.date;
-        if (!date || !ctx.from) {
+      case 'notes.view_note': {
+        const noteId = (payload as { data?: { noteId?: string } }).data?.noteId;
+        if (!noteId) {
           await renderNotesHistory(ctx);
           return;
         }
-
-        setNotesFlow(String(ctx.from.id), { mode: 'edit_specific', targetDate: date });
-
-        await renderScreen(ctx, {
-          titleKey: t('screens.free_text.view_title', { date }),
-          bodyLines: [t('screens.free_text.edit_prompt'), '', t('screens.free_text.edit_hint')]
-        });
+        await renderNoteDetails(ctx, noteId);
+        return;
+      }
+      case 'notes.delete_note': {
+        const noteId = (payload as { data?: { noteId?: string } }).data?.noteId;
+        if (!noteId) {
+          await renderNotesHistory(ctx);
+          return;
+        }
+        const { user } = await ensureUserAndSettings(ctx);
+        const note = await getNoteById({ userId: user.id, id: noteId });
+        if (note) {
+          await deleteNote({ userId: user.id, id: noteId });
+          await renderNotesDate(ctx, note.note_date);
+        } else {
+          await renderNotesHistory(ctx);
+        }
         return;
       }
       case 'settings.language': {
@@ -3584,6 +3938,322 @@ bot.callbackQuery(/^[A-Za-z0-9_-]{8,12}$/, async (ctx) => {
           clearReportContextCache();
         }
         await renderRoutineDetails(ctx, routineId);
+        return;
+      }
+      case 'reminders.edit_open': {
+        const reminderId = (payload as { data?: { reminderId?: string } }).data?.reminderId;
+        if (!reminderId) {
+          await renderReminders(ctx);
+          return;
+        }
+        await renderReminderDetails(ctx, reminderId);
+        return;
+      }
+      case 'reminders.edit_title': {
+        if (!ctx.from) break;
+        const reminderId = (payload as { data?: { reminderId?: string } }).data?.reminderId;
+        if (!reminderId) {
+          await renderReminders(ctx);
+          return;
+        }
+        const stateKey = String(ctx.from.id);
+        setReminderFlow(stateKey, { mode: 'edit', reminderId, step: 'title', draft: {} });
+        await renderScreen(ctx, { titleKey: t('screens.reminders.details_title'), bodyLines: [t('screens.reminders.edit_title_prompt')] });
+        return;
+      }
+      case 'reminders.edit_detail': {
+        if (!ctx.from) break;
+        const reminderId = (payload as { data?: { reminderId?: string } }).data?.reminderId;
+        if (!reminderId) {
+          await renderReminders(ctx);
+          return;
+        }
+        const stateKey = String(ctx.from.id);
+        setReminderFlow(stateKey, { mode: 'edit', reminderId, step: 'detail', draft: {} });
+        await renderScreen(ctx, { titleKey: t('screens.reminders.details_title'), bodyLines: [t('screens.reminders.edit_detail_prompt')] });
+        return;
+      }
+      case 'reminders.edit_date': {
+        if (!ctx.from) break;
+        const reminderId = (payload as { data?: { reminderId?: string } }).data?.reminderId;
+        if (!reminderId) {
+          await renderReminders(ctx);
+          return;
+        }
+        const stateKey = String(ctx.from.id);
+        setReminderFlow(stateKey, { mode: 'edit', reminderId, step: 'date_select', draft: {} });
+        await renderReminderDateSelect(ctx, { mode: 'edit', reminderId });
+        return;
+      }
+      case 'reminders.edit_time': {
+        if (!ctx.from) break;
+        const reminderId = (payload as { data?: { reminderId?: string } }).data?.reminderId;
+        if (!reminderId) {
+          await renderReminders(ctx);
+          return;
+        }
+        const { user } = await ensureUserAndSettings(ctx);
+        const reminder = await getReminderById(reminderId);
+        if (!reminder || reminder.user_id !== user.id) {
+          await renderReminders(ctx);
+          return;
+        }
+        const timezone = user.timezone ?? config.defaultTimezone;
+        const local = reminder.next_run_at_utc ? formatInstantToLocal(reminder.next_run_at_utc, timezone) : null;
+        const baseDraft: ReminderDraft = {
+          localDate: local?.date,
+          localTime: local?.time,
+          timeMinutes: local?.time ? parseTimeHhmm(local.time)?.minutes : undefined
+        };
+        const draft = ensureReminderTimeDraft(baseDraft, timezone);
+        const stateKey = String(ctx.from.id);
+        setReminderFlow(stateKey, { mode: 'edit', reminderId, step: 'time', draft });
+        await renderReminderTimePicker(ctx, { mode: 'edit', reminderId, draft });
+        return;
+      }
+      case 'reminders.date_select': {
+        if (!ctx.from) break;
+        const data = (payload as { data?: { choice?: string; mode?: ReminderFlow['mode']; reminderId?: string } }).data;
+        const choice = (data?.choice ?? 'today') as ReminderDraft['dateSource'];
+        const mode = data?.mode ?? 'create';
+        const reminderId = data?.reminderId;
+        if (mode === 'edit' && !reminderId) {
+          await renderReminders(ctx);
+          return;
+        }
+        const stateKey = String(ctx.from.id);
+        const { user, settings } = await ensureUserAndSettings(ctx);
+        const timezone = user.timezone ?? config.defaultTimezone;
+
+        if (choice === 'custom') {
+          const local = formatLocalTime(timezone);
+          const draft: ReminderDraft = { ...buildCustomDateDraft(local.date, 'gregorian'), dateSource: 'custom' };
+          if (mode === 'edit') {
+            const editReminderId = reminderId as string;
+            setReminderFlow(stateKey, { mode: 'edit', reminderId: editReminderId, step: 'custom_date', draft });
+            await renderReminderCustomDatePicker(ctx, { mode: 'edit', reminderId: editReminderId, draft });
+          } else {
+            setReminderFlow(stateKey, { mode: 'create', step: 'custom_date', draft });
+            await renderReminderCustomDatePicker(ctx, { mode: 'create', draft });
+          }
+          return;
+        }
+
+        let localDate = formatLocalTime(timezone).date;
+        if (choice === 'tomorrow') {
+          localDate = addDaysToLocalDate(localDate, 1, timezone);
+        } else if (choice === 'weekend') {
+          const weekendDay = getWeekendDay(settings.settings_json as Record<string, unknown>);
+          localDate = getNextWeekendLocalDate(timezone, weekendDay);
+        }
+
+        const baseDraft: ReminderDraft = { localDate, dateSource: choice };
+        const draft = ensureReminderTimeDraft(baseDraft, timezone);
+        if (mode === 'edit') {
+          const editReminderId = reminderId as string;
+          setReminderFlow(stateKey, { mode: 'edit', reminderId: editReminderId, step: 'time', draft });
+          await renderReminderTimePicker(ctx, { mode: 'edit', reminderId: editReminderId, draft });
+        } else {
+          setReminderFlow(stateKey, { mode: 'create', step: 'time', draft });
+          await renderReminderTimePicker(ctx, { mode: 'create', draft });
+        }
+        return;
+      }
+      case 'reminders.weekend_day': {
+        const data = (payload as { data?: { mode?: ReminderFlow['mode']; reminderId?: string } }).data;
+        const mode = data?.mode ?? 'create';
+        const reminderId = data?.reminderId;
+        const kb = new InlineKeyboard();
+        for (let idx = 0; idx < WEEKDAY_KEYS.length; idx += 1) {
+          const btn = await makeActionButton(ctx, {
+            label: getWeekdayLabel(idx),
+            action: 'reminders.weekend_day_set',
+            data: { day: idx, mode, reminderId }
+          });
+          kb.text(btn.text, btn.callback_data);
+          if ((idx + 1) % 3 === 0) kb.row();
+        }
+        const backBtn =
+          mode === 'edit'
+            ? await makeActionButton(ctx, { label: t('buttons.reminders_back'), action: 'reminders.edit_date', data: { reminderId } })
+            : await makeActionButton(ctx, { label: t('buttons.reminders_back'), action: 'reminders.new' });
+        kb.row().text(backBtn.text, backBtn.callback_data);
+        await renderScreen(ctx, {
+          titleKey: t('screens.reminders.new_title'),
+          bodyLines: [t('screens.reminders.weekend_day_prompt')],
+          inlineKeyboard: kb
+        });
+        return;
+      }
+      case 'reminders.weekend_day_set': {
+        const data = (payload as { data?: { day?: number; mode?: ReminderFlow['mode']; reminderId?: string } }).data;
+        const day = data?.day;
+        if (typeof day === 'number') {
+          const { user } = await ensureUserAndSettings(ctx);
+          await updateUserSettingsJson(user.id, { weekend_day: day });
+        }
+        await renderReminderDateSelect(ctx, { mode: data?.mode ?? 'create', reminderId: data?.reminderId });
+        return;
+      }
+      case 'reminders.date_adjust': {
+        if (!ctx.from) break;
+        const stateKey = String(ctx.from.id);
+        const flow = userStates.get(stateKey)?.reminderFlow;
+        if (!flow) {
+          await renderReminders(ctx);
+          return;
+        }
+        const data = (payload as { data?: { field?: 'year' | 'month' | 'day'; delta?: number } }).data;
+        if (!data?.field || typeof data.delta !== 'number') {
+          await renderReminders(ctx);
+          return;
+        }
+        const draft = { ...(flow.draft ?? {}) };
+        if (data.field === 'year') draft.year = (draft.year ?? 0) + data.delta;
+        if (data.field === 'month') {
+          const month = (draft.month ?? 1) + data.delta;
+          draft.month = month < 1 ? 12 : month > 12 ? 1 : month;
+        }
+        if (data.field === 'day') draft.day = Math.max(1, (draft.day ?? 1) + data.delta);
+        const nextDraft = clampCustomDateDraft(draft);
+        setReminderFlow(stateKey, { ...flow, draft: nextDraft, step: 'custom_date' });
+        await renderReminderCustomDatePicker(ctx, { mode: flow.mode, reminderId: flow.mode === 'edit' ? flow.reminderId : undefined, draft: nextDraft });
+        return;
+      }
+      case 'reminders.date_toggle': {
+        if (!ctx.from) break;
+        const stateKey = String(ctx.from.id);
+        const flow = userStates.get(stateKey)?.reminderFlow;
+        if (!flow) {
+          await renderReminders(ctx);
+          return;
+        }
+        const draft = flow.draft;
+        const dateMode = draft.dateMode ?? 'gregorian';
+        let nextDraft: ReminderDraft = draft;
+        if (draft.year && draft.month && draft.day) {
+          if (dateMode === 'gregorian') {
+            const jalali = gregorianToJalali(draft.year, draft.month, draft.day);
+            nextDraft = { ...draft, dateMode: 'jalali', year: jalali.year, month: jalali.month, day: jalali.day };
+          } else {
+            const greg = jalaliToGregorian(draft.year, draft.month, draft.day);
+            nextDraft = { ...draft, dateMode: 'gregorian', year: greg.year, month: greg.month, day: greg.day };
+          }
+        }
+        setReminderFlow(stateKey, { ...flow, draft: nextDraft, step: 'custom_date' });
+        await renderReminderCustomDatePicker(ctx, { mode: flow.mode, reminderId: flow.mode === 'edit' ? flow.reminderId : undefined, draft: nextDraft });
+        return;
+      }
+      case 'reminders.date_manual': {
+        await renderScreen(ctx, {
+          titleKey: t('screens.reminders.new_title'),
+          bodyLines: [t('screens.reminders.custom_date_manual_prompt')]
+        });
+        return;
+      }
+      case 'reminders.date_confirm': {
+        if (!ctx.from) break;
+        const stateKey = String(ctx.from.id);
+        const flow = userStates.get(stateKey)?.reminderFlow;
+        if (!flow) {
+          await renderReminders(ctx);
+          return;
+        }
+        const draft = flow.draft;
+        if (!draft.year || !draft.month || !draft.day || !draft.dateMode) {
+          await renderReminders(ctx);
+          return;
+        }
+        let localDate = '';
+        if (draft.dateMode === 'gregorian') {
+          localDate = `${draft.year}-${String(draft.month).padStart(2, '0')}-${String(draft.day).padStart(2, '0')}`;
+        } else {
+          const greg = jalaliToGregorian(draft.year, draft.month, draft.day);
+          localDate = `${greg.year}-${String(greg.month).padStart(2, '0')}-${String(greg.day).padStart(2, '0')}`;
+        }
+        const nextDraft = ensureReminderTimeDraft({ ...draft, localDate, dateSource: 'custom' }, (await ensureUserAndSettings(ctx)).user.timezone ?? config.defaultTimezone);
+        setReminderFlow(stateKey, { ...flow, step: 'time', draft: nextDraft });
+        await renderReminderTimePicker(ctx, { mode: flow.mode, reminderId: flow.mode === 'edit' ? flow.reminderId : undefined, draft: nextDraft });
+        return;
+      }
+      case 'reminders.time_adjust': {
+        if (!ctx.from) break;
+        const stateKey = String(ctx.from.id);
+        const flow = userStates.get(stateKey)?.reminderFlow;
+        if (!flow) {
+          await renderReminders(ctx);
+          return;
+        }
+        const delta = (payload as { data?: { delta?: number } }).data?.delta;
+        if (typeof delta !== 'number') {
+          await renderReminders(ctx);
+          return;
+        }
+        const draft = ensureReminderTimeDraft(flow.draft, (await ensureUserAndSettings(ctx)).user.timezone ?? config.defaultTimezone);
+        const nextMinutes = normalizeTimeMinutes((draft.timeMinutes ?? 0) + delta);
+        const nextDraft = { ...draft, timeMinutes: nextMinutes, localTime: minutesToHhmm(nextMinutes) };
+        setReminderFlow(stateKey, { ...flow, draft: nextDraft, step: 'time' });
+        await renderReminderTimePicker(ctx, { mode: flow.mode, reminderId: flow.mode === 'edit' ? flow.reminderId : undefined, draft: nextDraft });
+        return;
+      }
+      case 'reminders.time_preset': {
+        if (!ctx.from) break;
+        const stateKey = String(ctx.from.id);
+        const flow = userStates.get(stateKey)?.reminderFlow;
+        if (!flow) {
+          await renderReminders(ctx);
+          return;
+        }
+        const preset = (payload as { data?: { preset?: string } }).data?.preset;
+        const parsed = preset ? parseTimeHhmm(preset) : null;
+        if (!parsed) {
+          await renderReminders(ctx);
+          return;
+        }
+        const nextDraft = { ...flow.draft, timeMinutes: parsed.minutes, localTime: parsed.hhmm };
+        setReminderFlow(stateKey, { ...flow, draft: nextDraft, step: 'time' });
+        await renderReminderTimePicker(ctx, { mode: flow.mode, reminderId: flow.mode === 'edit' ? flow.reminderId : undefined, draft: nextDraft });
+        return;
+      }
+      case 'reminders.time_manual': {
+        if (!ctx.from) break;
+        const stateKey = String(ctx.from.id);
+        const flow = userStates.get(stateKey)?.reminderFlow;
+        if (!flow) {
+          await renderReminders(ctx);
+          return;
+        }
+        setReminderFlow(stateKey, { ...flow, step: 'time_manual' });
+        await renderScreen(ctx, { titleKey: t('screens.reminders.new_title'), bodyLines: [t('screens.reminders.time_manual_prompt')] });
+        return;
+      }
+      case 'reminders.time_confirm': {
+        if (!ctx.from) break;
+        const stateKey = String(ctx.from.id);
+        const flow = userStates.get(stateKey)?.reminderFlow;
+        if (!flow) {
+          await renderReminders(ctx);
+          return;
+        }
+        const draft = flow.draft;
+        if (!draft.localDate || !draft.localTime) {
+          await renderReminders(ctx);
+          return;
+        }
+        if (flow.mode === 'create') {
+          setReminderFlow(stateKey, { ...flow, step: 'title' });
+          await renderScreen(ctx, { titleKey: t('screens.reminders.new_title'), bodyLines: [t('screens.reminders.new_enter_title')] });
+          return;
+        }
+        if (flow.mode === 'edit') {
+          const { user } = await ensureUserAndSettings(ctx);
+          const timezone = user.timezone ?? config.defaultTimezone;
+          const nextRunUtcIso = localDateTimeToUtcIso(draft.localDate, draft.localTime, timezone);
+          await updateReminder(flow.reminderId, { nextRunAtUtc: new Date(nextRunUtcIso) });
+          clearReminderFlow(stateKey);
+          await renderReminderDetails(ctx, flow.reminderId, t('screens.reminders.edit_saved'));
+          return;
+        }
         return;
       }
       case 'reminders.toggle': {
@@ -5721,28 +6391,38 @@ bot.on('message:text', async (ctx: Context) => {
     const flow = state.notesFlow;
     const { user } = await ensureUserAndSettings(ctx);
 
-    if (flow.mode === 'edit_today') {
-      await upsertTodayLog({ userId: user.id, timezone: user.timezone, summary: rawText });
-      clearNotesFlow(stateKey);
-
-      const preview = rawText.split('\n').slice(0, 3).join('\n');
-      await renderScreen(ctx, {
-        titleKey: t('screens.free_text.title_today'),
-        bodyLines: [t('screens.free_text.today_saved'), '', t('screens.free_text.today_preview_header'), '', preview]
-      });
-      await renderNotesToday(ctx);
-      return;
-    }
-
-    if (flow.mode === 'edit_specific') {
-      const date = flow.targetDate;
-      await upsertNoteForDate({ userId: user.id, reportDate: date, summary: rawText });
-      clearNotesFlow(stateKey);
-      await renderScreen(ctx, {
-        titleKey: t('screens.free_text.view_title', { date }),
-        bodyLines: [t('screens.free_text.today_saved'), '', rawText]
-      });
-      return;
+    if (flow.mode === 'create') {
+      if (flow.step === 'title') {
+        const title = text.length > 0 ? text : null;
+        setNotesFlow(stateKey, { mode: 'create', step: 'body', draft: { ...flow.draft, title } });
+        await renderScreen(ctx, { titleKey: t('screens.notes.title'), bodyLines: [t('screens.notes.ask_body')] });
+        return;
+      }
+      if (flow.step === 'body') {
+        if (!text) {
+          await renderScreen(ctx, { titleKey: t('screens.notes.title'), bodyLines: [t('screens.notes.ask_body')] });
+          return;
+        }
+        const note = await createNote({
+          userId: user.id,
+          noteDate: flow.draft.noteDate,
+          title: flow.draft.title ?? null,
+          body: rawText
+        });
+        clearNotesFlow(stateKey);
+        const title = note.title && note.title.trim().length > 0 ? note.title : t('screens.notes.untitled');
+        const preview = note.body.split('\n').slice(0, 3).join('\n');
+        await renderScreen(ctx, {
+          titleKey: t('screens.notes.title'),
+          bodyLines: [
+            t('screens.notes.saved'),
+            '',
+            t('screens.notes.preview', { date: note.note_date, title, preview })
+          ]
+        });
+        await renderNotesToday(ctx);
+        return;
+      }
     }
   }
 
@@ -5798,35 +6478,62 @@ bot.on('message:text', async (ctx: Context) => {
     const timezone = user.timezone ?? config.defaultTimezone;
 
     if (flow.step === 'custom_date') {
+      const jalaliMatch = raw.match(/^J(\d{4})-(\d{2})-(\d{2})$/i);
+      if (jalaliMatch) {
+        const year = Number(jalaliMatch[1]);
+        const month = Number(jalaliMatch[2]);
+        const day = Number(jalaliMatch[3]);
+        if (!isValidJalaliDate(year, month, day)) {
+          await renderScreen(ctx, { titleKey: t('screens.reminders.new_title'), bodyLines: [t('screens.reminders.new_invalid_date'), t('screens.reminders.custom_date_hint')] });
+          return;
+        }
+        const greg = jalaliToGregorian(year, month, day);
+        const localDate = `${greg.year}-${String(greg.month).padStart(2, '0')}-${String(greg.day).padStart(2, '0')}`;
+        const nextDraft = ensureReminderTimeDraft({ ...flow.draft, localDate, dateSource: 'custom' }, timezone);
+        setReminderFlow(stateKey, { ...flow, step: 'time', draft: nextDraft });
+        await renderReminderTimePicker(ctx, { mode: flow.mode, reminderId: flow.mode === 'edit' ? flow.reminderId : undefined, draft: nextDraft });
+        return;
+      }
+
       if (!isValidLocalDate(raw)) {
         await renderScreen(ctx, {
           titleKey: t('screens.reminders.new_title'),
-          bodyLines: [t('screens.reminders.new_invalid_date'), t('screens.reminders.new_choose_date')]
+          bodyLines: [t('screens.reminders.new_invalid_date'), t('screens.reminders.custom_date_hint')]
         });
         return;
       }
-      setReminderFlow(stateKey, { step: 'time', draft: { ...flow.draft, localDate: raw } });
-      await renderScreen(ctx, {
-        titleKey: t('screens.reminders.new_title'),
-        bodyLines: [t('screens.reminders.new_choose_time')]
-      });
+      const nextDraft = ensureReminderTimeDraft({ ...flow.draft, localDate: raw, dateSource: 'custom' }, timezone);
+      setReminderFlow(stateKey, { ...flow, step: 'time', draft: nextDraft });
+      await renderReminderTimePicker(ctx, { mode: flow.mode, reminderId: flow.mode === 'edit' ? flow.reminderId : undefined, draft: nextDraft });
       return;
     }
 
-    if (flow.step === 'time') {
-      const validTime = /^([01]\d|2[0-3]):[0-5]\d$/.test(raw);
-      if (!validTime) {
+    if (flow.step === 'time_manual') {
+      const parsed = parseTimeHhmm(raw);
+      if (!parsed) {
         await renderScreen(ctx, {
           titleKey: t('screens.reminders.new_title'),
-          bodyLines: [t('screens.reminders.new_invalid_time'), t('screens.reminders.new_choose_time')]
+          bodyLines: [t('screens.reminders.new_invalid_time'), t('screens.reminders.time_manual_prompt')]
         });
         return;
       }
-      setReminderFlow(stateKey, { step: 'title', draft: { ...flow.draft, localTime: raw } });
-      await renderScreen(ctx, {
-        titleKey: t('screens.reminders.new_title'),
-        bodyLines: [t('screens.reminders.new_enter_title')]
-      });
+      const nextDraft = { ...flow.draft, localTime: parsed.hhmm, timeMinutes: parsed.minutes };
+      if (flow.mode === 'create') {
+        setReminderFlow(stateKey, { ...flow, step: 'title', draft: nextDraft });
+        await renderScreen(ctx, { titleKey: t('screens.reminders.new_title'), bodyLines: [t('screens.reminders.new_enter_title')] });
+        return;
+      }
+      if (flow.mode === 'edit') {
+        if (!nextDraft.localDate) {
+          await renderReminders(ctx);
+          return;
+        }
+        const nextRunUtcIso = localDateTimeToUtcIso(nextDraft.localDate, nextDraft.localTime ?? parsed.hhmm, timezone);
+        await updateReminder(flow.reminderId, { nextRunAtUtc: new Date(nextRunUtcIso) });
+        clearReminderFlow(stateKey);
+        await renderReminderDetails(ctx, flow.reminderId, t('screens.reminders.edit_saved'));
+        return;
+      }
       return;
     }
 
@@ -5837,6 +6544,13 @@ bot.on('message:text', async (ctx: Context) => {
           titleKey: t('screens.reminders.new_title'),
           bodyLines: [t('screens.reminders.new_enter_title')]
         });
+        return;
+      }
+
+      if (flow.mode === 'edit') {
+        await updateReminder(flow.reminderId, { title });
+        clearReminderFlow(stateKey);
+        await renderReminderDetails(ctx, flow.reminderId, t('screens.reminders.edit_saved'));
         return;
       }
 
@@ -5868,6 +6582,16 @@ bot.on('message:text', async (ctx: Context) => {
 
       await renderReminders(ctx);
       return;
+    }
+
+    if (flow.step === 'detail') {
+      const detail = raw === '-' || raw.length === 0 ? null : raw;
+      if (flow.mode === 'edit') {
+        await updateReminder(flow.reminderId, { detail });
+        clearReminderFlow(stateKey);
+        await renderReminderDetails(ctx, flow.reminderId, t('screens.reminders.edit_saved'));
+        return;
+      }
     }
   }
 
