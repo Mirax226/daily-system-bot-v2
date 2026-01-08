@@ -20,6 +20,7 @@ create table if not exists public.reward_purchases (
 );
 
 alter table public.rewards add column if not exists enabled boolean not null default true;
+alter table public.rewards add column if not exists sort_order int not null default 0;
 
 create index if not exists idx_rewards_enabled_sort on public.rewards (enabled, sort_order);
 create index if not exists idx_reward_purchases_user_time on public.reward_purchases (user_id, purchased_at_utc);
