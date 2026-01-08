@@ -100,6 +100,44 @@ export type Database = {
         };
         Relationships: [];
       };
+      note_attachments: {
+        Row: {
+          id: string;
+          note_id: string;
+          kind: string;
+          file_id: string;
+          file_unique_id: string | null;
+          caption: string | null;
+          created_at: string;
+        };
+        Insert: {
+          id?: string;
+          note_id: string;
+          kind: string;
+          file_id: string;
+          file_unique_id?: string | null;
+          caption?: string | null;
+          created_at?: string;
+        };
+        Update: {
+          id?: string;
+          note_id?: string;
+          kind?: string;
+          file_id?: string;
+          file_unique_id?: string | null;
+          caption?: string | null;
+          created_at?: string;
+        };
+        Relationships: [
+          {
+            foreignKeyName: 'note_attachments_note_id_fkey';
+            columns: ['note_id'];
+            isOneToOne: false;
+            referencedRelation: 'notes';
+            referencedColumns: ['id'];
+          }
+        ];
+      };
       daily_reports: {
         Row: {
           id: string;
@@ -751,6 +789,7 @@ export type Database = {
 
 export type ReminderRow = Database['public']['Tables']['reminders']['Row'];
 export type NoteRow = Database['public']['Tables']['notes']['Row'];
+export type NoteAttachmentRow = Database['public']['Tables']['note_attachments']['Row'];
 export type DailyReportRow = Database['public']['Tables']['daily_reports']['Row'];
 export type DailyReportInsert = Database['public']['Tables']['daily_reports']['Insert'];
 export type DailyReportUpdate = Database['public']['Tables']['daily_reports']['Update'];

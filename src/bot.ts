@@ -60,7 +60,21 @@ import {
   listRecentReportDays
 } from './services/dailyReport';
 import { getTodayDateString } from './services/dailyLogs';
-import { clearDate, createNote, deleteNote, getNoteById, listNotesByDate, listRecentDates } from './services/notes';
+import {
+  clearDate,
+  createNote,
+  createNoteAttachment,
+  deleteNote,
+  getNoteAttachmentById,
+  getNoteById,
+  listNoteAttachmentKinds,
+  listNoteAttachmentsByKind,
+  listNoteDateSummaries,
+  listNotesByDate,
+  listNotesByDatePage,
+  updateNote,
+  updateNoteAttachmentCaption
+} from './services/notes';
 
 import { consumeCallbackToken } from './services/callbackTokens';
 import { getRecentTelemetryEvents, isTelemetryEnabled, logTelemetryEvent } from './services/telemetry';
@@ -202,6 +216,25 @@ type NotesFlow =
       mode: 'create';
       step: 'title' | 'body';
       draft: { title?: string | null; noteDate: string };
+    }
+  | {
+      mode: 'create';
+      step: 'attachments';
+      noteId: string;
+      viewContext?: { noteDate?: string; page?: number; historyPage?: number };
+    }
+  | {
+      mode: 'create';
+      step: 'voice_description';
+      noteId: string;
+      attachmentId: string;
+      viewContext?: { noteDate?: string; page?: number; historyPage?: number };
+    }
+  | {
+      mode: 'edit';
+      noteId: string;
+      step: 'title' | 'body';
+      viewContext?: { noteDate?: string; page?: number; historyPage?: number };
     }
   | {
       mode: 'view_date';
@@ -1456,6 +1489,18 @@ const renderReportsMenu = async (ctx: Context): Promise<void> => {
   await renderScreen(ctx, { titleKey: 'screens.reports.title', bodyLines: ['screens.reports.choose_category'], inlineKeyboard: kb });
 };
 
+const NOTES_HISTORY_PAGE_SIZE = 14;
+const NOTES_DATE_PAGE_SIZE = 8;
+const NOTE_ATTACHMENT_KINDS = ['photo', 'video', 'voice', 'document'] as const;
+type NoteAttachmentKind = (typeof NOTE_ATTACHMENT_KINDS)[number];
+
+const getNoteAttachmentKindEmoji = (kind: NoteAttachmentKind): string => {
+  if (kind === 'photo') return '🖼';
+  if (kind === 'video') return '🎥';
+  if (kind === 'voice') return '🎙';
+  return '📄';
+};
+
 const renderNotesToday = async (ctx: Context): Promise<void> => {
   const { user } = await ensureUserAndSettings(ctx);
   const { date } = getTodayDateString(user.timezone ?? config.defaultTimezone);
@@ -1491,28 +1536,33 @@ const renderNotesToday = async (ctx: Context): Promise<void> => {
   });
 };
 
-const renderNotesHistory = async (ctx: Context): Promise<void> => {
+const renderNotesHistory = async (ctx: Context, page = 0): Promise<void> => {
   const { user } = await ensureUserAndSettings(ctx);
-  const days = 7;
-  const dates = await listRecentDates({ userId: user.id, days, timezone: user.timezone });
+  const offset = Math.max(0, page) * NOTES_HISTORY_PAGE_SIZE;
+  const { entries, hasMore } = await listNoteDateSummaries({ userId: user.id, limit: NOTES_HISTORY_PAGE_SIZE, offset });
 
   const lines: string[] = [];
-  if (dates.every((d) => d.count === 0)) {
-    lines.push(t('screens.notes.history_empty', { days: String(days) }));
+  if (entries.length === 0) {
+    lines.push(t('screens.notes.history_empty'));
   } else {
     lines.push(t('screens.notes.history_header'), '');
-    for (const entry of dates) {
-      if (entry.count === 0) continue;
+    for (const entry of entries) {
       lines.push(t('screens.notes.history_item_line', { date: entry.date, count: String(entry.count) }));
     }
     lines.push('', t('screens.notes.history_open_hint'));
   }
 
   const kb = new InlineKeyboard();
-  for (const entry of dates) {
-    if (entry.count === 0) continue;
-    const btn = await makeActionButton(ctx, { label: entry.date, action: 'notes.history_date', data: { date: entry.date } });
+  for (const entry of entries) {
+    const btn = await makeActionButton(ctx, { label: entry.date, action: 'notes.history_date', data: { date: entry.date, historyPage: page } });
     kb.text(btn.text, btn.callback_data).row();
+  }
+  if (page > 0 || hasMore) {
+    const prevBtn = page > 0 ? await makeActionButton(ctx, { label: t('buttons.notes_prev'), action: 'notes.history_page', data: { page: page - 1 } }) : null;
+    const nextBtn = hasMore ? await makeActionButton(ctx, { label: t('buttons.notes_next'), action: 'notes.history_page', data: { page: page + 1 } }) : null;
+    if (prevBtn) kb.text(prevBtn.text, prevBtn.callback_data);
+    if (nextBtn) kb.text(nextBtn.text, nextBtn.callback_data);
+    kb.row();
   }
   const backBtn = await makeActionButton(ctx, { label: t('buttons.notes_back'), action: 'nav.free_text' });
   kb.text(backBtn.text, backBtn.callback_data);
@@ -1524,9 +1574,10 @@ const renderNotesHistory = async (ctx: Context): Promise<void> => {
   });
 };
 
-const renderNotesDate = async (ctx: Context, noteDate: string): Promise<void> => {
+const renderNotesDate = async (ctx: Context, noteDate: string, page = 0, historyPage = 0): Promise<void> => {
   const { user } = await ensureUserAndSettings(ctx);
-  const notes = await listNotesByDate({ userId: user.id, noteDate });
+  const offset = Math.max(0, page) * NOTES_DATE_PAGE_SIZE;
+  const { notes, total } = await listNotesByDatePage({ userId: user.id, noteDate, limit: NOTES_DATE_PAGE_SIZE, offset });
 
   const lines: string[] = [];
   if (!notes.length) {
@@ -1546,11 +1597,24 @@ const renderNotesDate = async (ctx: Context, noteDate: string): Promise<void> =>
     const btn = await makeActionButton(ctx, {
       label: `🕒 ${local.time} — 🗂 ${title}`,
       action: 'notes.view_note',
-      data: { noteId: note.id }
+      data: { noteId: note.id, noteDate, page, historyPage }
     });
     kb.text(btn.text, btn.callback_data).row();
   }
-  const backBtn = await makeActionButton(ctx, { label: t('buttons.notes_back'), action: 'notes.history' });
+  const hasPrev = page > 0;
+  const hasNext = offset + notes.length < total;
+  if (hasPrev || hasNext) {
+    const prevBtn = hasPrev
+      ? await makeActionButton(ctx, { label: t('buttons.notes_prev'), action: 'notes.history_date_page', data: { date: noteDate, page: page - 1, historyPage } })
+      : null;
+    const nextBtn = hasNext
+      ? await makeActionButton(ctx, { label: t('buttons.notes_next'), action: 'notes.history_date_page', data: { date: noteDate, page: page + 1, historyPage } })
+      : null;
+    if (prevBtn) kb.text(prevBtn.text, prevBtn.callback_data);
+    if (nextBtn) kb.text(nextBtn.text, nextBtn.callback_data);
+    kb.row();
+  }
+  const backBtn = await makeActionButton(ctx, { label: t('buttons.notes_back'), action: 'notes.history_page', data: { page: historyPage } });
   kb.text(backBtn.text, backBtn.callback_data);
 
   await renderScreen(ctx, {
@@ -1560,13 +1624,21 @@ const renderNotesDate = async (ctx: Context, noteDate: string): Promise<void> =>
   });
 };
 
-const renderNoteDetails = async (ctx: Context, noteId: string): Promise<void> => {
+const renderNoteDetails = async (
+  ctx: Context,
+  noteId: string,
+  viewContext: { noteDate?: string; page?: number; historyPage?: number } = {}
+): Promise<void> => {
   const { user } = await ensureUserAndSettings(ctx);
   const note = await getNoteById({ userId: user.id, id: noteId });
   if (!note) {
     await renderNotesHistory(ctx);
     return;
   }
+  const noteDate = viewContext.noteDate ?? note.note_date;
+  const page = viewContext.page ?? 0;
+  const historyPage = viewContext.historyPage ?? 0;
+  const attachmentSummary = await listNoteAttachmentKinds({ noteId: note.id });
   const local = formatInstantToLocal(note.created_at, user.timezone ?? config.defaultTimezone);
   const title = note.title && note.title.trim().length > 0 ? note.title : t('screens.notes.untitled');
   const lines = [
@@ -1576,11 +1648,51 @@ const renderNoteDetails = async (ctx: Context, noteId: string): Promise<void> =>
     '',
     note.body
   ];
+  lines.push('', t('screens.notes.attachments_summary', { count: String(attachmentSummary.total) }));
 
   const kb = new InlineKeyboard();
-  const deleteBtn = await makeActionButton(ctx, { label: t('buttons.notes_delete'), action: 'notes.delete_note', data: { noteId: note.id } });
-  const backBtn = await makeActionButton(ctx, { label: t('buttons.notes_back'), action: 'notes.history_date', data: { date: note.note_date } });
+  const editBtn = await makeActionButton(ctx, { label: t('buttons.notes_edit'), action: 'notes.edit_menu', data: { noteId: note.id, noteDate, page, historyPage } });
+  const attachBtn = await makeActionButton(ctx, { label: t('buttons.notes_attach'), action: 'notes.attach_more', data: { noteId: note.id, noteDate, page, historyPage } });
+  const deleteBtn = await makeActionButton(ctx, { label: t('buttons.notes_delete'), action: 'notes.delete_note', data: { noteId: note.id, noteDate, page, historyPage } });
+  const backBtn = await makeActionButton(ctx, { label: t('buttons.notes_back'), action: 'notes.history_date', data: { date: noteDate, page, historyPage } });
+  kb.text(editBtn.text, editBtn.callback_data).row();
+  kb.text(attachBtn.text, attachBtn.callback_data).row();
   kb.text(deleteBtn.text, deleteBtn.callback_data).row();
+  if (attachmentSummary.total > 0) {
+    const { counts } = attachmentSummary;
+    if (counts.photo > 0) {
+      const photoBtn = await makeActionButton(ctx, {
+        label: t('buttons.notes_photo', { count: String(counts.photo) }),
+        action: 'notes.attachments_kind',
+        data: { noteId: note.id, kind: 'photo', noteDate, page, historyPage }
+      });
+      kb.text(photoBtn.text, photoBtn.callback_data).row();
+    }
+    if (counts.video > 0) {
+      const videoBtn = await makeActionButton(ctx, {
+        label: t('buttons.notes_video', { count: String(counts.video) }),
+        action: 'notes.attachments_kind',
+        data: { noteId: note.id, kind: 'video', noteDate, page, historyPage }
+      });
+      kb.text(videoBtn.text, videoBtn.callback_data).row();
+    }
+    if (counts.voice > 0) {
+      const voiceBtn = await makeActionButton(ctx, {
+        label: t('buttons.notes_voice', { count: String(counts.voice) }),
+        action: 'notes.attachments_kind',
+        data: { noteId: note.id, kind: 'voice', noteDate, page, historyPage }
+      });
+      kb.text(voiceBtn.text, voiceBtn.callback_data).row();
+    }
+    if (counts.document > 0) {
+      const docBtn = await makeActionButton(ctx, {
+        label: t('buttons.notes_document', { count: String(counts.document) }),
+        action: 'notes.attachments_kind',
+        data: { noteId: note.id, kind: 'document', noteDate, page, historyPage }
+      });
+      kb.text(docBtn.text, docBtn.callback_data).row();
+    }
+  }
   kb.text(backBtn.text, backBtn.callback_data);
 
   await renderScreen(ctx, {
@@ -1588,6 +1700,144 @@ const renderNoteDetails = async (ctx: Context, noteId: string): Promise<void> =>
     bodyLines: lines,
     inlineKeyboard: kb
   });
+};
+
+const renderNoteEditMenu = async (
+  ctx: Context,
+  noteId: string,
+  viewContext: { noteDate?: string; page?: number; historyPage?: number } = {}
+): Promise<void> => {
+  const { user } = await ensureUserAndSettings(ctx);
+  const note = await getNoteById({ userId: user.id, id: noteId });
+  if (!note) {
+    await renderNotesHistory(ctx);
+    return;
+  }
+  const title = note.title && note.title.trim().length > 0 ? note.title : t('screens.notes.untitled');
+  const lines = [t('screens.notes.editing', { title })];
+
+  const titleBtn = await makeActionButton(ctx, {
+    label: t('buttons.notes_edit_title'),
+    action: 'notes.edit_title',
+    data: { noteId: note.id, noteDate: viewContext.noteDate ?? note.note_date, page: viewContext.page ?? 0, historyPage: viewContext.historyPage ?? 0 }
+  });
+  const bodyBtn = await makeActionButton(ctx, {
+    label: t('buttons.notes_edit_body'),
+    action: 'notes.edit_body',
+    data: { noteId: note.id, noteDate: viewContext.noteDate ?? note.note_date, page: viewContext.page ?? 0, historyPage: viewContext.historyPage ?? 0 }
+  });
+  const backBtn = await makeActionButton(ctx, {
+    label: t('buttons.notes_back'),
+    action: 'notes.view_note',
+    data: { noteId: note.id, noteDate: viewContext.noteDate ?? note.note_date, page: viewContext.page ?? 0, historyPage: viewContext.historyPage ?? 0 }
+  });
+
+  const kb = new InlineKeyboard().text(titleBtn.text, titleBtn.callback_data).row().text(bodyBtn.text, bodyBtn.callback_data).row().text(backBtn.text, backBtn.callback_data);
+
+  await renderScreen(ctx, { titleKey: t('screens.notes.edit_menu_title'), bodyLines: lines, inlineKeyboard: kb });
+};
+
+const renderNoteAttachmentPrompt = async (
+  ctx: Context,
+  noteId: string,
+  viewContext: { noteDate?: string; page?: number; historyPage?: number } = {}
+): Promise<void> => {
+  const doneBtn = await makeActionButton(ctx, {
+    label: t('buttons.notes_attach_done'),
+    action: 'notes.attach_done',
+    data: { noteId, ...viewContext }
+  });
+  const cancelBtn = await makeActionButton(ctx, {
+    label: t('buttons.notes_attach_cancel'),
+    action: 'notes.attach_cancel',
+    data: { noteId, ...viewContext }
+  });
+  const kb = new InlineKeyboard().text(doneBtn.text, doneBtn.callback_data).row().text(cancelBtn.text, cancelBtn.callback_data);
+
+  await renderScreen(ctx, { titleKey: t('screens.notes.title'), bodyLines: [t('screens.notes.attachments_prompt')], inlineKeyboard: kb });
+};
+
+const renderNoteAttachmentsList = async (
+  ctx: Context,
+  params: { noteId: string; kind: NoteAttachmentKind; noteDate: string; page: number; historyPage: number }
+): Promise<void> => {
+  const { user } = await ensureUserAndSettings(ctx);
+  const note = await getNoteById({ userId: user.id, id: params.noteId });
+  if (!note) {
+    await renderNotesHistory(ctx);
+    return;
+  }
+
+  const attachments = await listNoteAttachmentsByKind({ noteId: params.noteId, kind: params.kind });
+  const kindLabel = t(`screens.notes.kind_${params.kind}`);
+  const noteDate = params.noteDate || note.note_date;
+  const lines: string[] = [];
+  if (!attachments.length) {
+    lines.push(t('screens.notes.attachments_empty', { kind: kindLabel }));
+  } else {
+    lines.push(t('screens.notes.attachments_header', { kind: kindLabel }), '');
+    attachments.forEach((attachment, index) => {
+      const local = formatInstantToLocal(attachment.created_at, user.timezone ?? config.defaultTimezone);
+      const caption = attachment.caption && attachment.caption.trim().length > 0 ? attachment.caption : t('screens.notes.attachment_no_caption');
+      lines.push(t('screens.notes.attachment_line', { index: String(index + 1), time: local.time, caption }));
+    });
+  }
+
+  const kb = new InlineKeyboard();
+  for (let index = 0; index < attachments.length; index += 1) {
+    const attachment = attachments[index];
+    const btn = await makeActionButton(ctx, {
+      label: `${getNoteAttachmentKindEmoji(params.kind)} ${index + 1}`,
+      action: 'notes.attachment_open',
+      data: { noteId: params.noteId, attachmentId: attachment.id, kind: params.kind, noteDate, page: params.page, historyPage: params.historyPage }
+    });
+    kb.text(btn.text, btn.callback_data).row();
+  }
+  const backBtn = await makeActionButton(ctx, {
+    label: t('buttons.notes_back'),
+    action: 'notes.view_note',
+    data: { noteId: params.noteId, noteDate, page: params.page, historyPage: params.historyPage }
+  });
+  kb.text(backBtn.text, backBtn.callback_data);
+
+  await renderScreen(ctx, { titleKey: t('screens.notes.attachments_title', { kind: kindLabel }), bodyLines: lines, inlineKeyboard: kb });
+};
+
+const handleNoteAttachmentMessage = async (
+  ctx: Context,
+  params: { kind: NoteAttachmentKind; fileId: string; fileUniqueId?: string | null; caption?: string | null }
+): Promise<void> => {
+  if (!ctx.from) return;
+  const stateKey = String(ctx.from.id);
+  const flow = userStates.get(stateKey)?.notesFlow;
+  if (!flow || flow.mode !== 'create' || flow.step !== 'attachments') return;
+
+  try {
+    const attachment = await createNoteAttachment({
+      noteId: flow.noteId,
+      kind: params.kind,
+      fileId: params.fileId,
+      fileUniqueId: params.fileUniqueId ?? null,
+      caption: params.caption ?? null
+    });
+
+    if (params.kind === 'voice') {
+      setNotesFlow(stateKey, { mode: 'create', step: 'voice_description', noteId: flow.noteId, attachmentId: attachment.id, viewContext: flow.viewContext });
+      const skipBtn = await makeActionButton(ctx, {
+        label: t('buttons.notes_skip'),
+        action: 'notes.voice_skip',
+        data: { noteId: flow.noteId, ...(flow.viewContext ?? {}) }
+      });
+      const kb = new InlineKeyboard().text(skipBtn.text, skipBtn.callback_data);
+      await renderScreen(ctx, { titleKey: t('screens.notes.title'), bodyLines: [t('screens.notes.voice_description_prompt')], inlineKeyboard: kb });
+      return;
+    }
+
+    await renderNoteAttachmentPrompt(ctx, flow.noteId, flow.viewContext ?? {});
+  } catch (error) {
+    console.error({ scope: 'notes', event: 'attachment_save_failed', error, kind: params.kind });
+    await renderScreen(ctx, { titleKey: t('screens.notes.title'), bodyLines: [t('screens.notes.attachments_failed')] });
+  }
 };
 
 const renderXpSummary = async (ctx: Context): Promise<void> => {
@@ -3802,7 +4052,7 @@ bot.callbackQuery(/^[A-Za-z0-9_-]{8,12}$/, async (ctx) => {
         if (!ctx.from) break;
         const stateKey = String(ctx.from.id);
         const state = userStates.get(stateKey);
-        if (state?.notesFlow && state.notesFlow.mode === 'create') {
+        if (state?.notesFlow && state.notesFlow.mode === 'create' && state.notesFlow.step === 'title') {
           setNotesFlow(stateKey, { mode: 'create', step: 'body', draft: { ...state.notesFlow.draft, title: null } });
         }
         await renderScreen(ctx, { titleKey: t('screens.notes.title'), bodyLines: [t('screens.notes.ask_body')] });
@@ -3842,28 +4092,55 @@ bot.callbackQuery(/^[A-Za-z0-9_-]{8,12}$/, async (ctx) => {
         return;
       }
       case 'notes.history':
-        await renderNotesHistory(ctx);
+        await renderNotesHistory(ctx, 0);
         return;
+      case 'notes.history_page': {
+        const page = Number((payload as { data?: { page?: number } }).data?.page ?? 0);
+        await renderNotesHistory(ctx, Number.isFinite(page) ? page : 0);
+        return;
+      }
       case 'notes.history_date': {
-        const date = (payload as { data?: { date?: string } }).data?.date;
+        const data = (payload as { data?: { date?: string; historyPage?: number } }).data;
+        const date = data?.date;
         if (!date) {
           await renderNotesHistory(ctx);
           return;
         }
-        await renderNotesDate(ctx, date);
+        const historyPage = Number(data?.historyPage ?? 0);
+        await renderNotesDate(ctx, date, 0, Number.isFinite(historyPage) ? historyPage : 0);
+        return;
+      }
+      case 'notes.history_date_page': {
+        const data = (payload as { data?: { date?: string; page?: number; historyPage?: number } }).data;
+        const date = data?.date;
+        if (!date) {
+          await renderNotesHistory(ctx);
+          return;
+        }
+        const page = Number(data?.page ?? 0);
+        const historyPage = Number(data?.historyPage ?? 0);
+        await renderNotesDate(ctx, date, Number.isFinite(page) ? page : 0, Number.isFinite(historyPage) ? historyPage : 0);
         return;
       }
       case 'notes.view_note': {
-        const noteId = (payload as { data?: { noteId?: string } }).data?.noteId;
+        const data = (payload as { data?: { noteId?: string; noteDate?: string; page?: number; historyPage?: number } }).data;
+        const noteId = data?.noteId;
         if (!noteId) {
           await renderNotesHistory(ctx);
           return;
         }
-        await renderNoteDetails(ctx, noteId);
+        const page = Number(data?.page ?? 0);
+        const historyPage = Number(data?.historyPage ?? 0);
+        await renderNoteDetails(ctx, noteId, {
+          noteDate: data?.noteDate,
+          page: Number.isFinite(page) ? page : 0,
+          historyPage: Number.isFinite(historyPage) ? historyPage : 0
+        });
         return;
       }
       case 'notes.delete_note': {
-        const noteId = (payload as { data?: { noteId?: string } }).data?.noteId;
+        const data = (payload as { data?: { noteId?: string; noteDate?: string; page?: number; historyPage?: number } }).data;
+        const noteId = data?.noteId;
         if (!noteId) {
           await renderNotesHistory(ctx);
           return;
@@ -3872,10 +4149,221 @@ bot.callbackQuery(/^[A-Za-z0-9_-]{8,12}$/, async (ctx) => {
         const note = await getNoteById({ userId: user.id, id: noteId });
         if (note) {
           await deleteNote({ userId: user.id, id: noteId });
-          await renderNotesDate(ctx, note.note_date);
+          const page = Number(data?.page ?? 0);
+          const historyPage = Number(data?.historyPage ?? 0);
+          await renderNotesDate(ctx, note.note_date, Number.isFinite(page) ? page : 0, Number.isFinite(historyPage) ? historyPage : 0);
         } else {
           await renderNotesHistory(ctx);
         }
+        return;
+      }
+      case 'notes.edit_menu': {
+        const data = (payload as { data?: { noteId?: string; noteDate?: string; page?: number; historyPage?: number } }).data;
+        const noteId = data?.noteId;
+        if (!noteId) {
+          await renderNotesHistory(ctx);
+          return;
+        }
+        const page = Number(data?.page ?? 0);
+        const historyPage = Number(data?.historyPage ?? 0);
+        await renderNoteEditMenu(ctx, noteId, {
+          noteDate: data?.noteDate,
+          page: Number.isFinite(page) ? page : 0,
+          historyPage: Number.isFinite(historyPage) ? historyPage : 0
+        });
+        return;
+      }
+      case 'notes.edit_title': {
+        if (!ctx.from) break;
+        const data = (payload as { data?: { noteId?: string; noteDate?: string; page?: number; historyPage?: number } }).data;
+        const noteId = data?.noteId;
+        if (!noteId) {
+          await renderNotesHistory(ctx);
+          return;
+        }
+        const stateKey = String(ctx.from.id);
+        const viewContext = {
+          noteDate: data?.noteDate,
+          page: Number.isFinite(Number(data?.page)) ? Number(data?.page) : 0,
+          historyPage: Number.isFinite(Number(data?.historyPage)) ? Number(data?.historyPage) : 0
+        };
+        setNotesFlow(stateKey, { mode: 'edit', noteId, step: 'title', viewContext });
+        const skipBtn = await makeActionButton(ctx, {
+          label: t('buttons.notes_skip'),
+          action: 'notes.edit_title_skip',
+          data: { noteId, ...viewContext }
+        });
+        const backBtn = await makeActionButton(ctx, { label: t('buttons.notes_back'), action: 'notes.edit_menu', data: { noteId, ...viewContext } });
+        const kb = new InlineKeyboard().text(skipBtn.text, skipBtn.callback_data).row().text(backBtn.text, backBtn.callback_data);
+        await renderScreen(ctx, { titleKey: t('screens.notes.edit_menu_title'), bodyLines: [t('screens.notes.edit_title_prompt')], inlineKeyboard: kb });
+        return;
+      }
+      case 'notes.edit_title_skip': {
+        if (!ctx.from) break;
+        const data = (payload as { data?: { noteId?: string; noteDate?: string; page?: number; historyPage?: number } }).data;
+        const noteId = data?.noteId;
+        if (!noteId) {
+          await renderNotesHistory(ctx);
+          return;
+        }
+        const { user } = await ensureUserAndSettings(ctx);
+        await updateNote({ userId: user.id, id: noteId, title: null });
+        clearNotesFlow(String(ctx.from.id));
+        await renderNoteDetails(ctx, noteId, {
+          noteDate: data?.noteDate,
+          page: Number.isFinite(Number(data?.page)) ? Number(data?.page) : 0,
+          historyPage: Number.isFinite(Number(data?.historyPage)) ? Number(data?.historyPage) : 0
+        });
+        return;
+      }
+      case 'notes.edit_body': {
+        if (!ctx.from) break;
+        const data = (payload as { data?: { noteId?: string; noteDate?: string; page?: number; historyPage?: number } }).data;
+        const noteId = data?.noteId;
+        if (!noteId) {
+          await renderNotesHistory(ctx);
+          return;
+        }
+        const stateKey = String(ctx.from.id);
+        const viewContext = {
+          noteDate: data?.noteDate,
+          page: Number.isFinite(Number(data?.page)) ? Number(data?.page) : 0,
+          historyPage: Number.isFinite(Number(data?.historyPage)) ? Number(data?.historyPage) : 0
+        };
+        setNotesFlow(stateKey, { mode: 'edit', noteId, step: 'body', viewContext });
+        const backBtn = await makeActionButton(ctx, { label: t('buttons.notes_back'), action: 'notes.edit_menu', data: { noteId, ...viewContext } });
+        const kb = new InlineKeyboard().text(backBtn.text, backBtn.callback_data);
+        await renderScreen(ctx, { titleKey: t('screens.notes.edit_menu_title'), bodyLines: [t('screens.notes.edit_body_prompt')], inlineKeyboard: kb });
+        return;
+      }
+      case 'notes.attach_done': {
+        if (!ctx.from) break;
+        const data = (payload as { data?: { noteId?: string; noteDate?: string; page?: number; historyPage?: number } }).data;
+        const noteId = data?.noteId;
+        if (!noteId) {
+          await renderNotesToday(ctx);
+          return;
+        }
+        clearNotesFlow(String(ctx.from.id));
+        await renderNoteDetails(ctx, noteId, {
+          noteDate: data?.noteDate,
+          page: Number.isFinite(Number(data?.page)) ? Number(data?.page) : 0,
+          historyPage: Number.isFinite(Number(data?.historyPage)) ? Number(data?.historyPage) : 0
+        });
+        return;
+      }
+      case 'notes.attach_cancel': {
+        if (!ctx.from) break;
+        const data = (payload as { data?: { noteId?: string; noteDate?: string; page?: number; historyPage?: number } }).data;
+        const noteId = data?.noteId;
+        clearNotesFlow(String(ctx.from.id));
+        if (!noteId) {
+          await renderNotesToday(ctx);
+          return;
+        }
+        await renderNoteDetails(ctx, noteId, {
+          noteDate: data?.noteDate,
+          page: Number.isFinite(Number(data?.page)) ? Number(data?.page) : 0,
+          historyPage: Number.isFinite(Number(data?.historyPage)) ? Number(data?.historyPage) : 0
+        });
+        return;
+      }
+      case 'notes.attach_more': {
+        if (!ctx.from) break;
+        const data = (payload as { data?: { noteId?: string; noteDate?: string; page?: number; historyPage?: number } }).data;
+        const noteId = data?.noteId;
+        if (!noteId) {
+          await renderNotesHistory(ctx);
+          return;
+        }
+        const viewContext = {
+          noteDate: data?.noteDate,
+          page: Number.isFinite(Number(data?.page)) ? Number(data?.page) : 0,
+          historyPage: Number.isFinite(Number(data?.historyPage)) ? Number(data?.historyPage) : 0
+        };
+        setNotesFlow(String(ctx.from.id), { mode: 'create', step: 'attachments', noteId, viewContext });
+        await renderNoteAttachmentPrompt(ctx, noteId, viewContext);
+        return;
+      }
+      case 'notes.voice_skip': {
+        if (!ctx.from) break;
+        const data = (payload as { data?: { noteId?: string; noteDate?: string; page?: number; historyPage?: number } }).data;
+        const noteId = data?.noteId;
+        if (!noteId) {
+          await renderNotesToday(ctx);
+          return;
+        }
+        const viewContext = {
+          noteDate: data?.noteDate,
+          page: Number.isFinite(Number(data?.page)) ? Number(data?.page) : 0,
+          historyPage: Number.isFinite(Number(data?.historyPage)) ? Number(data?.historyPage) : 0
+        };
+        setNotesFlow(String(ctx.from.id), { mode: 'create', step: 'attachments', noteId, viewContext });
+        await renderNoteAttachmentPrompt(ctx, noteId, viewContext);
+        return;
+      }
+      case 'notes.attachments_kind': {
+        const data = (payload as { data?: { noteId?: string; kind?: NoteAttachmentKind; noteDate?: string; page?: number; historyPage?: number } }).data;
+        if (!data?.noteId || !data.kind) {
+          await renderNotesHistory(ctx);
+          return;
+        }
+        const page = Number(data.page ?? 0);
+        const historyPage = Number(data.historyPage ?? 0);
+        await renderNoteAttachmentsList(ctx, {
+          noteId: data.noteId,
+          kind: data.kind,
+          noteDate: data.noteDate ?? '',
+          page: Number.isFinite(page) ? page : 0,
+          historyPage: Number.isFinite(historyPage) ? historyPage : 0
+        });
+        return;
+      }
+      case 'notes.attachment_open': {
+        const data = (payload as { data?: { noteId?: string; attachmentId?: string; kind?: NoteAttachmentKind; noteDate?: string; page?: number; historyPage?: number } }).data;
+        if (!data?.noteId || !data.attachmentId || !data.kind) {
+          await renderNotesHistory(ctx);
+          return;
+        }
+        const attachment = await getNoteAttachmentById({ noteId: data.noteId, attachmentId: data.attachmentId });
+        if (!attachment) {
+          await renderNoteAttachmentsList(ctx, {
+            noteId: data.noteId,
+            kind: data.kind,
+            noteDate: data.noteDate ?? '',
+            page: Number(data.page ?? 0),
+            historyPage: Number(data.historyPage ?? 0)
+          });
+          return;
+        }
+        try {
+          const targetId = ctx.chat?.id ?? ctx.from?.id;
+          if (!targetId) {
+            await renderScreen(ctx, { titleKey: t('screens.notes.detail_title_label'), bodyLines: [t('screens.notes.attachment_send_failed')] });
+            return;
+          }
+          if (attachment.kind === 'photo') {
+            await ctx.api.sendPhoto(targetId, attachment.file_id, { caption: attachment.caption ?? undefined });
+          } else if (attachment.kind === 'video') {
+            await ctx.api.sendVideo(targetId, attachment.file_id, { caption: attachment.caption ?? undefined });
+          } else if (attachment.kind === 'voice') {
+            await ctx.api.sendVoice(targetId, attachment.file_id, { caption: attachment.caption ?? undefined });
+          } else {
+            await ctx.api.sendDocument(targetId, attachment.file_id, { caption: attachment.caption ?? undefined });
+          }
+        } catch (error) {
+          console.error({ scope: 'notes', event: 'attachment_send_failed', error, attachmentId: attachment.id });
+          await renderScreen(ctx, { titleKey: t('screens.notes.detail_title_label'), bodyLines: [t('screens.notes.attachment_send_failed')] });
+        }
+        const page = Number(data.page ?? 0);
+        const historyPage = Number(data.historyPage ?? 0);
+        await renderNoteAttachmentsList(ctx, {
+          noteId: data.noteId,
+          kind: data.kind,
+          noteDate: data.noteDate ?? '',
+          page: Number.isFinite(page) ? page : 0,
+          historyPage: Number.isFinite(historyPage) ? historyPage : 0
+        });
         return;
       }
       case 'settings.language': {
@@ -6409,18 +6897,54 @@ bot.on('message:text', async (ctx: Context) => {
           title: flow.draft.title ?? null,
           body: rawText
         });
-        clearNotesFlow(stateKey);
+        setNotesFlow(stateKey, { mode: 'create', step: 'attachments', noteId: note.id, viewContext: { noteDate: note.note_date } });
         const title = note.title && note.title.trim().length > 0 ? note.title : t('screens.notes.untitled');
         const preview = note.body.split('\n').slice(0, 3).join('\n');
+        const doneBtn = await makeActionButton(ctx, {
+          label: t('buttons.notes_attach_done'),
+          action: 'notes.attach_done',
+          data: { noteId: note.id, noteDate: note.note_date }
+        });
+        const cancelBtn = await makeActionButton(ctx, {
+          label: t('buttons.notes_attach_cancel'),
+          action: 'notes.attach_cancel',
+          data: { noteId: note.id, noteDate: note.note_date }
+        });
+        const kb = new InlineKeyboard().text(doneBtn.text, doneBtn.callback_data).row().text(cancelBtn.text, cancelBtn.callback_data);
         await renderScreen(ctx, {
           titleKey: t('screens.notes.title'),
-          bodyLines: [
-            t('screens.notes.saved'),
-            '',
-            t('screens.notes.preview', { date: note.note_date, title, preview })
-          ]
+          bodyLines: [t('screens.notes.saved'), '', t('screens.notes.preview', { date: note.note_date, title, preview }), '', t('screens.notes.attachments_prompt')],
+          inlineKeyboard: kb
         });
-        await renderNotesToday(ctx);
+        return;
+      }
+      if (flow.step === 'attachments') {
+        await renderNoteAttachmentPrompt(ctx, flow.noteId, flow.viewContext ?? {});
+        return;
+      }
+      if (flow.step === 'voice_description') {
+        const caption = text.length > 0 ? rawText : null;
+        await updateNoteAttachmentCaption({ attachmentId: flow.attachmentId, caption });
+        setNotesFlow(stateKey, { mode: 'create', step: 'attachments', noteId: flow.noteId, viewContext: flow.viewContext });
+        await renderNoteAttachmentPrompt(ctx, flow.noteId, flow.viewContext ?? {});
+        return;
+      }
+    }
+    if (flow.mode === 'edit') {
+      if (flow.step === 'title') {
+        await updateNote({ userId: user.id, id: flow.noteId, title: text.length > 0 ? rawText : null });
+        clearNotesFlow(stateKey);
+        await renderNoteDetails(ctx, flow.noteId, flow.viewContext ?? {});
+        return;
+      }
+      if (flow.step === 'body') {
+        if (!text) {
+          await renderScreen(ctx, { titleKey: t('screens.notes.edit_menu_title'), bodyLines: [t('screens.notes.edit_body_prompt')] });
+          return;
+        }
+        await updateNote({ userId: user.id, id: flow.noteId, body: rawText });
+        clearNotesFlow(stateKey);
+        await renderNoteDetails(ctx, flow.noteId, flow.viewContext ?? {});
         return;
       }
     }
@@ -7086,6 +7610,50 @@ bot.on('message:text', async (ctx: Context) => {
     userStates.set(stateKey, { ...state, rewardEdit: undefined });
     await renderRewardStoreEditorRoot(ctx);
   }
+});
+
+bot.on('message:photo', async (ctx: Context) => {
+  const photos = ctx.message?.photo;
+  if (!photos || photos.length === 0) return;
+  const photo = photos[photos.length - 1];
+  await handleNoteAttachmentMessage(ctx, {
+    kind: 'photo',
+    fileId: photo.file_id,
+    fileUniqueId: photo.file_unique_id,
+    caption: ctx.message?.caption ?? null
+  });
+});
+
+bot.on('message:video', async (ctx: Context) => {
+  const video = ctx.message?.video;
+  if (!video) return;
+  await handleNoteAttachmentMessage(ctx, {
+    kind: 'video',
+    fileId: video.file_id,
+    fileUniqueId: video.file_unique_id,
+    caption: ctx.message?.caption ?? null
+  });
+});
+
+bot.on('message:voice', async (ctx: Context) => {
+  const voice = ctx.message?.voice;
+  if (!voice) return;
+  await handleNoteAttachmentMessage(ctx, {
+    kind: 'voice',
+    fileId: voice.file_id,
+    fileUniqueId: voice.file_unique_id
+  });
+});
+
+bot.on('message:document', async (ctx: Context) => {
+  const document = ctx.message?.document;
+  if (!document) return;
+  await handleNoteAttachmentMessage(ctx, {
+    kind: 'document',
+    fileId: document.file_id,
+    fileUniqueId: document.file_unique_id,
+    caption: ctx.message?.caption ?? null
+  });
 });
 
 bot.catch((err: BotError<Context>) => {
