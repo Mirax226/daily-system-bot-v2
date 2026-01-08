@@ -4,6 +4,7 @@ import { bot } from './bot';
 import { config } from './config';
 import { getSupabaseClient } from './db';
 import { runMigrations } from './db/migrations';
+import { resolveArchiveChatId } from './services/archive';
 import { processDueReminders } from './services/reminders';
 import { logError } from './utils/logger';
 
@@ -73,14 +74,14 @@ const isTelegramTooManyRequests = (error: unknown): boolean => {
   return false;
 };
 
-const logNotesArchiveStatus = (logger: typeof server.log): void => {
-  const chatId = config.notes.archive.chatId;
-  const enabled = config.notes.archive.enabled;
-  const looksValid = Boolean(chatId && /^-100\\d+$/.test(chatId));
+const logArchiveStatus = (logger: typeof server.log, feature: 'notes' | 'reminders'): void => {
+  const enabled = feature === 'notes' ? config.notes.archive.enabled : config.reminders.archive.enabled;
+  const chatId = resolveArchiveChatId(feature);
+  const looksValid = Boolean(chatId && /^-100\\d+$/.test(String(chatId)));
   if (enabled && looksValid) {
-    logger.info('[notes] archive channel configured');
+    logger.info(`[${feature}] archive channel configured`);
   } else {
-    logger.info('[notes] archive channel missing');
+    logger.info(`[${feature}] archive channel missing`);
   }
 };
 
@@ -96,7 +97,8 @@ const start = async () => {
         server.log.info('Init start');
         await runMigrations();
         getSupabaseClient();
-        logNotesArchiveStatus(server.log);
+        logArchiveStatus(server.log, 'notes');
+        logArchiveStatus(server.log, 'reminders');
 
         if (config.telegram.devPolling) {
           server.log.info('Running in DEV_POLLING mode: starting bot via long polling.');

@@ -17,8 +17,21 @@ const envSchema = z.object({
   SUPABASE_URL: z.string().url('SUPABASE_URL must be a valid URL'),
   SUPABASE_SERVICE_ROLE_KEY: z.string().min(1, 'SUPABASE_SERVICE_ROLE_KEY is required'),
   DEFAULT_TIMEZONE: z.string().min(1, 'DEFAULT_TIMEZONE is required'),
+  ARCHIVE_CHAT_ID: z
+    .preprocess((value: unknown) => {
+      if (typeof value !== 'string') return undefined;
+      const trimmed = value.trim();
+      return trimmed.length === 0 ? undefined : trimmed;
+    }, z.string().optional()),
   NOTES_ARCHIVE_ENABLED: z.coerce.boolean().default(false),
   NOTES_ARCHIVE_CHAT_ID: z
+    .preprocess((value: unknown) => {
+      if (typeof value !== 'string') return undefined;
+      const trimmed = value.trim();
+      return trimmed.length === 0 ? undefined : trimmed;
+    }, z.string().optional()),
+  REMINDERS_ARCHIVE_ENABLED: z.coerce.boolean().default(false),
+  REMINDERS_ARCHIVE_CHAT_ID: z
     .preprocess((value: unknown) => {
       if (typeof value !== 'string') return undefined;
       const trimmed = value.trim();
@@ -47,10 +60,19 @@ export const config = {
     serviceRoleKey: env.SUPABASE_SERVICE_ROLE_KEY
   },
   defaultTimezone: env.DEFAULT_TIMEZONE,
+  archive: {
+    chatId: env.ARCHIVE_CHAT_ID
+  },
   notes: {
     archive: {
       enabled: env.NOTES_ARCHIVE_ENABLED,
       chatId: env.NOTES_ARCHIVE_CHAT_ID
+    }
+  },
+  reminders: {
+    archive: {
+      enabled: env.REMINDERS_ARCHIVE_ENABLED,
+      chatId: env.REMINDERS_ARCHIVE_CHAT_ID
     }
   }
 };

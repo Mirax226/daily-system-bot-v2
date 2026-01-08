@@ -1,15 +1,166 @@
 import type { Bot } from 'grammy';
+
+import { config } from '../config';
 import { getSupabaseClient } from '../db';
 import type { Database, ReminderRow } from '../types/supabase';
+import { formatInstantToLocal, localDateTimeToUtcIso } from '../utils/time';
 
 const REMINDERS_TABLE = 'reminders';
+const REMINDERS_ATTACHMENTS_TABLE = 'reminders_attachments';
 const USERS_TABLE = 'users';
 
+export type ReminderScheduleType = 'once' | 'hourly' | 'daily' | 'weekly' | 'monthly' | 'yearly';
+
+export type ReminderSchedule = {
+  scheduleType: ReminderScheduleType;
+  timezone: string;
+  onceAt?: Date | null;
+  intervalMinutes?: number | null;
+  atTime?: string | null;
+  byWeekday?: number | null;
+  byMonthday?: number | null;
+  byMonth?: number | null;
+};
+
 export type UserRow = Database['public']['Tables']['users']['Row'];
+export type ReminderAttachmentRow = Database['public']['Tables']['reminders_attachments']['Row'];
 
 function toIsoString(date: Date): string {
   return date.toISOString();
 }
+
+const parseTimeToMinutes = (value?: string | null): number | null => {
+  if (!value) return null;
+  const [hh, mm] = value.split(':').map(Number);
+  if (!Number.isInteger(hh) || !Number.isInteger(mm)) return null;
+  if (hh < 0 || hh > 23 || mm < 0 || mm > 59) return null;
+  return hh * 60 + mm;
+};
+
+const formatMinutesToTime = (minutes: number): string => {
+  const total = ((minutes % 1440) + 1440) % 1440;
+  const hh = Math.floor(total / 60)
+    .toString()
+    .padStart(2, '0');
+  const mm = Math.floor(total % 60)
+    .toString()
+    .padStart(2, '0');
+  return `${hh}:${mm}`;
+};
+
+const getLocalWeekdayIndex = (date: Date, timezone: string): number => {
+  const label = new Intl.DateTimeFormat('en-US', { timeZone: timezone, weekday: 'short' }).format(date);
+  const map: Record<string, number> = { Sun: 0, Mon: 1, Tue: 2, Wed: 3, Thu: 4, Fri: 5, Sat: 6 };
+  return map[label] ?? 0;
+};
+
+const addDaysToLocalDate = (localDate: string, days: number, timezone: string): string => {
+  const utcIso = localDateTimeToUtcIso(localDate, '00:00', timezone);
+  const next = new Date(new Date(utcIso).getTime() + days * 24 * 60 * 60 * 1000);
+  return formatInstantToLocal(next.toISOString(), timezone).date;
+};
+
+const getLastDayOfMonth = (year: number, month: number): number => {
+  return new Date(Date.UTC(year, month, 0)).getUTCDate();
+};
+
+const computeNextLocalDateForMonthly = (localDate: string, dayOfMonth: number): string => {
+  const [year, month] = localDate.split('-').map(Number);
+  const currentDay = Number(localDate.split('-')[2]);
+  const lastDayCurrent = getLastDayOfMonth(year, month);
+  const desiredDay = Math.min(Math.max(1, dayOfMonth), lastDayCurrent);
+  if (currentDay <= desiredDay) {
+    return `${year}-${String(month).padStart(2, '0')}-${String(desiredDay).padStart(2, '0')}`;
+  }
+  const nextMonth = month === 12 ? 1 : month + 1;
+  const nextYear = month === 12 ? year + 1 : year;
+  const lastDayNext = getLastDayOfMonth(nextYear, nextMonth);
+  const nextDay = Math.min(Math.max(1, dayOfMonth), lastDayNext);
+  return `${nextYear}-${String(nextMonth).padStart(2, '0')}-${String(nextDay).padStart(2, '0')}`;
+};
+
+const computeNextLocalDateForYearly = (localDate: string, byMonth: number, byMonthday: number): string => {
+  const [year] = localDate.split('-').map(Number);
+  const currentMonth = Number(localDate.split('-')[1]);
+  const currentDay = Number(localDate.split('-')[2]);
+  const targetMonth = Math.min(Math.max(1, byMonth), 12);
+  const lastDayTarget = getLastDayOfMonth(year, targetMonth);
+  const targetDay = Math.min(Math.max(1, byMonthday), lastDayTarget);
+  if (currentMonth < targetMonth || (currentMonth === targetMonth && currentDay <= targetDay)) {
+    return `${year}-${String(targetMonth).padStart(2, '0')}-${String(targetDay).padStart(2, '0')}`;
+  }
+  const nextYear = year + 1;
+  const lastDayNext = getLastDayOfMonth(nextYear, targetMonth);
+  const nextDay = Math.min(Math.max(1, byMonthday), lastDayNext);
+  return `${nextYear}-${String(targetMonth).padStart(2, '0')}-${String(nextDay).padStart(2, '0')}`;
+};
+
+export const computeNextRunAt = (schedule: ReminderSchedule, nowUtc: Date): Date | null => {
+  const timezone = schedule.timezone || config.defaultTimezone;
+
+  if (schedule.scheduleType === 'once') {
+    return schedule.onceAt ?? null;
+  }
+
+  if (schedule.scheduleType === 'hourly') {
+    const interval = schedule.intervalMinutes && schedule.intervalMinutes > 0 ? schedule.intervalMinutes : 60;
+    return new Date(nowUtc.getTime() + interval * 60 * 1000);
+  }
+
+  const atMinutes = parseTimeToMinutes(schedule.atTime) ?? 9 * 60;
+  const atTime = formatMinutesToTime(atMinutes);
+  const localNow = formatInstantToLocal(nowUtc.toISOString(), timezone);
+  const nowMinutes = parseTimeToMinutes(localNow.time) ?? 0;
+
+  if (schedule.scheduleType === 'daily') {
+    const nextDate = nowMinutes <= atMinutes ? localNow.date : addDaysToLocalDate(localNow.date, 1, timezone);
+    return new Date(localDateTimeToUtcIso(nextDate, atTime, timezone));
+  }
+
+  if (schedule.scheduleType === 'weekly') {
+    const targetWeekday = schedule.byWeekday ?? 0;
+    const currentWeekday = getLocalWeekdayIndex(nowUtc, timezone);
+    let delta = (targetWeekday - currentWeekday + 7) % 7;
+    if (delta === 0 && nowMinutes > atMinutes) {
+      delta = 7;
+    }
+    const nextDate = addDaysToLocalDate(localNow.date, delta, timezone);
+    return new Date(localDateTimeToUtcIso(nextDate, atTime, timezone));
+  }
+
+  if (schedule.scheduleType === 'monthly') {
+    const desiredDay = schedule.byMonthday ?? 1;
+    const nextDate = computeNextLocalDateForMonthly(localNow.date, desiredDay);
+    const isToday = nextDate === localNow.date;
+    if (isToday && nowMinutes > atMinutes) {
+      const [year, month] = localNow.date.split('-').map(Number);
+      const nextMonth = month === 12 ? 1 : month + 1;
+      const nextYear = month === 12 ? year + 1 : year;
+      const lastDayNext = getLastDayOfMonth(nextYear, nextMonth);
+      const nextDay = Math.min(Math.max(1, desiredDay), lastDayNext);
+      const nextLocal = `${nextYear}-${String(nextMonth).padStart(2, '0')}-${String(nextDay).padStart(2, '0')}`;
+      return new Date(localDateTimeToUtcIso(nextLocal, atTime, timezone));
+    }
+    return new Date(localDateTimeToUtcIso(nextDate, atTime, timezone));
+  }
+
+  if (schedule.scheduleType === 'yearly') {
+    const targetMonth = schedule.byMonth ?? 1;
+    const targetDay = schedule.byMonthday ?? 1;
+    let nextDate = computeNextLocalDateForYearly(localNow.date, targetMonth, targetDay);
+    const isToday = nextDate === localNow.date;
+    if (isToday && nowMinutes > atMinutes) {
+      const [year] = localNow.date.split('-').map(Number);
+      const nextYear = year + 1;
+      const lastDay = getLastDayOfMonth(nextYear, Math.min(Math.max(1, targetMonth), 12));
+      const nextDay = Math.min(Math.max(1, targetDay), lastDay);
+      nextDate = `${nextYear}-${String(targetMonth).padStart(2, '0')}-${String(nextDay).padStart(2, '0')}`;
+    }
+    return new Date(localDateTimeToUtcIso(nextDate, atTime, timezone));
+  }
+
+  return null;
+};
 
 export async function findDueReminders(
   nowUtc: Date,
@@ -18,9 +169,10 @@ export async function findDueReminders(
   const { data, error } = await client
     .from(REMINDERS_TABLE)
     .select('*')
-    .eq('enabled', true)
-    .not('next_run_at_utc', 'is', null)
-    .lte('next_run_at_utc', toIsoString(nowUtc));
+    .eq('is_active', true)
+    .is('deleted_at', null)
+    .not('next_run_at', 'is', null)
+    .lte('next_run_at', toIsoString(nowUtc));
 
   if (error) {
     throw new Error(`Failed to find due reminders: ${error.message}`);
@@ -34,7 +186,8 @@ export async function listRemindersForUser(userId: string, client = getSupabaseC
     .from(REMINDERS_TABLE)
     .select('*')
     .eq('user_id', userId)
-    .order('next_run_at_utc', { ascending: true, nullsFirst: false })
+    .is('deleted_at', null)
+    .order('next_run_at', { ascending: true, nullsFirst: false })
     .order('created_at', { ascending: true });
 
   if (error) {
@@ -55,19 +208,32 @@ export async function getReminderById(reminderId: string, client = getSupabaseCl
 }
 
 export async function createReminder(
-  userId: string,
-  title: string,
-  detail: string | null,
-  nextRunUtc: Date,
+  params: {
+    userId: string;
+    title: string;
+    description?: string | null;
+    schedule: ReminderSchedule;
+    nextRunAt: Date | null;
+  },
   client = getSupabaseClient()
 ): Promise<ReminderRow> {
+  const { userId, title, description, schedule, nextRunAt } = params;
   const { data, error } = await client
     .from(REMINDERS_TABLE)
     .insert({
       user_id: userId,
       title,
-      detail,
-      next_run_at_utc: toIsoString(nextRunUtc),
+      description: description ?? null,
+      schedule_type: schedule.scheduleType,
+      timezone: schedule.timezone,
+      next_run_at: nextRunAt ? toIsoString(nextRunAt) : null,
+      once_at: schedule.onceAt ? toIsoString(schedule.onceAt) : null,
+      interval_minutes: schedule.intervalMinutes ?? null,
+      at_time: schedule.atTime ?? null,
+      by_weekday: schedule.byWeekday ?? null,
+      by_monthday: schedule.byMonthday ?? null,
+      by_month: schedule.byMonth ?? null,
+      is_active: true,
       last_sent_at_utc: null,
       enabled: true
     })
@@ -83,7 +249,14 @@ export async function createReminder(
 
 export async function updateReminder(
   reminderId: string,
-  patch: { title?: string; detail?: string | null; nextRunAtUtc?: Date | null; enabled?: boolean },
+  patch: {
+    title?: string;
+    description?: string | null;
+    schedule?: ReminderSchedule;
+    nextRunAt?: Date | null;
+    isActive?: boolean;
+    enabled?: boolean;
+  },
   client = getSupabaseClient()
 ): Promise<ReminderRow> {
   const updates: Record<string, unknown> = {
@@ -91,9 +264,20 @@ export async function updateReminder(
   };
 
   if (typeof patch.title !== 'undefined') updates.title = patch.title;
-  if (typeof patch.detail !== 'undefined') updates.detail = patch.detail;
+  if (typeof patch.description !== 'undefined') updates.description = patch.description;
+  if (typeof patch.isActive !== 'undefined') updates.is_active = patch.isActive;
   if (typeof patch.enabled !== 'undefined') updates.enabled = patch.enabled;
-  if ('nextRunAtUtc' in patch) updates.next_run_at_utc = patch.nextRunAtUtc ? toIsoString(patch.nextRunAtUtc) : null;
+  if ('nextRunAt' in patch) updates.next_run_at = patch.nextRunAt ? toIsoString(patch.nextRunAt) : null;
+  if (patch.schedule) {
+    updates.schedule_type = patch.schedule.scheduleType;
+    updates.timezone = patch.schedule.timezone;
+    updates.once_at = patch.schedule.onceAt ? toIsoString(patch.schedule.onceAt) : null;
+    updates.interval_minutes = patch.schedule.intervalMinutes ?? null;
+    updates.at_time = patch.schedule.atTime ?? null;
+    updates.by_weekday = patch.schedule.byWeekday ?? null;
+    updates.by_monthday = patch.schedule.byMonthday ?? null;
+    updates.by_month = patch.schedule.byMonth ?? null;
+  }
 
   const { data, error } = await client
     .from(REMINDERS_TABLE)
@@ -119,8 +303,82 @@ export async function toggleReminderEnabled(reminderId: string, client = getSupa
     throw new Error('Reminder not found');
   }
 
-  const nextEnabled = !current.enabled;
-  return updateReminder(reminderId, { enabled: nextEnabled }, client);
+  const nextEnabled = !current.is_active;
+  return updateReminder(reminderId, { isActive: nextEnabled }, client);
+}
+
+export async function createReminderAttachment(
+  params: {
+    reminderId: string;
+    archiveChatId: number;
+    archiveMessageId: number;
+    kind: ReminderAttachmentRow['kind'];
+    caption?: string | null;
+    fileUniqueId?: string | null;
+    mimeType?: string | null;
+  },
+  client = getSupabaseClient()
+): Promise<ReminderAttachmentRow> {
+  const { reminderId, archiveChatId, archiveMessageId, kind, caption, fileUniqueId, mimeType } = params;
+  const { data, error } = await client
+    .from(REMINDERS_ATTACHMENTS_TABLE)
+    .insert({
+      reminder_id: reminderId,
+      archive_chat_id: archiveChatId,
+      archive_message_id: archiveMessageId,
+      kind,
+      caption: caption ?? null,
+      file_unique_id: fileUniqueId ?? null,
+      mime_type: mimeType ?? null
+    })
+    .select('*')
+    .single();
+
+  if (error) {
+    throw new Error(`Failed to create reminder attachment: ${error.message}`);
+  }
+
+  return data as ReminderAttachmentRow;
+}
+
+export async function listReminderAttachments(
+  params: { reminderId: string },
+  client = getSupabaseClient()
+): Promise<ReminderAttachmentRow[]> {
+  const { reminderId } = params;
+  const { data, error } = await client
+    .from(REMINDERS_ATTACHMENTS_TABLE)
+    .select('*')
+    .eq('reminder_id', reminderId)
+    .order('created_at', { ascending: true });
+
+  if (error) {
+    throw new Error(`Failed to list reminder attachments: ${error.message}`);
+  }
+
+  return (data as ReminderAttachmentRow[]) ?? [];
+}
+
+export async function listReminderAttachmentCounts(
+  params: { reminderIds: string[] },
+  client = getSupabaseClient()
+): Promise<Record<string, number>> {
+  const { reminderIds } = params;
+  if (reminderIds.length === 0) return {};
+  const { data, error } = await client
+    .from(REMINDERS_ATTACHMENTS_TABLE)
+    .select('reminder_id')
+    .in('reminder_id', reminderIds);
+
+  if (error) {
+    throw new Error(`Failed to count reminder attachments: ${error.message}`);
+  }
+
+  const counts: Record<string, number> = {};
+  for (const row of (data as { reminder_id: string }[]) ?? []) {
+    counts[row.reminder_id] = (counts[row.reminder_id] ?? 0) + 1;
+  }
+  return counts;
 }
 
 export async function loadUser(userId: string, client = getSupabaseClient()): Promise<UserRow | null> {
@@ -146,9 +404,10 @@ export async function sendReminderMessage(params: { reminder: ReminderRow; user:
     return;
   }
 
-  const lines = [`⏰ Reminder: ${reminder.title}`];
-  if (reminder.detail) {
-    lines.push('', reminder.detail);
+  const title = reminder.title?.trim().length ? reminder.title : 'Reminder';
+  const lines = [`⏰ Reminder: ${title}`];
+  if (reminder.description) {
+    lines.push('', reminder.description);
   }
 
   const text = lines.join('\n');
@@ -174,29 +433,36 @@ export async function processDueReminders(
         continue;
       }
 
-      const { data: updatedRow, error: updateError } = await client
+      await sendReminderMessage({ reminder, user, botClient });
+
+      const attachments = await listReminderAttachments({ reminderId: reminder.id }, client);
+      for (const attachment of attachments) {
+        await botClient.api.copyMessage(user.telegram_id, attachment.archive_chat_id, attachment.archive_message_id);
+      }
+
+      const schedule: ReminderSchedule = {
+        scheduleType: reminder.schedule_type as ReminderScheduleType,
+        timezone: reminder.timezone ?? config.defaultTimezone,
+        onceAt: reminder.once_at ? new Date(reminder.once_at) : null,
+        intervalMinutes: reminder.interval_minutes,
+        atTime: reminder.at_time,
+        byWeekday: reminder.by_weekday,
+        byMonthday: reminder.by_monthday,
+        byMonth: reminder.by_month
+      };
+
+      const nextRunAt = computeNextRunAt(schedule, nowUtc);
+      const isOnce = schedule.scheduleType === 'once';
+
+      await client
         .from(REMINDERS_TABLE)
         .update({
           last_sent_at_utc: toIsoString(nowUtc),
-          next_run_at_utc: null,
-          enabled: false,
+          next_run_at: nextRunAt ? toIsoString(nextRunAt) : null,
+          is_active: isOnce ? false : true,
           updated_at: toIsoString(nowUtc)
         })
-        .eq('id', reminder.id)
-        .is('last_sent_at_utc', null)
-        .select('id')
-        .maybeSingle();
-
-      if (updateError) {
-        throw new Error(`Failed to mark reminder as sent: ${updateError.message}`);
-      }
-
-      if (!updatedRow) {
-        console.log({ scope: 'reminders', event: 'already_processed', reminderId: reminder.id, userId: reminder.user_id });
-        continue;
-      }
-
-      await sendReminderMessage({ reminder, user, botClient });
+        .eq('id', reminder.id);
 
       console.log({
         scope: 'reminders',
@@ -224,9 +490,10 @@ export async function listUpcomingRemindersForUser(
     .from(REMINDERS_TABLE)
     .select('*')
     .eq('user_id', userId)
-    .eq('enabled', true)
-    .not('next_run_at_utc', 'is', null)
-    .order('next_run_at_utc', { ascending: true })
+    .eq('is_active', true)
+    .is('deleted_at', null)
+    .not('next_run_at', 'is', null)
+    .order('next_run_at', { ascending: true })
     .limit(limit);
 
   if (error) {
@@ -237,7 +504,10 @@ export async function listUpcomingRemindersForUser(
 }
 
 export async function deleteReminder(reminderId: string, client = getSupabaseClient()): Promise<void> {
-  const { error } = await client.from(REMINDERS_TABLE).delete().eq('id', reminderId);
+  const { error } = await client
+    .from(REMINDERS_TABLE)
+    .update({ deleted_at: toIsoString(new Date()), deleted_by: 'user', is_active: false })
+    .eq('id', reminderId);
 
   if (error) {
     throw new Error(`Failed to delete reminder: ${error.message}`);
