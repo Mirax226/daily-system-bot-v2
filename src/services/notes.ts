@@ -40,6 +40,7 @@ export async function listNotesByDate(
     .select('*')
     .eq('user_id', userId)
     .eq('note_date', noteDate)
+    .is('deleted_at', null)
     .order('created_at', { ascending: false });
 
   if (error) {
@@ -77,6 +78,7 @@ export async function listNotesByDatePage(
     .select('*', { count: 'exact' })
     .eq('user_id', userId)
     .eq('note_date', noteDate)
+    .is('deleted_at', null)
     .order('created_at', { ascending: false })
     .range(offset, offset + limit - 1);
 
@@ -92,7 +94,13 @@ export async function getNoteById(
   client = getSupabaseClient()
 ): Promise<NoteRow | null> {
   const { userId, id } = params;
-  const { data, error } = await client.from(NOTES_TABLE).select('*').eq('id', id).eq('user_id', userId).maybeSingle();
+  const { data, error } = await client
+    .from(NOTES_TABLE)
+    .select('*')
+    .eq('id', id)
+    .eq('user_id', userId)
+    .is('deleted_at', null)
+    .maybeSingle();
 
   if (error) {
     throw new Error(`Failed to load note: ${error.message}`);
@@ -106,7 +114,11 @@ export async function deleteNote(
   client = getSupabaseClient()
 ): Promise<void> {
   const { userId, id } = params;
-  const { error } = await client.from(NOTES_TABLE).delete().eq('id', id).eq('user_id', userId);
+  const { error } = await client
+    .from(NOTES_TABLE)
+    .update({ deleted_at: new Date().toISOString(), deleted_by: 'user' })
+    .eq('id', id)
+    .eq('user_id', userId);
   if (error) {
     throw new Error(`Failed to delete note: ${error.message}`);
   }
@@ -141,17 +153,30 @@ export async function clearDate(
   client = getSupabaseClient()
 ): Promise<void> {
   const { userId, noteDate } = params;
-  const { error } = await client.from(NOTES_TABLE).delete().eq('user_id', userId).eq('note_date', noteDate);
+  const { error } = await client
+    .from(NOTES_TABLE)
+    .update({ deleted_at: new Date().toISOString(), deleted_by: 'user' })
+    .eq('user_id', userId)
+    .eq('note_date', noteDate)
+    .is('deleted_at', null);
   if (error) {
     throw new Error(`Failed to clear notes: ${error.message}`);
   }
 }
 
 export async function createNoteAttachment(
-  params: { noteId: string; kind: NoteAttachmentRow['kind']; fileId: string; fileUniqueId?: string | null; caption?: string | null },
+  params: {
+    noteId: string;
+    kind: NoteAttachmentRow['kind'];
+    fileId: string;
+    fileUniqueId?: string | null;
+    caption?: string | null;
+    archiveChatId?: number | null;
+    archiveMessageId?: number | null;
+  },
   client = getSupabaseClient()
 ): Promise<NoteAttachmentRow> {
-  const { noteId, kind, fileId, fileUniqueId, caption } = params;
+  const { noteId, kind, fileId, fileUniqueId, caption, archiveChatId, archiveMessageId } = params;
   const { data, error } = await client
     .from(ATTACHMENTS_TABLE)
     .insert({
@@ -159,7 +184,9 @@ export async function createNoteAttachment(
       kind,
       file_id: fileId,
       file_unique_id: fileUniqueId ?? null,
-      caption: caption ?? null
+      caption: caption ?? null,
+      archive_chat_id: archiveChatId ?? null,
+      archive_message_id: archiveMessageId ?? null
     })
     .select('*')
     .single();
@@ -207,6 +234,20 @@ export async function listNoteAttachmentKinds(
   }
   const total = Object.values(counts).reduce((sum, value) => sum + value, 0);
   return { total, counts };
+}
+
+export async function listNoteAttachments(
+  params: { noteId: string },
+  client = getSupabaseClient()
+): Promise<NoteAttachmentRow[]> {
+  const { noteId } = params;
+  const { data, error } = await client.from(ATTACHMENTS_TABLE).select('*').eq('note_id', noteId).order('created_at', { ascending: true });
+
+  if (error) {
+    throw new Error(`Failed to list attachments: ${error.message}`);
+  }
+
+  return (data as NoteAttachmentRow[]) ?? [];
 }
 
 export async function listNoteAttachmentsByKind(
