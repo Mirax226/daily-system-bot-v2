@@ -171,12 +171,13 @@ export async function createNoteAttachment(
     fileId: string;
     fileUniqueId?: string | null;
     caption?: string | null;
+    captionPending?: boolean;
     archiveChatId?: number | null;
     archiveMessageId?: number | null;
   },
   client = getSupabaseClient()
 ): Promise<NoteAttachmentRow> {
-  const { noteId, kind, fileId, fileUniqueId, caption, archiveChatId, archiveMessageId } = params;
+  const { noteId, kind, fileId, fileUniqueId, caption, captionPending, archiveChatId, archiveMessageId } = params;
   const { data, error } = await client
     .from(ATTACHMENTS_TABLE)
     .insert({
@@ -185,6 +186,7 @@ export async function createNoteAttachment(
       file_id: fileId,
       file_unique_id: fileUniqueId ?? null,
       caption: caption ?? null,
+      caption_pending: captionPending ?? false,
       archive_chat_id: archiveChatId ?? null,
       archive_message_id: archiveMessageId ?? null
     })
@@ -205,7 +207,7 @@ export async function updateNoteAttachmentCaption(
   const { attachmentId, caption } = params;
   const { data, error } = await client
     .from(ATTACHMENTS_TABLE)
-    .update({ caption })
+    .update({ caption, caption_pending: false })
     .eq('id', attachmentId)
     .select('*')
     .single();
@@ -228,7 +230,14 @@ export async function listNoteAttachmentKinds(
     throw new Error(`Failed to list attachments: ${error.message}`);
   }
 
-  const counts = { photo: 0, video: 0, voice: 0, document: 0 } as Record<NoteAttachmentRow['kind'], number>;
+  const counts = {
+    photo: 0,
+    video: 0,
+    voice: 0,
+    document: 0,
+    video_note: 0,
+    audio: 0
+  } as Record<NoteAttachmentRow['kind'], number>;
   for (const row of (data as { kind: NoteAttachmentRow['kind'] }[]) ?? []) {
     counts[row.kind] = (counts[row.kind] ?? 0) + 1;
   }
@@ -254,12 +263,19 @@ export async function listNoteAttachmentsByKind(
   params: { noteId: string; kind: NoteAttachmentRow['kind'] },
   client = getSupabaseClient()
 ): Promise<NoteAttachmentRow[]> {
-  const { noteId, kind } = params;
+  return listNoteAttachmentsByKinds({ noteId: params.noteId, kinds: [params.kind] }, client);
+}
+
+export async function listNoteAttachmentsByKinds(
+  params: { noteId: string; kinds: NoteAttachmentRow['kind'][] },
+  client = getSupabaseClient()
+): Promise<NoteAttachmentRow[]> {
+  const { noteId, kinds } = params;
   const { data, error } = await client
     .from(ATTACHMENTS_TABLE)
     .select('*')
     .eq('note_id', noteId)
-    .eq('kind', kind)
+    .in('kind', kinds)
     .order('created_at', { ascending: true });
 
   if (error) {
@@ -267,6 +283,58 @@ export async function listNoteAttachmentsByKind(
   }
 
   return (data as NoteAttachmentRow[]) ?? [];
+}
+
+export async function listPendingNoteAttachments(
+  params: { noteId: string },
+  client = getSupabaseClient()
+): Promise<NoteAttachmentRow[]> {
+  const { noteId } = params;
+  const { data, error } = await client
+    .from(ATTACHMENTS_TABLE)
+    .select('*')
+    .eq('note_id', noteId)
+    .eq('caption_pending', true)
+    .order('created_at', { ascending: true });
+
+  if (error) {
+    throw new Error(`Failed to list pending attachments: ${error.message}`);
+  }
+
+  return (data as NoteAttachmentRow[]) ?? [];
+}
+
+export async function updateNoteAttachmentsCaptionByKinds(
+  params: { noteId: string; kinds: NoteAttachmentRow['kind'][]; caption: string | null },
+  client = getSupabaseClient()
+): Promise<void> {
+  const { noteId, kinds, caption } = params;
+  const { error } = await client
+    .from(ATTACHMENTS_TABLE)
+    .update({ caption, caption_pending: false })
+    .eq('note_id', noteId)
+    .in('kind', kinds)
+    .eq('caption_pending', true);
+
+  if (error) {
+    throw new Error(`Failed to update attachment captions: ${error.message}`);
+  }
+}
+
+export async function clearPendingNoteAttachments(
+  params: { noteId: string },
+  client = getSupabaseClient()
+): Promise<void> {
+  const { noteId } = params;
+  const { error } = await client
+    .from(ATTACHMENTS_TABLE)
+    .update({ caption_pending: false })
+    .eq('note_id', noteId)
+    .eq('caption_pending', true);
+
+  if (error) {
+    throw new Error(`Failed to clear attachment captions: ${error.message}`);
+  }
 }
 
 export async function getNoteAttachmentById(

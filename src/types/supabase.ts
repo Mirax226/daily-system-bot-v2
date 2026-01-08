@@ -43,6 +43,19 @@ export type Database = {
           user_id: string;
           title: string;
           detail: string | null;
+          description: string | null;
+          schedule_type: string;
+          timezone: string;
+          next_run_at: string | null;
+          is_active: boolean;
+          deleted_at: string | null;
+          deleted_by: string | null;
+          once_at: string | null;
+          interval_minutes: number | null;
+          at_time: string | null;
+          by_weekday: number | null;
+          by_monthday: number | null;
+          by_month: number | null;
           next_run_at_utc: string | null;
           last_sent_at_utc: string | null;
           enabled: boolean;
@@ -54,6 +67,19 @@ export type Database = {
           user_id: string;
           title: string;
           detail?: string | null;
+          description?: string | null;
+          schedule_type?: string;
+          timezone?: string;
+          next_run_at?: string | null;
+          is_active?: boolean;
+          deleted_at?: string | null;
+          deleted_by?: string | null;
+          once_at?: string | null;
+          interval_minutes?: number | null;
+          at_time?: string | null;
+          by_weekday?: number | null;
+          by_monthday?: number | null;
+          by_month?: number | null;
           next_run_at_utc?: string | null;
           last_sent_at_utc?: string | null;
           enabled?: boolean;
@@ -65,6 +91,19 @@ export type Database = {
           user_id?: string;
           title?: string;
           detail?: string | null;
+          description?: string | null;
+          schedule_type?: string;
+          timezone?: string;
+          next_run_at?: string | null;
+          is_active?: boolean;
+          deleted_at?: string | null;
+          deleted_by?: string | null;
+          once_at?: string | null;
+          interval_minutes?: number | null;
+          at_time?: string | null;
+          by_weekday?: number | null;
+          by_monthday?: number | null;
+          by_month?: number | null;
           next_run_at_utc?: string | null;
           last_sent_at_utc?: string | null;
           enabled?: boolean;
@@ -117,6 +156,7 @@ export type Database = {
           created_at: string;
           archive_chat_id: number | null;
           archive_message_id: number | null;
+          caption_pending: boolean;
         };
         Insert: {
           id?: string;
@@ -128,6 +168,7 @@ export type Database = {
           created_at?: string;
           archive_chat_id?: number | null;
           archive_message_id?: number | null;
+          caption_pending?: boolean;
         };
         Update: {
           id?: string;
@@ -139,6 +180,7 @@ export type Database = {
           created_at?: string;
           archive_chat_id?: number | null;
           archive_message_id?: number | null;
+          caption_pending?: boolean;
         };
         Relationships: [
           {
@@ -146,6 +188,50 @@ export type Database = {
             columns: ['note_id'];
             isOneToOne: false;
             referencedRelation: 'notes';
+            referencedColumns: ['id'];
+          }
+        ];
+      };
+      reminders_attachments: {
+        Row: {
+          id: string;
+          reminder_id: string;
+          archive_chat_id: number;
+          archive_message_id: number;
+          kind: string;
+          caption: string | null;
+          file_unique_id: string | null;
+          mime_type: string | null;
+          created_at: string;
+        };
+        Insert: {
+          id?: string;
+          reminder_id: string;
+          archive_chat_id: number;
+          archive_message_id: number;
+          kind: string;
+          caption?: string | null;
+          file_unique_id?: string | null;
+          mime_type?: string | null;
+          created_at?: string;
+        };
+        Update: {
+          id?: string;
+          reminder_id?: string;
+          archive_chat_id?: number;
+          archive_message_id?: number;
+          kind?: string;
+          caption?: string | null;
+          file_unique_id?: string | null;
+          mime_type?: string | null;
+          created_at?: string;
+        };
+        Relationships: [
+          {
+            foreignKeyName: 'reminders_attachments_reminder_id_fkey';
+            columns: ['reminder_id'];
+            isOneToOne: false;
+            referencedRelation: 'reminders';
             referencedColumns: ['id'];
           }
         ];

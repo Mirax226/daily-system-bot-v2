@@ -63,17 +63,19 @@ import { getTodayDateString } from './services/dailyLogs';
 import {
   createNote,
   createNoteAttachment,
+  clearPendingNoteAttachments,
   deleteNote,
   getNoteAttachmentById,
   getNoteById,
   listNoteAttachments,
   listNoteAttachmentKinds,
-  listNoteAttachmentsByKind,
+  listNoteAttachmentsByKinds,
   listNoteDateSummaries,
   listNotesByDate,
   listNotesByDatePage,
+  listPendingNoteAttachments,
   updateNote,
-  updateNoteAttachmentCaption
+  updateNoteAttachmentsCaptionByKinds
 } from './services/notes';
 
 import { consumeCallbackToken } from './services/callbackTokens';
@@ -81,13 +83,20 @@ import { getRecentTelemetryEvents, isTelemetryEnabled, logTelemetryEvent } from 
 import { getErrorReportByCode, logErrorReport } from './services/errorReports';
 import { escapeMarkdown } from './utils/markdown';
 import {
+  computeNextRunAt,
   createReminder,
+  createReminderAttachment,
   deleteReminder,
   getReminderById,
+  listReminderAttachmentCounts,
+  listReminderAttachments,
   listRemindersForUser,
   toggleReminderEnabled,
   updateReminder
 } from './services/reminders';
+import type { ReminderScheduleType } from './services/reminders';
+
+import { archiveCopyFromUser, deliverCopyToUser, resolveArchiveChatId } from './services/archive';
 
 import { makeActionButton } from './ui/inlineButtons';
 import { renderScreen, ensureUserAndSettings as renderEnsureUserAndSettings, updateCachedUserContext } from './ui/renderScreen';
@@ -98,7 +107,7 @@ import { gregorianToJalali, isValidJalaliDate, jalaliToGregorian } from './utils
 import { logError } from './utils/logger';
 import { resolveLocale, t, withLocale, type Locale } from './i18n';
 
-import type { ReportItemRow, ReportDayRow, RewardRow, RoutineRow, RoutineTaskRow } from './types/supabase';
+import type { NoteAttachmentRow, ReportItemRow, ReportDayRow, RewardRow, RoutineRow, RoutineTaskRow } from './types/supabase';
 
 export const bot = new Bot<Context>(config.telegram.botToken);
 
@@ -189,8 +198,15 @@ type ReminderDraft = {
   localDate?: string;
   localTime?: string;
   timeMinutes?: number;
-  title?: string;
-  detail?: string | null;
+  title?: string | null;
+  description?: string | null;
+  scheduleType?: ReminderScheduleType;
+  intervalMinutes?: number;
+  atTime?: string;
+  byWeekday?: number;
+  byMonthday?: number;
+  byMonth?: number;
+  attachments?: ReminderAttachmentDraft[];
   dateMode?: 'gregorian' | 'jalali';
   year?: number;
   month?: number;
@@ -201,13 +217,47 @@ type ReminderDraft = {
 type ReminderFlow =
   | {
       mode: 'create';
-      step: 'date_select' | 'custom_date' | 'time' | 'time_manual' | 'title' | 'detail';
+      step:
+        | 'title'
+        | 'description'
+        | 'attachments'
+        | 'schedule_type'
+        | 'date_select'
+        | 'custom_date'
+        | 'time'
+        | 'time_manual'
+        | 'interval_minutes'
+        | 'daily_time'
+        | 'weekly_day'
+        | 'weekly_time'
+        | 'monthly_day'
+        | 'monthly_time'
+        | 'yearly_month'
+        | 'yearly_day'
+        | 'yearly_time';
       draft: ReminderDraft;
     }
   | {
       mode: 'edit';
       reminderId: string;
-      step: 'title' | 'detail' | 'date_select' | 'custom_date' | 'time' | 'time_manual';
+      step:
+        | 'title'
+        | 'description'
+        | 'attachments'
+        | 'schedule_type'
+        | 'date_select'
+        | 'custom_date'
+        | 'time'
+        | 'time_manual'
+        | 'interval_minutes'
+        | 'daily_time'
+        | 'weekly_day'
+        | 'weekly_time'
+        | 'monthly_day'
+        | 'monthly_time'
+        | 'yearly_month'
+        | 'yearly_day'
+        | 'yearly_time';
       draft: ReminderDraft;
     };
 
@@ -225,9 +275,10 @@ type NotesFlow =
     }
   | {
       mode: 'create';
-      step: 'voice_description';
+      step: 'caption_choice' | 'caption_all' | 'caption_category';
       noteId: string;
-      attachmentId: string;
+      captionCategories?: NoteCaptionCategory[];
+      currentCategory?: NoteCaptionCategory;
       viewContext?: { noteDate?: string; page?: number; historyPage?: number };
     }
   | {
@@ -249,6 +300,15 @@ type NotesFlow =
       noteDate: string;
     };
 
+type NoteUploadSession = {
+  noteId: string;
+  viewContext?: { noteDate?: string; page?: number; historyPage?: number };
+  pendingKinds: Partial<Record<NoteAttachmentKind, number>>;
+  lastReceivedAt: number;
+  timer?: ReturnType<typeof setTimeout>;
+  prompted?: boolean;
+};
+
 type ReminderlessState = {
   awaitingValue?: AwaitingValueState;
 
@@ -259,6 +319,7 @@ type ReminderlessState = {
   timeDraft?: TimeDraftState;
   reminderFlow?: ReminderFlow;
   notesFlow?: NotesFlow;
+  noteUploadSession?: NoteUploadSession;
   statusFilter?: { reportDayId: string; filter: 'all' | 'not_filled' | 'filled' };
 
   rewardEdit?: {
@@ -341,6 +402,16 @@ const setNotesFlow = (telegramId: string, flow: NotesFlow): void => {
 const clearNotesFlow = (telegramId: string): void => {
   const st = { ...(userStates.get(telegramId) || {}) };
   delete st.notesFlow;
+  userStates.set(telegramId, st);
+};
+
+const setNoteUploadSession = (telegramId: string, session: NoteUploadSession | undefined): void => {
+  const st = { ...(userStates.get(telegramId) || {}) };
+  if (session) {
+    st.noteUploadSession = session;
+  } else {
+    delete st.noteUploadSession;
+  }
   userStates.set(telegramId, st);
 };
 
@@ -1489,26 +1560,33 @@ const renderReportsMenu = async (ctx: Context): Promise<void> => {
   await renderScreen(ctx, { titleKey: 'screens.reports.title', bodyLines: ['screens.reports.choose_category'], inlineKeyboard: kb });
 };
 
-const NOTES_HISTORY_PAGE_SIZE = 14;
+const NOTES_HISTORY_PAGE_SIZE = 30;
 const NOTES_DATE_PAGE_SIZE = 8;
-const NOTE_ATTACHMENT_KINDS = ['photo', 'video', 'voice', 'document'] as const;
+const NOTE_ATTACHMENT_KINDS = ['photo', 'video', 'voice', 'document', 'video_note', 'audio'] as const;
 type NoteAttachmentKind = (typeof NOTE_ATTACHMENT_KINDS)[number];
+type NoteCaptionCategory = 'photo' | 'video' | 'voice' | 'video_note' | 'files';
+const NOTE_UPLOAD_IDLE_MS = 5000;
+type ReminderAttachmentKind = NoteAttachmentKind;
+type ReminderAttachmentDraft = {
+  archiveChatId: number;
+  archiveMessageId: number;
+  kind: ReminderAttachmentKind;
+  caption?: string | null;
+  fileUniqueId?: string | null;
+  mimeType?: string | null;
+};
 
 const getNoteAttachmentKindEmoji = (kind: NoteAttachmentKind): string => {
   if (kind === 'photo') return '🖼';
   if (kind === 'video') return '🎥';
   if (kind === 'voice') return '🎙';
+  if (kind === 'video_note') return '📹';
+  if (kind === 'audio') return '🎵';
   return '📄';
 };
 
-const getNotesArchiveChatId = (): number | null => {
-  if (!config.notes.archive.enabled) return null;
-  const raw = config.notes.archive.chatId;
-  if (!raw) return null;
-  const parsed = Number(raw);
-  if (!Number.isFinite(parsed)) return null;
-  return parsed;
-};
+const getNotesArchiveChatId = (): number | null => resolveArchiveChatId('notes');
+const getRemindersArchiveChatId = (): number | null => resolveArchiveChatId('reminders');
 
 const sendNoteArchiveDeleteLabels = async (ctx: Context, noteId: string): Promise<void> => {
   const attachments = await listNoteAttachments({ noteId });
@@ -1527,6 +1605,29 @@ const sendNoteArchiveDeleteLabels = async (ctx: Context, noteId: string): Promis
         event: 'archive_delete_label_failed',
         error,
         attachmentId: attachment.id,
+        archiveChatId
+      });
+    }
+  }
+};
+
+const sendReminderArchiveDeleteLabels = async (ctx: Context, reminderId: string): Promise<void> => {
+  const attachments = await listReminderAttachments({ reminderId });
+  const fallbackChatId = getRemindersArchiveChatId();
+  for (const attachment of attachments) {
+    const archiveChatId = attachment.archive_chat_id ?? fallbackChatId;
+    if (!archiveChatId || !attachment.archive_message_id) continue;
+    try {
+      await ctx.api.sendMessage(archiveChatId, 'Deleted by user', {
+        reply_to_message_id: attachment.archive_message_id,
+        disable_notification: true
+      });
+    } catch (error) {
+      console.error({
+        scope: 'reminders',
+        event: 'archive_delete_label_failed',
+        error,
+        reminderId,
         archiveChatId
       });
     }
@@ -1686,11 +1787,13 @@ const renderNoteDetails = async (
   const editBtn = await makeActionButton(ctx, { label: t('buttons.notes_edit'), action: 'notes.edit_menu', data: { noteId: note.id, noteDate, page, historyPage } });
   const attachBtn = await makeActionButton(ctx, { label: t('buttons.notes_attach'), action: 'notes.attach_more', data: { noteId: note.id, noteDate, page, historyPage } });
   const deleteBtn = await makeActionButton(ctx, { label: t('buttons.notes_delete'), action: 'notes.delete_note', data: { noteId: note.id, noteDate, page, historyPage } });
+  const viewAllBtn = await makeActionButton(ctx, { label: t('buttons.notes_view_all'), action: 'notes.view_all', data: { noteId: note.id, noteDate, page, historyPage } });
   const backBtn = await makeActionButton(ctx, { label: t('buttons.notes_back'), action: 'notes.history_date', data: { date: noteDate, page, historyPage } });
   kb.text(editBtn.text, editBtn.callback_data).row();
   kb.text(attachBtn.text, attachBtn.callback_data).row();
   kb.text(deleteBtn.text, deleteBtn.callback_data).row();
   if (attachmentSummary.total > 0) {
+    kb.text(viewAllBtn.text, viewAllBtn.callback_data).row();
     const { counts } = attachmentSummary;
     if (counts.photo > 0) {
       const photoBtn = await makeActionButton(ctx, {
@@ -1716,9 +1819,18 @@ const renderNoteDetails = async (
       });
       kb.text(voiceBtn.text, voiceBtn.callback_data).row();
     }
-    if (counts.document > 0) {
+    if (counts.video_note > 0) {
+      const videoNoteBtn = await makeActionButton(ctx, {
+        label: t('buttons.notes_video_note', { count: String(counts.video_note) }),
+        action: 'notes.attachments_kind',
+        data: { noteId: note.id, kind: 'video_note', noteDate, page, historyPage }
+      });
+      kb.text(videoNoteBtn.text, videoNoteBtn.callback_data).row();
+    }
+    const fileCount = (counts.document ?? 0) + (counts.audio ?? 0);
+    if (fileCount > 0) {
       const docBtn = await makeActionButton(ctx, {
-        label: t('buttons.notes_document', { count: String(counts.document) }),
+        label: t('buttons.notes_document', { count: String(fileCount) }),
         action: 'notes.attachments_kind',
         data: { noteId: note.id, kind: 'document', noteDate, page, historyPage }
       });
@@ -1789,6 +1901,106 @@ const renderNoteAttachmentPrompt = async (
   await renderScreen(ctx, { titleKey: t('screens.notes.title'), bodyLines: [t('screens.notes.attachments_prompt')], inlineKeyboard: kb });
 };
 
+const buildNoteCaptionCategories = (attachments: NoteAttachmentRow[]): NoteCaptionCategory[] => {
+  const kinds = new Set(attachments.map((attachment) => attachment.kind));
+  const categories: NoteCaptionCategory[] = [];
+  if (kinds.has('photo')) categories.push('photo');
+  if (kinds.has('video')) categories.push('video');
+  if (kinds.has('voice')) categories.push('voice');
+  if (kinds.has('video_note')) categories.push('video_note');
+  if (kinds.has('document') || kinds.has('audio')) categories.push('files');
+  return categories;
+};
+
+const renderNoteCaptionChoice = async (
+  ctx: Context,
+  noteId: string,
+  viewContext: { noteDate?: string; page?: number; historyPage?: number },
+  categories: NoteCaptionCategory[]
+): Promise<void> => {
+  if (!ctx.from) return;
+  const allBtn = await makeActionButton(ctx, {
+    label: t('buttons.notes_caption_all'),
+    action: 'notes.caption_all',
+    data: { noteId, ...viewContext }
+  });
+  const byCategoryBtn = await makeActionButton(ctx, {
+    label: t('buttons.notes_caption_by_category'),
+    action: 'notes.caption_by_category',
+    data: { noteId, ...viewContext }
+  });
+  const skipBtn = await makeActionButton(ctx, {
+    label: t('buttons.notes_caption_skip'),
+    action: 'notes.caption_skip',
+    data: { noteId, ...viewContext }
+  });
+  const kb = new InlineKeyboard()
+    .text(allBtn.text, allBtn.callback_data)
+    .row()
+    .text(byCategoryBtn.text, byCategoryBtn.callback_data)
+    .row()
+    .text(skipBtn.text, skipBtn.callback_data);
+
+  setNotesFlow(String(ctx.from.id), {
+    mode: 'create',
+    step: 'caption_choice',
+    noteId,
+    captionCategories: categories,
+    viewContext
+  });
+
+  await renderScreen(ctx, { titleKey: t('screens.notes.title'), bodyLines: [t('screens.notes.captions_prompt')], inlineKeyboard: kb });
+};
+
+const promptNoteCaptionCategory = async (
+  ctx: Context,
+  noteId: string,
+  category: NoteCaptionCategory,
+  viewContext: { noteDate?: string; page?: number; historyPage?: number },
+  categories: NoteCaptionCategory[]
+): Promise<void> => {
+  if (!ctx.from) return;
+  const skipBtn = await makeActionButton(ctx, {
+    label: t('buttons.notes_skip'),
+    action: 'notes.caption_category_skip',
+    data: { noteId, ...viewContext }
+  });
+  const kb = new InlineKeyboard().text(skipBtn.text, skipBtn.callback_data);
+  setNotesFlow(String(ctx.from.id), {
+    mode: 'create',
+    step: 'caption_category',
+    noteId,
+    currentCategory: category,
+    captionCategories: categories,
+    viewContext
+  });
+  const label = t(`screens.notes.caption_${category}`);
+  await renderScreen(ctx, { titleKey: t('screens.notes.title'), bodyLines: [t('screens.notes.caption_category_prompt', { category: label })], inlineKeyboard: kb });
+};
+
+const startNoteCaptionFlow = async (
+  ctx: Context,
+  noteId: string,
+  viewContext: { noteDate?: string; page?: number; historyPage?: number }
+): Promise<void> => {
+  if (ctx.from) {
+    const stateKey = String(ctx.from.id);
+    const session = userStates.get(stateKey)?.noteUploadSession;
+    if (session?.timer) {
+      clearTimeout(session.timer);
+    }
+    setNoteUploadSession(stateKey, undefined);
+  }
+  const pending = await listPendingNoteAttachments({ noteId });
+  if (pending.length === 0) {
+    clearNotesFlow(String(ctx.from?.id ?? ''));
+    await renderNoteDetails(ctx, noteId, viewContext);
+    return;
+  }
+  const categories = buildNoteCaptionCategories(pending);
+  await renderNoteCaptionChoice(ctx, noteId, viewContext, categories);
+};
+
 const renderNoteAttachmentsList = async (
   ctx: Context,
   params: { noteId: string; kind: NoteAttachmentKind; noteDate: string; page: number; historyPage: number }
@@ -1800,8 +2012,9 @@ const renderNoteAttachmentsList = async (
     return;
   }
 
-  const attachments = await listNoteAttachmentsByKind({ noteId: params.noteId, kind: params.kind });
-  const kindLabel = t(`screens.notes.kind_${params.kind}`);
+  const kinds = params.kind === 'document' ? (['document', 'audio'] as NoteAttachmentKind[]) : [params.kind];
+  const attachments = await listNoteAttachmentsByKinds({ noteId: params.noteId, kinds });
+  const kindLabel = params.kind === 'document' ? t('screens.notes.kind_files') : t(`screens.notes.kind_${params.kind}`);
   const noteDate = params.noteDate || note.note_date;
   const lines: string[] = [];
   if (!attachments.length) {
@@ -1841,50 +2054,133 @@ const handleNoteAttachmentMessage = async (
 ): Promise<void> => {
   if (!ctx.from) return;
   const stateKey = String(ctx.from.id);
-  const flow = userStates.get(stateKey)?.notesFlow;
+  const state = userStates.get(stateKey);
+  const flow = state?.notesFlow;
   if (!flow || flow.mode !== 'create' || flow.step !== 'attachments') return;
 
   try {
     const archiveChatId = getNotesArchiveChatId();
-    const messageId = ctx.message?.message_id;
-    const sourceChatId = ctx.chat?.id;
     let archiveMessageId: number | null = null;
-    if (archiveChatId && sourceChatId && messageId) {
+    if (archiveChatId) {
       try {
-        const archived = await ctx.api.copyMessage(archiveChatId, sourceChatId, messageId);
-        archiveMessageId = archived.message_id;
+        archiveMessageId = await archiveCopyFromUser(ctx, archiveChatId);
       } catch (error) {
-        console.error({ scope: 'notes', event: 'archive_copy_failed', error, archiveChatId, messageId });
+        console.error({ scope: 'notes', event: 'archive_copy_failed', error, archiveChatId });
       }
     }
 
-    const attachment = await createNoteAttachment({
+    if (!archiveChatId || !archiveMessageId) {
+      await renderScreen(ctx, { titleKey: t('screens.notes.title'), bodyLines: [t('screens.notes.attachments_failed')] });
+      return;
+    }
+
+    await createNoteAttachment({
       noteId: flow.noteId,
       kind: params.kind,
       fileId: params.fileId,
       fileUniqueId: params.fileUniqueId ?? null,
       caption: params.caption ?? null,
+      captionPending: !params.caption,
       archiveChatId: archiveMessageId ? archiveChatId : null,
       archiveMessageId
     });
+    const now = Date.now();
+    const existingSession = state?.noteUploadSession;
+    const pendingKinds = { ...(existingSession?.pendingKinds ?? {}) };
+    pendingKinds[params.kind] = (pendingKinds[params.kind] ?? 0) + 1;
 
-    if (params.kind === 'voice') {
-      setNotesFlow(stateKey, { mode: 'create', step: 'voice_description', noteId: flow.noteId, attachmentId: attachment.id, viewContext: flow.viewContext });
-      const skipBtn = await makeActionButton(ctx, {
-        label: t('buttons.notes_skip'),
-        action: 'notes.voice_skip',
-        data: { noteId: flow.noteId, ...(flow.viewContext ?? {}) }
-      });
-      const kb = new InlineKeyboard().text(skipBtn.text, skipBtn.callback_data);
-      await renderScreen(ctx, { titleKey: t('screens.notes.title'), bodyLines: [t('screens.notes.voice_description_prompt')], inlineKeyboard: kb });
-      return;
+    if (existingSession?.timer) {
+      clearTimeout(existingSession.timer);
     }
+
+    const timer = setTimeout(async () => {
+      const latestState = userStates.get(stateKey);
+      const session = latestState?.noteUploadSession;
+      if (!session || session.noteId !== flow.noteId) return;
+      if (session.prompted) return;
+      const idleFor = Date.now() - session.lastReceivedAt;
+      if (idleFor < NOTE_UPLOAD_IDLE_MS) return;
+      const saveBtn = await makeActionButton(ctx, {
+        label: t('buttons.notes_save_now'),
+        action: 'notes.attachments_save',
+        data: { noteId: session.noteId, ...(session.viewContext ?? {}) }
+      });
+      const continueBtn = await makeActionButton(ctx, {
+        label: t('buttons.notes_continue'),
+        action: 'notes.attachments_continue',
+        data: { noteId: session.noteId, ...(session.viewContext ?? {}) }
+      });
+      const kb = new InlineKeyboard().text(saveBtn.text, saveBtn.callback_data).row().text(continueBtn.text, continueBtn.callback_data);
+      setNoteUploadSession(stateKey, { ...session, prompted: true });
+      await renderScreen(ctx, { titleKey: t('screens.notes.title'), bodyLines: [t('screens.notes.attachments_idle_prompt')], inlineKeyboard: kb });
+    }, NOTE_UPLOAD_IDLE_MS);
+
+    setNoteUploadSession(stateKey, {
+      noteId: flow.noteId,
+      viewContext: flow.viewContext,
+      pendingKinds,
+      lastReceivedAt: now,
+      timer
+    });
 
     await renderNoteAttachmentPrompt(ctx, flow.noteId, flow.viewContext ?? {});
   } catch (error) {
     console.error({ scope: 'notes', event: 'attachment_save_failed', error, kind: params.kind });
     await renderScreen(ctx, { titleKey: t('screens.notes.title'), bodyLines: [t('screens.notes.attachments_failed')] });
   }
+};
+
+const handleReminderAttachmentMessage = async (
+  ctx: Context,
+  params: { kind: ReminderAttachmentKind; fileUniqueId?: string | null; caption?: string | null; mimeType?: string | null }
+): Promise<void> => {
+  if (!ctx.from) return;
+  const stateKey = String(ctx.from.id);
+  const flow = userStates.get(stateKey)?.reminderFlow;
+  if (!flow || (flow.step !== 'attachments' && flow.step !== 'description')) return;
+
+  const archiveChatId = getRemindersArchiveChatId();
+  if (!archiveChatId) {
+    await renderScreen(ctx, { titleKey: t('screens.reminders.new_title'), bodyLines: [t('screens.reminders.attachments_failed')] });
+    return;
+  }
+
+  let archiveMessageId: number | null = null;
+  try {
+    archiveMessageId = await archiveCopyFromUser(ctx, archiveChatId);
+  } catch (error) {
+    console.error({ scope: 'reminders', event: 'archive_copy_failed', error, archiveChatId });
+  }
+
+  if (!archiveMessageId) {
+    await renderScreen(ctx, { titleKey: t('screens.reminders.new_title'), bodyLines: [t('screens.reminders.attachments_failed')] });
+    return;
+  }
+
+  if (flow.mode === 'edit') {
+    await createReminderAttachment({
+      reminderId: flow.reminderId,
+      archiveChatId,
+      archiveMessageId,
+      kind: params.kind,
+      caption: params.caption ?? null,
+      fileUniqueId: params.fileUniqueId ?? null,
+      mimeType: params.mimeType ?? null
+    });
+    await renderReminderAttachmentPrompt(ctx, { mode: 'edit', reminderId: flow.reminderId });
+    return;
+  }
+
+  const attachments = [...(flow.draft.attachments ?? []), {
+    archiveChatId,
+    archiveMessageId,
+    kind: params.kind,
+    caption: params.caption ?? null,
+    fileUniqueId: params.fileUniqueId ?? null,
+    mimeType: params.mimeType ?? null
+  }];
+  setReminderFlow(stateKey, { ...flow, step: 'attachments', draft: { ...flow.draft, attachments } });
+  await renderReminderAttachmentPrompt(ctx, { mode: 'create' });
 };
 
 const renderXpSummary = async (ctx: Context): Promise<void> => {
@@ -2158,6 +2454,7 @@ const renderReminders = async (ctx: Context): Promise<void> => {
   const { user } = await ensureUserAndSettings(ctx);
 
   const reminders = await listRemindersForUser(user.id);
+  const attachmentCounts = await listReminderAttachmentCounts({ reminderIds: reminders.map((reminder) => reminder.id) });
 
   const lines: string[] = [];
 
@@ -2166,14 +2463,16 @@ const renderReminders = async (ctx: Context): Promise<void> => {
   } else {
     lines.push(t('screens.reminders.list_header'), '');
     for (const r of reminders) {
-      const status = r.enabled ? t('screens.reminders.status_on') : t('screens.reminders.status_off');
-      const local = r.next_run_at_utc ? formatInstantToLocal(r.next_run_at_utc, user.timezone ?? config.defaultTimezone) : null;
+      const status = r.is_active ? t('screens.reminders.status_on') : t('screens.reminders.status_off');
+      const local = r.next_run_at ? formatInstantToLocal(r.next_run_at, user.timezone ?? config.defaultTimezone) : null;
       const timePart = local ? `${local.date} ${local.time}` : t('screens.reminders.no_time');
+      const attachments = attachmentCounts[r.id] ?? 0;
       lines.push(
         t('screens.reminders.item_line', {
           status,
           time: timePart,
-          title: r.title
+          title: r.title,
+          attachments: String(attachments)
         })
       );
     }
@@ -2189,7 +2488,7 @@ const renderReminders = async (ctx: Context): Promise<void> => {
   for (const r of reminders) {
     const editBtn = await makeActionButton(ctx, { label: t('buttons.reminders_edit') ?? '✏️ Edit', action: 'reminders.edit_open', data: { reminderId: r.id } });
     const toggleBtn = await makeActionButton(ctx, {
-      label: r.enabled ? (t('buttons.reminders_toggle_off') ?? '🔁 Toggle off') : (t('buttons.reminders_toggle_on') ?? '🔁 Toggle on'),
+      label: r.is_active ? (t('buttons.reminders_toggle_off') ?? '🔁 Toggle off') : (t('buttons.reminders_toggle_on') ?? '🔁 Toggle on'),
       action: 'reminders.toggle',
       data: { reminderId: r.id }
     });
@@ -2220,23 +2519,27 @@ const renderReminderDetails = async (ctx: Context, reminderId: string, flash?: s
   }
 
   const timezone = user.timezone ?? config.defaultTimezone;
-  const local = reminder.next_run_at_utc ? formatInstantToLocal(reminder.next_run_at_utc, timezone) : null;
+  const local = reminder.next_run_at ? formatInstantToLocal(reminder.next_run_at, timezone) : null;
+  const attachments = await listReminderAttachments({ reminderId: reminder.id });
+  const scheduleLabel = t(`screens.reminders.schedule_type_${reminder.schedule_type}` as const);
 
   const lines = [
     flash,
     t('screens.reminders.details_title_line', { title: reminder.title }),
-    t('screens.reminders.details_detail_line', { detail: reminder.detail && reminder.detail.trim().length > 0 ? reminder.detail : t('screens.reminders.details_empty') }),
+    t('screens.reminders.details_detail_line', { detail: reminder.description && reminder.description.trim().length > 0 ? reminder.description : t('screens.reminders.details_empty') }),
+    t('screens.reminders.details_schedule_line', { schedule: scheduleLabel }),
     t('screens.reminders.details_scheduled_line', { scheduled: local ? `${local.date} ${local.time}` : t('screens.reminders.no_time') }),
-    t('screens.reminders.details_status_line', { status: reminder.enabled ? t('screens.reminders.status_on') : t('screens.reminders.status_off') })
+    t('screens.reminders.details_status_line', { status: reminder.is_active ? t('screens.reminders.status_on') : t('screens.reminders.status_off') }),
+    t('screens.reminders.details_attachments_line', { count: String(attachments.length) })
   ].filter(Boolean) as string[];
 
   const kb = new InlineKeyboard();
   const editTitleBtn = await makeActionButton(ctx, { label: t('buttons.reminders_edit_title'), action: 'reminders.edit_title', data: { reminderId } });
   const editDetailBtn = await makeActionButton(ctx, { label: t('buttons.reminders_edit_detail'), action: 'reminders.edit_detail', data: { reminderId } });
-  const editDateBtn = await makeActionButton(ctx, { label: t('buttons.reminders_edit_date'), action: 'reminders.edit_date', data: { reminderId } });
-  const editTimeBtn = await makeActionButton(ctx, { label: t('buttons.reminders_edit_time'), action: 'reminders.edit_time', data: { reminderId } });
+  const editScheduleBtn = await makeActionButton(ctx, { label: t('buttons.reminders_edit_schedule'), action: 'reminders.edit_schedule', data: { reminderId } });
+  const attachBtn = await makeActionButton(ctx, { label: t('buttons.reminders_attach'), action: 'reminders.attach', data: { reminderId } });
   const toggleBtn = await makeActionButton(ctx, {
-    label: reminder.enabled ? t('buttons.reminders_toggle_off') : t('buttons.reminders_toggle_on'),
+    label: reminder.is_active ? t('buttons.reminders_toggle_off') : t('buttons.reminders_toggle_on'),
     action: 'reminders.toggle',
     data: { reminderId }
   });
@@ -2245,8 +2548,8 @@ const renderReminderDetails = async (ctx: Context, reminderId: string, flash?: s
 
   kb.text(editTitleBtn.text, editTitleBtn.callback_data).row();
   kb.text(editDetailBtn.text, editDetailBtn.callback_data).row();
-  kb.text(editDateBtn.text, editDateBtn.callback_data).row();
-  kb.text(editTimeBtn.text, editTimeBtn.callback_data).row();
+  kb.text(editScheduleBtn.text, editScheduleBtn.callback_data).row();
+  kb.text(attachBtn.text, attachBtn.callback_data).row();
   kb.text(toggleBtn.text, toggleBtn.callback_data).row();
   kb.text(deleteBtn.text, deleteBtn.callback_data).row();
   kb.text(backBtn.text, backBtn.callback_data);
@@ -2256,6 +2559,176 @@ const renderReminderDetails = async (ctx: Context, reminderId: string, flash?: s
     bodyLines: lines,
     inlineKeyboard: kb
   });
+};
+
+const renderReminderTitlePrompt = async (ctx: Context, mode: ReminderFlow['mode'], reminderId?: string): Promise<void> => {
+  const kb = new InlineKeyboard();
+  if (mode === 'create') {
+    const skipBtn = await makeActionButton(ctx, { label: t('buttons.notes_skip'), action: 'reminders.skip_title' });
+    kb.text(skipBtn.text, skipBtn.callback_data).row();
+  }
+  const backAction = mode === 'edit' ? 'reminders.edit_open' : 'nav.reminders';
+  const backBtn = await makeActionButton(ctx, { label: t('buttons.reminders_back'), action: backAction, data: reminderId ? { reminderId } : undefined });
+  kb.text(backBtn.text, backBtn.callback_data);
+  await renderScreen(ctx, { titleKey: t('screens.reminders.new_title'), bodyLines: [t('screens.reminders.new_enter_title')], inlineKeyboard: kb });
+};
+
+const renderReminderDescriptionPrompt = async (
+  ctx: Context,
+  mode: ReminderFlow['mode'],
+  reminderId?: string
+): Promise<void> => {
+  const kb = new InlineKeyboard();
+  const attachBtn = await makeActionButton(ctx, { label: t('buttons.reminders_attach'), action: 'reminders.attach', data: reminderId ? { reminderId } : undefined });
+  const skipBtn = await makeActionButton(ctx, { label: t('buttons.notes_skip'), action: 'reminders.skip_description', data: reminderId ? { reminderId } : undefined });
+  const backAction = mode === 'edit' ? 'reminders.edit_open' : 'nav.reminders';
+  const backBtn = await makeActionButton(ctx, { label: t('buttons.reminders_back'), action: backAction, data: reminderId ? { reminderId } : undefined });
+  kb.text(attachBtn.text, attachBtn.callback_data).row();
+  kb.text(skipBtn.text, skipBtn.callback_data).row();
+  kb.text(backBtn.text, backBtn.callback_data);
+  await renderScreen(ctx, { titleKey: t('screens.reminders.new_title'), bodyLines: [t('screens.reminders.description_prompt')], inlineKeyboard: kb });
+};
+
+const renderReminderScheduleTypePrompt = async (
+  ctx: Context,
+  mode: ReminderFlow['mode'],
+  reminderId?: string
+): Promise<void> => {
+  const kb = new InlineKeyboard();
+  const types: Array<{ key: ReminderScheduleType; label: string }> = [
+    { key: 'once', label: t('screens.reminders.schedule_once') },
+    { key: 'hourly', label: t('screens.reminders.schedule_hourly') },
+    { key: 'daily', label: t('screens.reminders.schedule_daily') },
+    { key: 'weekly', label: t('screens.reminders.schedule_weekly') },
+    { key: 'monthly', label: t('screens.reminders.schedule_monthly') },
+    { key: 'yearly', label: t('screens.reminders.schedule_yearly') }
+  ];
+  for (const entry of types) {
+    const btn = await makeActionButton(ctx, { label: entry.label, action: 'reminders.schedule_type', data: { scheduleType: entry.key, mode, reminderId } });
+    kb.text(btn.text, btn.callback_data).row();
+  }
+  const backAction = mode === 'edit' ? 'reminders.edit_open' : 'nav.reminders';
+  const backBtn = await makeActionButton(ctx, { label: t('buttons.reminders_back'), action: backAction, data: reminderId ? { reminderId } : undefined });
+  kb.text(backBtn.text, backBtn.callback_data);
+  await renderScreen(ctx, { titleKey: t('screens.reminders.new_title'), bodyLines: [t('screens.reminders.schedule_type_prompt')], inlineKeyboard: kb });
+};
+
+const renderReminderAttachmentPrompt = async (
+  ctx: Context,
+  params: { mode: ReminderFlow['mode']; reminderId?: string }
+): Promise<void> => {
+  const doneBtn = await makeActionButton(ctx, { label: t('buttons.notes_attach_done'), action: 'reminders.attach_done', data: params.reminderId ? { reminderId: params.reminderId } : undefined });
+  const backAction = params.mode === 'edit' ? 'reminders.edit_open' : 'reminders.schedule_back';
+  const backData = params.mode === 'edit' ? { reminderId: params.reminderId } : undefined;
+  const backBtn = await makeActionButton(ctx, { label: t('buttons.reminders_back'), action: backAction, data: backData });
+  const kb = new InlineKeyboard().text(doneBtn.text, doneBtn.callback_data).row().text(backBtn.text, backBtn.callback_data);
+  await renderScreen(ctx, { titleKey: t('screens.reminders.new_title'), bodyLines: [t('screens.reminders.attachments_prompt')], inlineKeyboard: kb });
+};
+
+const renderReminderIntervalPrompt = async (ctx: Context): Promise<void> => {
+  await renderScreen(ctx, { titleKey: t('screens.reminders.new_title'), bodyLines: [t('screens.reminders.interval_prompt')] });
+};
+
+const renderReminderDailyTimePrompt = async (ctx: Context): Promise<void> => {
+  await renderScreen(ctx, { titleKey: t('screens.reminders.new_title'), bodyLines: [t('screens.reminders.daily_time_prompt')] });
+};
+
+const renderReminderWeeklyDayPrompt = async (
+  ctx: Context,
+  params: { mode: ReminderFlow['mode']; reminderId?: string }
+): Promise<void> => {
+  const kb = new InlineKeyboard();
+  for (let idx = 0; idx < WEEKDAY_KEYS.length; idx += 1) {
+    const label = getWeekdayLabel(idx);
+    const btn = await makeActionButton(ctx, { label, action: 'reminders.weekly_day_set', data: { day: idx, mode: params.mode, reminderId: params.reminderId } });
+    kb.text(btn.text, btn.callback_data).row();
+  }
+  const backAction = params.mode === 'edit' ? 'reminders.edit_open' : 'reminders.schedule_back';
+  const backData = params.mode === 'edit' ? { reminderId: params.reminderId } : undefined;
+  const backBtn = await makeActionButton(ctx, { label: t('buttons.reminders_back'), action: backAction, data: backData });
+  kb.text(backBtn.text, backBtn.callback_data);
+  await renderScreen(ctx, { titleKey: t('screens.reminders.new_title'), bodyLines: [t('screens.reminders.weekly_day_prompt')], inlineKeyboard: kb });
+};
+
+const renderReminderMonthlyDayPrompt = async (ctx: Context): Promise<void> => {
+  await renderScreen(ctx, { titleKey: t('screens.reminders.new_title'), bodyLines: [t('screens.reminders.monthly_day_prompt')] });
+};
+
+const renderReminderYearlyMonthPrompt = async (ctx: Context): Promise<void> => {
+  const kb = new InlineKeyboard();
+  for (let month = 1; month <= 12; month += 1) {
+    const btn = await makeActionButton(ctx, { label: month.toString(), action: 'reminders.yearly_month_set', data: { month } });
+    kb.text(btn.text, btn.callback_data);
+    if (month % 4 === 0) kb.row();
+  }
+  await renderScreen(ctx, { titleKey: t('screens.reminders.new_title'), bodyLines: [t('screens.reminders.yearly_month_prompt')], inlineKeyboard: kb });
+};
+
+const getReminderIdFromFlow = (flow: ReminderFlow): string | undefined => {
+  return 'reminderId' in flow ? flow.reminderId : undefined;
+};
+
+const persistReminderSchedule = async (ctx: Context, flow: ReminderFlow): Promise<void> => {
+  const { user } = await ensureUserAndSettings(ctx);
+  const timezone = user.timezone ?? config.defaultTimezone;
+  const scheduleType = flow.draft.scheduleType ?? 'once';
+  let onceAt: Date | null = null;
+  if (scheduleType === 'once') {
+    if (!flow.draft.localDate || !flow.draft.localTime) {
+      await renderReminders(ctx);
+      return;
+    }
+    onceAt = new Date(localDateTimeToUtcIso(flow.draft.localDate, flow.draft.localTime, timezone));
+  }
+
+  const schedule = {
+    scheduleType,
+    timezone,
+    onceAt,
+    intervalMinutes: flow.draft.intervalMinutes ?? null,
+    atTime: flow.draft.atTime ?? flow.draft.localTime ?? null,
+    byWeekday: flow.draft.byWeekday ?? null,
+    byMonthday: flow.draft.byMonthday ?? null,
+    byMonth: flow.draft.byMonth ?? null
+  };
+
+  const nextRunAt = computeNextRunAt(schedule, new Date());
+
+  if (flow.mode === 'create') {
+    const title = flow.draft.title && flow.draft.title.trim().length > 0 ? flow.draft.title : t('screens.reminders.untitled');
+    const reminder = await createReminder({
+      userId: user.id,
+      title,
+      description: flow.draft.description ?? null,
+      schedule,
+      nextRunAt
+    });
+    for (const attachment of flow.draft.attachments ?? []) {
+      await createReminderAttachment({
+        reminderId: reminder.id,
+        archiveChatId: attachment.archiveChatId,
+        archiveMessageId: attachment.archiveMessageId,
+        kind: attachment.kind,
+        caption: attachment.caption ?? null,
+        fileUniqueId: attachment.fileUniqueId ?? null,
+        mimeType: attachment.mimeType ?? null
+      });
+    }
+    clearReminderFlow(String(ctx.from?.id ?? ''));
+    const local = nextRunAt ? formatInstantToLocal(nextRunAt.toISOString(), timezone) : null;
+    await renderScreen(ctx, {
+      titleKey: t('screens.reminders.new_title'),
+      bodyLines: [t('screens.reminders.new_created', { local_date: local?.date ?? '-', local_time: local?.time ?? '-' })]
+    });
+    await renderReminders(ctx);
+    return;
+  }
+
+  if (flow.mode === 'edit') {
+    await updateReminder(flow.reminderId, { schedule, nextRunAt });
+    clearReminderFlow(String(ctx.from?.id ?? ''));
+    await renderReminderDetails(ctx, flow.reminderId, t('screens.reminders.edit_saved'));
+  }
 };
 
 const renderReminderDateSelect = async (
@@ -2285,8 +2758,9 @@ const renderReminderDateSelect = async (
     .row()
     .text(weekendDayBtn.text, weekendDayBtn.callback_data);
 
-  const backAction = params.mode === 'edit' ? 'reminders.edit_open' : 'nav.reminders';
-  const backBtn = await makeActionButton(ctx, { label: t('buttons.reminders_back'), action: backAction, data: params.reminderId ? { reminderId: params.reminderId } : undefined });
+  const backAction = params.mode === 'edit' ? 'reminders.edit_open' : 'reminders.schedule_back';
+  const backData = params.mode === 'edit' ? { reminderId: params.reminderId } : undefined;
+  const backBtn = await makeActionButton(ctx, { label: t('buttons.reminders_back'), action: backAction, data: backData });
   kb.row().text(backBtn.text, backBtn.callback_data);
 
   await renderScreen(ctx, {
@@ -4065,8 +4539,8 @@ bot.callbackQuery(/^[A-Za-z0-9_-]{8,12}$/, async (ctx) => {
       case 'reminders.new': {
         if (!ctx.from) break;
         const stateKey = String(ctx.from.id);
-        setReminderFlow(stateKey, { mode: 'create', step: 'date_select', draft: {} });
-        await renderReminderDateSelect(ctx, { mode: 'create' });
+        setReminderFlow(stateKey, { mode: 'create', step: 'title', draft: {} });
+        await renderReminderTitlePrompt(ctx, 'create');
         return;
       }
       case 'nav.rewards':
@@ -4106,7 +4580,15 @@ bot.callbackQuery(/^[A-Za-z0-9_-]{8,12}$/, async (ctx) => {
         return;
       }
       case 'notes.cancel_add': {
-        if (ctx.from) clearNotesFlow(String(ctx.from.id));
+        if (ctx.from) {
+          const stateKey = String(ctx.from.id);
+          const session = userStates.get(stateKey)?.noteUploadSession;
+          if (session?.timer) {
+            clearTimeout(session.timer);
+          }
+          setNoteUploadSession(stateKey, undefined);
+          clearNotesFlow(stateKey);
+        }
         await renderNotesToday(ctx);
         return;
       }
@@ -4296,8 +4778,7 @@ bot.callbackQuery(/^[A-Za-z0-9_-]{8,12}$/, async (ctx) => {
           await renderNotesToday(ctx);
           return;
         }
-        clearNotesFlow(String(ctx.from.id));
-        await renderNoteDetails(ctx, noteId, {
+        await startNoteCaptionFlow(ctx, noteId, {
           noteDate: data?.noteDate,
           page: Number.isFinite(Number(data?.page)) ? Number(data?.page) : 0,
           historyPage: Number.isFinite(Number(data?.historyPage)) ? Number(data?.historyPage) : 0
@@ -4308,13 +4789,79 @@ bot.callbackQuery(/^[A-Za-z0-9_-]{8,12}$/, async (ctx) => {
         if (!ctx.from) break;
         const data = (payload as { data?: { noteId?: string; noteDate?: string; page?: number; historyPage?: number } }).data;
         const noteId = data?.noteId;
-        clearNotesFlow(String(ctx.from.id));
+        const stateKey = String(ctx.from.id);
+        const session = userStates.get(stateKey)?.noteUploadSession;
+        if (session?.timer) {
+          clearTimeout(session.timer);
+        }
+        setNoteUploadSession(stateKey, undefined);
+        clearNotesFlow(stateKey);
         if (!noteId) {
           await renderNotesToday(ctx);
           return;
         }
         await renderNoteDetails(ctx, noteId, {
           noteDate: data?.noteDate,
+          page: Number.isFinite(Number(data?.page)) ? Number(data?.page) : 0,
+          historyPage: Number.isFinite(Number(data?.historyPage)) ? Number(data?.historyPage) : 0
+        });
+        return;
+      }
+      case 'notes.attachments_save': {
+        const data = (payload as { data?: { noteId?: string; noteDate?: string; page?: number; historyPage?: number } }).data;
+        if (!data?.noteId) {
+          await renderNotesHistory(ctx);
+          return;
+        }
+        await startNoteCaptionFlow(ctx, data.noteId, {
+          noteDate: data?.noteDate,
+          page: Number.isFinite(Number(data?.page)) ? Number(data?.page) : 0,
+          historyPage: Number.isFinite(Number(data?.historyPage)) ? Number(data?.historyPage) : 0
+        });
+        return;
+      }
+      case 'notes.attachments_continue': {
+        if (!ctx.from) break;
+        const data = (payload as { data?: { noteId?: string; noteDate?: string; page?: number; historyPage?: number } }).data;
+        if (!data?.noteId) {
+          await renderNotesHistory(ctx);
+          return;
+        }
+        const stateKey = String(ctx.from.id);
+        const session = userStates.get(stateKey)?.noteUploadSession;
+        if (session?.timer) {
+          clearTimeout(session.timer);
+        }
+        const timer = setTimeout(async () => {
+          const latestState = userStates.get(stateKey);
+          const currentSession = latestState?.noteUploadSession;
+          if (!currentSession || currentSession.noteId !== data.noteId) return;
+          const idleFor = Date.now() - currentSession.lastReceivedAt;
+          if (idleFor < NOTE_UPLOAD_IDLE_MS) return;
+          const saveBtn = await makeActionButton(ctx, {
+            label: t('buttons.notes_save_now'),
+            action: 'notes.attachments_save',
+            data: { noteId: data.noteId, noteDate: data.noteDate, page: data.page, historyPage: data.historyPage }
+          });
+          const continueBtn = await makeActionButton(ctx, {
+            label: t('buttons.notes_continue'),
+            action: 'notes.attachments_continue',
+            data: { noteId: data.noteId, noteDate: data.noteDate, page: data.page, historyPage: data.historyPage }
+          });
+          const kb = new InlineKeyboard().text(saveBtn.text, saveBtn.callback_data).row().text(continueBtn.text, continueBtn.callback_data);
+          setNoteUploadSession(stateKey, { ...currentSession, prompted: true });
+          await renderScreen(ctx, { titleKey: t('screens.notes.title'), bodyLines: [t('screens.notes.attachments_idle_prompt')], inlineKeyboard: kb });
+        }, NOTE_UPLOAD_IDLE_MS);
+        setNoteUploadSession(stateKey, {
+          ...(session ?? { noteId: data.noteId, pendingKinds: {}, lastReceivedAt: Date.now() }),
+          noteId: data.noteId,
+          viewContext: { noteDate: data.noteDate, page: data.page, historyPage: data.historyPage },
+          lastReceivedAt: Date.now(),
+          prompted: false,
+          timer
+        });
+        await renderNoteAttachmentPrompt(ctx, data.noteId, {
+          noteDate: data.noteDate,
           page: Number.isFinite(Number(data?.page)) ? Number(data?.page) : 0,
           historyPage: Number.isFinite(Number(data?.historyPage)) ? Number(data?.historyPage) : 0
         });
@@ -4337,21 +4884,86 @@ bot.callbackQuery(/^[A-Za-z0-9_-]{8,12}$/, async (ctx) => {
         await renderNoteAttachmentPrompt(ctx, noteId, viewContext);
         return;
       }
-      case 'notes.voice_skip': {
+      case 'notes.caption_all': {
         if (!ctx.from) break;
         const data = (payload as { data?: { noteId?: string; noteDate?: string; page?: number; historyPage?: number } }).data;
-        const noteId = data?.noteId;
-        if (!noteId) {
-          await renderNotesToday(ctx);
+        if (!data?.noteId) {
+          await renderNotesHistory(ctx);
           return;
         }
-        const viewContext = {
-          noteDate: data?.noteDate,
-          page: Number.isFinite(Number(data?.page)) ? Number(data?.page) : 0,
-          historyPage: Number.isFinite(Number(data?.historyPage)) ? Number(data?.historyPage) : 0
-        };
-        setNotesFlow(String(ctx.from.id), { mode: 'create', step: 'attachments', noteId, viewContext });
-        await renderNoteAttachmentPrompt(ctx, noteId, viewContext);
+        setNotesFlow(String(ctx.from.id), {
+          mode: 'create',
+          step: 'caption_all',
+          noteId: data.noteId,
+          viewContext: { noteDate: data.noteDate, page: data.page, historyPage: data.historyPage }
+        });
+        const skipBtn = await makeActionButton(ctx, {
+          label: t('buttons.notes_skip'),
+          action: 'notes.caption_skip',
+          data: { noteId: data.noteId, noteDate: data.noteDate, page: data.page, historyPage: data.historyPage }
+        });
+        const kb = new InlineKeyboard().text(skipBtn.text, skipBtn.callback_data);
+        await renderScreen(ctx, { titleKey: t('screens.notes.title'), bodyLines: [t('screens.notes.caption_all_prompt')], inlineKeyboard: kb });
+        return;
+      }
+      case 'notes.caption_by_category': {
+        if (!ctx.from) break;
+        const data = (payload as { data?: { noteId?: string; noteDate?: string; page?: number; historyPage?: number } }).data;
+        if (!data?.noteId) {
+          await renderNotesHistory(ctx);
+          return;
+        }
+        const pending = await listPendingNoteAttachments({ noteId: data.noteId });
+        const categories = buildNoteCaptionCategories(pending);
+        if (categories.length === 0) {
+          await clearPendingNoteAttachments({ noteId: data.noteId });
+          clearNotesFlow(String(ctx.from.id));
+          await renderNoteDetails(ctx, data.noteId, { noteDate: data.noteDate, page: data.page, historyPage: data.historyPage });
+          return;
+        }
+        await promptNoteCaptionCategory(
+          ctx,
+          data.noteId,
+          categories[0],
+          { noteDate: data.noteDate, page: data.page, historyPage: data.historyPage },
+          categories
+        );
+        return;
+      }
+      case 'notes.caption_skip': {
+        if (!ctx.from) break;
+        const data = (payload as { data?: { noteId?: string; noteDate?: string; page?: number; historyPage?: number } }).data;
+        if (!data?.noteId) {
+          await renderNotesHistory(ctx);
+          return;
+        }
+        await clearPendingNoteAttachments({ noteId: data.noteId });
+        clearNotesFlow(String(ctx.from.id));
+        await renderNoteDetails(ctx, data.noteId, { noteDate: data.noteDate, page: data.page, historyPage: data.historyPage });
+        return;
+      }
+      case 'notes.caption_category_skip': {
+        if (!ctx.from) break;
+        const stateKey = String(ctx.from.id);
+        const flow = userStates.get(stateKey)?.notesFlow;
+        if (!flow || flow.mode !== 'create' || flow.step !== 'caption_category' || !flow.currentCategory) {
+          await renderNotesHistory(ctx);
+          return;
+        }
+        const category = flow.currentCategory;
+        const kinds =
+          category === 'files'
+            ? (['document', 'audio'] as NoteAttachmentKind[])
+            : ([category] as NoteAttachmentKind[]);
+        await updateNoteAttachmentsCaptionByKinds({ noteId: flow.noteId, kinds, caption: null });
+        const remaining = (flow.captionCategories ?? []).filter((item) => item !== category);
+        if (remaining.length === 0) {
+          await clearPendingNoteAttachments({ noteId: flow.noteId });
+          clearNotesFlow(stateKey);
+          await renderNoteDetails(ctx, flow.noteId, flow.viewContext ?? {});
+          return;
+        }
+        await promptNoteCaptionCategory(ctx, flow.noteId, remaining[0], flow.viewContext ?? {}, remaining);
         return;
       }
       case 'notes.attachments_kind': {
@@ -4395,17 +5007,15 @@ bot.callbackQuery(/^[A-Za-z0-9_-]{8,12}$/, async (ctx) => {
             return;
           }
           const archiveChatId = attachment.archive_chat_id ?? getNotesArchiveChatId();
-          if (archiveChatId && attachment.archive_message_id) {
-            await ctx.api.copyMessage(targetId, archiveChatId, attachment.archive_message_id);
-          } else if (attachment.kind === 'photo') {
-            await ctx.api.sendPhoto(targetId, attachment.file_id, { caption: attachment.caption ?? undefined });
-          } else if (attachment.kind === 'video') {
-            await ctx.api.sendVideo(targetId, attachment.file_id, { caption: attachment.caption ?? undefined });
-          } else if (attachment.kind === 'voice') {
-            await ctx.api.sendVoice(targetId, attachment.file_id, { caption: attachment.caption ?? undefined });
-          } else {
-            await ctx.api.sendDocument(targetId, attachment.file_id, { caption: attachment.caption ?? undefined });
+          if (!archiveChatId || !attachment.archive_message_id) {
+            await renderScreen(ctx, { titleKey: t('screens.notes.detail_title_label'), bodyLines: [t('screens.notes.attachment_send_failed')] });
+            return;
           }
+          await deliverCopyToUser(ctx, {
+            userChatId: targetId,
+            archiveChatId,
+            archiveMessageId: attachment.archive_message_id
+          });
         } catch (error) {
           console.error({ scope: 'notes', event: 'attachment_send_failed', error, attachmentId: attachment.id });
           await renderScreen(ctx, { titleKey: t('screens.notes.detail_title_label'), bodyLines: [t('screens.notes.attachment_send_failed')] });
@@ -4419,6 +5029,50 @@ bot.callbackQuery(/^[A-Za-z0-9_-]{8,12}$/, async (ctx) => {
           page: Number.isFinite(page) ? page : 0,
           historyPage: Number.isFinite(historyPage) ? historyPage : 0
         });
+        return;
+      }
+      case 'notes.view_all': {
+        const data = (payload as { data?: { noteId?: string; noteDate?: string; page?: number; historyPage?: number } }).data;
+        if (!data?.noteId) {
+          await renderNotesHistory(ctx);
+          return;
+        }
+        const note = await getNoteById({ userId: user.id, id: data.noteId });
+        if (!note) {
+          await renderNotesHistory(ctx);
+          return;
+        }
+        const attachments = await listNoteAttachments({ noteId: note.id });
+        const local = formatInstantToLocal(note.created_at, user.timezone ?? config.defaultTimezone);
+        const title = note.title && note.title.trim().length > 0 ? note.title : t('screens.notes.untitled');
+        await renderScreen(ctx, {
+          titleKey: t('screens.notes.detail_title_label'),
+          bodyLines: [
+            t('screens.notes.detail_date', { date: note.note_date }),
+            t('screens.notes.detail_time', { time: local.time }),
+            t('screens.notes.detail_title', { title })
+          ]
+        });
+        const targetId = ctx.chat?.id ?? ctx.from?.id ?? user.telegram_id;
+        if (!targetId) {
+          await renderNoteDetails(ctx, note.id, { noteDate: data.noteDate, page: data.page, historyPage: data.historyPage });
+          return;
+        }
+        for (const attachment of attachments) {
+          const archiveChatId = attachment.archive_chat_id ?? getNotesArchiveChatId();
+          if (!archiveChatId || !attachment.archive_message_id) {
+            continue;
+          }
+          if (attachment.caption && attachment.caption.trim().length > 0) {
+            await ctx.api.sendMessage(targetId, attachment.caption);
+          }
+          await deliverCopyToUser(ctx, {
+            userChatId: targetId,
+            archiveChatId,
+            archiveMessageId: attachment.archive_message_id
+          });
+        }
+        await renderNoteDetails(ctx, note.id, { noteDate: data.noteDate, page: data.page, historyPage: data.historyPage });
         return;
       }
       case 'settings.language': {
@@ -4501,7 +5155,7 @@ bot.callbackQuery(/^[A-Za-z0-9_-]{8,12}$/, async (ctx) => {
         }
         const stateKey = String(ctx.from.id);
         setReminderFlow(stateKey, { mode: 'edit', reminderId, step: 'title', draft: {} });
-        await renderScreen(ctx, { titleKey: t('screens.reminders.details_title'), bodyLines: [t('screens.reminders.edit_title_prompt')] });
+        await renderReminderTitlePrompt(ctx, 'edit', reminderId);
         return;
       }
       case 'reminders.edit_detail': {
@@ -4512,8 +5166,8 @@ bot.callbackQuery(/^[A-Za-z0-9_-]{8,12}$/, async (ctx) => {
           return;
         }
         const stateKey = String(ctx.from.id);
-        setReminderFlow(stateKey, { mode: 'edit', reminderId, step: 'detail', draft: {} });
-        await renderScreen(ctx, { titleKey: t('screens.reminders.details_title'), bodyLines: [t('screens.reminders.edit_detail_prompt')] });
+        setReminderFlow(stateKey, { mode: 'edit', reminderId, step: 'description', draft: {} });
+        await renderReminderDescriptionPrompt(ctx, 'edit', reminderId);
         return;
       }
       case 'reminders.edit_date': {
@@ -4524,8 +5178,8 @@ bot.callbackQuery(/^[A-Za-z0-9_-]{8,12}$/, async (ctx) => {
           return;
         }
         const stateKey = String(ctx.from.id);
-        setReminderFlow(stateKey, { mode: 'edit', reminderId, step: 'date_select', draft: {} });
-        await renderReminderDateSelect(ctx, { mode: 'edit', reminderId });
+        setReminderFlow(stateKey, { mode: 'edit', reminderId, step: 'schedule_type', draft: {} });
+        await renderReminderScheduleTypePrompt(ctx, 'edit', reminderId);
         return;
       }
       case 'reminders.edit_time': {
@@ -4535,42 +5189,195 @@ bot.callbackQuery(/^[A-Za-z0-9_-]{8,12}$/, async (ctx) => {
           await renderReminders(ctx);
           return;
         }
-        const { user } = await ensureUserAndSettings(ctx);
-        const reminder = await getReminderById(reminderId);
-        if (!reminder || reminder.user_id !== user.id) {
+        const stateKey = String(ctx.from.id);
+        setReminderFlow(stateKey, { mode: 'edit', reminderId, step: 'schedule_type', draft: {} });
+        await renderReminderScheduleTypePrompt(ctx, 'edit', reminderId);
+        return;
+      }
+      case 'reminders.edit_schedule': {
+        if (!ctx.from) break;
+        const reminderId = (payload as { data?: { reminderId?: string } }).data?.reminderId;
+        if (!reminderId) {
           await renderReminders(ctx);
           return;
         }
-        const timezone = user.timezone ?? config.defaultTimezone;
-        const local = reminder.next_run_at_utc ? formatInstantToLocal(reminder.next_run_at_utc, timezone) : null;
-        const baseDraft: ReminderDraft = {
-          localDate: local?.date,
-          localTime: local?.time,
-          timeMinutes: local?.time ? parseTimeHhmm(local.time)?.minutes : undefined
-        };
-        const draft = ensureReminderTimeDraft(baseDraft, timezone);
         const stateKey = String(ctx.from.id);
-        setReminderFlow(stateKey, { mode: 'edit', reminderId, step: 'time', draft });
-        await renderReminderTimePicker(ctx, { mode: 'edit', reminderId, draft });
+        setReminderFlow(stateKey, { mode: 'edit', reminderId, step: 'schedule_type', draft: {} });
+        await renderReminderScheduleTypePrompt(ctx, 'edit', reminderId);
+        return;
+      }
+      case 'reminders.attach': {
+        if (!ctx.from) break;
+        const reminderId = (payload as { data?: { reminderId?: string } }).data?.reminderId;
+        const stateKey = String(ctx.from.id);
+        const existing = userStates.get(stateKey)?.reminderFlow;
+        const nextDraft = existing?.draft ?? {};
+        if (reminderId) {
+          setReminderFlow(stateKey, { mode: 'edit', reminderId, step: 'attachments', draft: nextDraft });
+          await renderReminderAttachmentPrompt(ctx, { mode: 'edit', reminderId });
+        } else {
+          setReminderFlow(stateKey, { mode: 'create', step: 'attachments', draft: nextDraft });
+          await renderReminderAttachmentPrompt(ctx, { mode: 'create' });
+        }
+        return;
+      }
+      case 'reminders.attach_done': {
+        if (!ctx.from) break;
+        const stateKey = String(ctx.from.id);
+        const flow = userStates.get(stateKey)?.reminderFlow;
+        if (!flow) {
+          await renderReminders(ctx);
+          return;
+        }
+        if (flow.mode === 'edit' && flow.reminderId) {
+          clearReminderFlow(stateKey);
+          await renderReminderDetails(ctx, flow.reminderId);
+          return;
+        }
+        setReminderFlow(stateKey, { mode: 'create', step: 'schedule_type', draft: flow.draft });
+        await renderReminderScheduleTypePrompt(ctx, 'create');
+        return;
+      }
+      case 'reminders.skip_title': {
+        if (!ctx.from) break;
+        const stateKey = String(ctx.from.id);
+        const flow = userStates.get(stateKey)?.reminderFlow;
+        if (!flow || flow.mode !== 'create') {
+          await renderReminders(ctx);
+          return;
+        }
+        setReminderFlow(stateKey, { mode: 'create', step: 'description', draft: { ...flow.draft, title: null } });
+        await renderReminderDescriptionPrompt(ctx, 'create');
+        return;
+      }
+      case 'reminders.skip_description': {
+        if (!ctx.from) break;
+        const stateKey = String(ctx.from.id);
+        const flow = userStates.get(stateKey)?.reminderFlow;
+        if (!flow) {
+          await renderReminders(ctx);
+          return;
+        }
+        setReminderFlow(stateKey, { ...flow, step: 'schedule_type', draft: { ...flow.draft, description: null } });
+        await renderReminderScheduleTypePrompt(ctx, flow.mode, getReminderIdFromFlow(flow));
+        return;
+      }
+      case 'reminders.schedule_type': {
+        if (!ctx.from) break;
+        const data = (payload as { data?: { scheduleType?: ReminderScheduleType; mode?: ReminderFlow['mode']; reminderId?: string } }).data;
+        const scheduleType = data?.scheduleType;
+        if (!scheduleType) {
+          await renderReminders(ctx);
+          return;
+        }
+        const stateKey = String(ctx.from.id);
+        const flow = userStates.get(stateKey)?.reminderFlow;
+        if (!flow) {
+          await renderReminders(ctx);
+          return;
+        }
+        const nextDraft: ReminderDraft = { ...flow.draft, scheduleType };
+        if (scheduleType === 'once') {
+          setReminderFlow(stateKey, { ...flow, step: 'date_select', draft: nextDraft });
+          await renderReminderDateSelect(ctx, { mode: flow.mode, reminderId: getReminderIdFromFlow(flow) });
+          return;
+        }
+        if (scheduleType === 'hourly') {
+          setReminderFlow(stateKey, { ...flow, step: 'interval_minutes', draft: nextDraft });
+          await renderReminderIntervalPrompt(ctx);
+          return;
+        }
+        if (scheduleType === 'daily') {
+          setReminderFlow(stateKey, { ...flow, step: 'daily_time', draft: nextDraft });
+          await renderReminderDailyTimePrompt(ctx);
+          return;
+        }
+        if (scheduleType === 'weekly') {
+          setReminderFlow(stateKey, { ...flow, step: 'weekly_day', draft: nextDraft });
+          await renderReminderWeeklyDayPrompt(ctx, { mode: flow.mode, reminderId: getReminderIdFromFlow(flow) });
+          return;
+        }
+        if (scheduleType === 'monthly') {
+          setReminderFlow(stateKey, { ...flow, step: 'monthly_day', draft: nextDraft });
+          await renderReminderMonthlyDayPrompt(ctx);
+          return;
+        }
+        if (scheduleType === 'yearly') {
+          setReminderFlow(stateKey, { ...flow, step: 'yearly_month', draft: nextDraft });
+          await renderReminderYearlyMonthPrompt(ctx);
+          return;
+        }
+        return;
+      }
+      case 'reminders.schedule_back': {
+        if (!ctx.from) break;
+        const stateKey = String(ctx.from.id);
+        const flow = userStates.get(stateKey)?.reminderFlow;
+        if (!flow) {
+          await renderReminders(ctx);
+          return;
+        }
+        await renderReminderScheduleTypePrompt(ctx, flow.mode, getReminderIdFromFlow(flow));
+        return;
+      }
+      case 'reminders.weekly_day_set': {
+        if (!ctx.from) break;
+        const data = (payload as { data?: { day?: number } }).data;
+        const day = data?.day;
+        if (day === undefined) {
+          await renderReminders(ctx);
+          return;
+        }
+        const stateKey = String(ctx.from.id);
+        const flow = userStates.get(stateKey)?.reminderFlow;
+        if (!flow) {
+          await renderReminders(ctx);
+          return;
+        }
+        setReminderFlow(stateKey, { ...flow, step: 'weekly_time', draft: { ...flow.draft, byWeekday: day } });
+        await renderReminderDailyTimePrompt(ctx);
+        return;
+      }
+      case 'reminders.yearly_month_set': {
+        if (!ctx.from) break;
+        const data = (payload as { data?: { month?: number } }).data;
+        const month = data?.month;
+        if (!month) {
+          await renderReminders(ctx);
+          return;
+        }
+        const stateKey = String(ctx.from.id);
+        const flow = userStates.get(stateKey)?.reminderFlow;
+        if (!flow) {
+          await renderReminders(ctx);
+          return;
+        }
+        setReminderFlow(stateKey, { ...flow, step: 'yearly_day', draft: { ...flow.draft, byMonth: month } });
+        await renderReminderMonthlyDayPrompt(ctx);
         return;
       }
       case 'reminders.date_select': {
         if (!ctx.from) break;
         const data = (payload as { data?: { choice?: string; mode?: ReminderFlow['mode']; reminderId?: string } }).data;
         const choice = (data?.choice ?? 'today') as ReminderDraft['dateSource'];
-        const mode = data?.mode ?? 'create';
-        const reminderId = data?.reminderId;
-        if (mode === 'edit' && !reminderId) {
+        const stateKey = String(ctx.from.id);
+        const flow = userStates.get(stateKey)?.reminderFlow;
+        if (!flow) {
           await renderReminders(ctx);
           return;
         }
-        const stateKey = String(ctx.from.id);
+        const mode = flow.mode;
+        const reminderId = getReminderIdFromFlow(flow);
         const { user, settings } = await ensureUserAndSettings(ctx);
         const timezone = user.timezone ?? config.defaultTimezone;
 
         if (choice === 'custom') {
           const local = formatLocalTime(timezone);
-          const draft: ReminderDraft = { ...buildCustomDateDraft(local.date, 'gregorian'), dateSource: 'custom' };
+          const draft: ReminderDraft = {
+            ...buildCustomDateDraft(local.date, 'gregorian'),
+            dateSource: 'custom',
+            scheduleType: flow.draft.scheduleType ?? 'once'
+          };
           if (mode === 'edit') {
             const editReminderId = reminderId as string;
             setReminderFlow(stateKey, { mode: 'edit', reminderId: editReminderId, step: 'custom_date', draft });
@@ -4590,7 +5397,7 @@ bot.callbackQuery(/^[A-Za-z0-9_-]{8,12}$/, async (ctx) => {
           localDate = getNextWeekendLocalDate(timezone, weekendDay);
         }
 
-        const baseDraft: ReminderDraft = { localDate, dateSource: choice };
+        const baseDraft: ReminderDraft = { localDate, dateSource: choice, scheduleType: flow.draft.scheduleType ?? 'once' };
         const draft = ensureReminderTimeDraft(baseDraft, timezone);
         if (mode === 'edit') {
           const editReminderId = reminderId as string;
@@ -4660,7 +5467,7 @@ bot.callbackQuery(/^[A-Za-z0-9_-]{8,12}$/, async (ctx) => {
         if (data.field === 'day') draft.day = Math.max(1, (draft.day ?? 1) + data.delta);
         const nextDraft = clampCustomDateDraft(draft);
         setReminderFlow(stateKey, { ...flow, draft: nextDraft, step: 'custom_date' });
-        await renderReminderCustomDatePicker(ctx, { mode: flow.mode, reminderId: flow.mode === 'edit' ? flow.reminderId : undefined, draft: nextDraft });
+        await renderReminderCustomDatePicker(ctx, { mode: flow.mode, reminderId: getReminderIdFromFlow(flow), draft: nextDraft });
         return;
       }
       case 'reminders.date_toggle': {
@@ -4684,7 +5491,7 @@ bot.callbackQuery(/^[A-Za-z0-9_-]{8,12}$/, async (ctx) => {
           }
         }
         setReminderFlow(stateKey, { ...flow, draft: nextDraft, step: 'custom_date' });
-        await renderReminderCustomDatePicker(ctx, { mode: flow.mode, reminderId: flow.mode === 'edit' ? flow.reminderId : undefined, draft: nextDraft });
+        await renderReminderCustomDatePicker(ctx, { mode: flow.mode, reminderId: getReminderIdFromFlow(flow), draft: nextDraft });
         return;
       }
       case 'reminders.date_manual': {
@@ -4716,7 +5523,7 @@ bot.callbackQuery(/^[A-Za-z0-9_-]{8,12}$/, async (ctx) => {
         }
         const nextDraft = ensureReminderTimeDraft({ ...draft, localDate, dateSource: 'custom' }, (await ensureUserAndSettings(ctx)).user.timezone ?? config.defaultTimezone);
         setReminderFlow(stateKey, { ...flow, step: 'time', draft: nextDraft });
-        await renderReminderTimePicker(ctx, { mode: flow.mode, reminderId: flow.mode === 'edit' ? flow.reminderId : undefined, draft: nextDraft });
+        await renderReminderTimePicker(ctx, { mode: flow.mode, reminderId: getReminderIdFromFlow(flow), draft: nextDraft });
         return;
       }
       case 'reminders.time_adjust': {
@@ -4736,7 +5543,7 @@ bot.callbackQuery(/^[A-Za-z0-9_-]{8,12}$/, async (ctx) => {
         const nextMinutes = normalizeTimeMinutes((draft.timeMinutes ?? 0) + delta);
         const nextDraft = { ...draft, timeMinutes: nextMinutes, localTime: minutesToHhmm(nextMinutes) };
         setReminderFlow(stateKey, { ...flow, draft: nextDraft, step: 'time' });
-        await renderReminderTimePicker(ctx, { mode: flow.mode, reminderId: flow.mode === 'edit' ? flow.reminderId : undefined, draft: nextDraft });
+        await renderReminderTimePicker(ctx, { mode: flow.mode, reminderId: getReminderIdFromFlow(flow), draft: nextDraft });
         return;
       }
       case 'reminders.time_preset': {
@@ -4755,7 +5562,7 @@ bot.callbackQuery(/^[A-Za-z0-9_-]{8,12}$/, async (ctx) => {
         }
         const nextDraft = { ...flow.draft, timeMinutes: parsed.minutes, localTime: parsed.hhmm };
         setReminderFlow(stateKey, { ...flow, draft: nextDraft, step: 'time' });
-        await renderReminderTimePicker(ctx, { mode: flow.mode, reminderId: flow.mode === 'edit' ? flow.reminderId : undefined, draft: nextDraft });
+        await renderReminderTimePicker(ctx, { mode: flow.mode, reminderId: getReminderIdFromFlow(flow), draft: nextDraft });
         return;
       }
       case 'reminders.time_manual': {
@@ -4783,20 +5590,7 @@ bot.callbackQuery(/^[A-Za-z0-9_-]{8,12}$/, async (ctx) => {
           await renderReminders(ctx);
           return;
         }
-        if (flow.mode === 'create') {
-          setReminderFlow(stateKey, { ...flow, step: 'title' });
-          await renderScreen(ctx, { titleKey: t('screens.reminders.new_title'), bodyLines: [t('screens.reminders.new_enter_title')] });
-          return;
-        }
-        if (flow.mode === 'edit') {
-          const { user } = await ensureUserAndSettings(ctx);
-          const timezone = user.timezone ?? config.defaultTimezone;
-          const nextRunUtcIso = localDateTimeToUtcIso(draft.localDate, draft.localTime, timezone);
-          await updateReminder(flow.reminderId, { nextRunAtUtc: new Date(nextRunUtcIso) });
-          clearReminderFlow(stateKey);
-          await renderReminderDetails(ctx, flow.reminderId, t('screens.reminders.edit_saved'));
-          return;
-        }
+        await persistReminderSchedule(ctx, flow);
         return;
       }
       case 'reminders.toggle': {
@@ -4850,6 +5644,7 @@ bot.callbackQuery(/^[A-Za-z0-9_-]{8,12}$/, async (ctx) => {
           const { user } = await ensureUserAndSettings(ctx);
           const reminder = await getReminderById(reminderId);
           if (reminder && reminder.user_id === user.id) {
+            await sendReminderArchiveDeleteLabels(ctx, reminderId);
             await deleteReminder(reminderId);
           }
         }
@@ -6977,11 +7772,38 @@ bot.on('message:text', async (ctx: Context) => {
         await renderNoteAttachmentPrompt(ctx, flow.noteId, flow.viewContext ?? {});
         return;
       }
-      if (flow.step === 'voice_description') {
+      if (flow.step === 'caption_choice') {
+        await renderNoteCaptionChoice(ctx, flow.noteId, flow.viewContext ?? {}, flow.captionCategories ?? []);
+        return;
+      }
+      if (flow.step === 'caption_all') {
         const caption = text.length > 0 ? rawText : null;
-        await updateNoteAttachmentCaption({ attachmentId: flow.attachmentId, caption });
-        setNotesFlow(stateKey, { mode: 'create', step: 'attachments', noteId: flow.noteId, viewContext: flow.viewContext });
-        await renderNoteAttachmentPrompt(ctx, flow.noteId, flow.viewContext ?? {});
+        await updateNoteAttachmentsCaptionByKinds({
+          noteId: flow.noteId,
+          kinds: [...NOTE_ATTACHMENT_KINDS],
+          caption
+        });
+        await clearPendingNoteAttachments({ noteId: flow.noteId });
+        clearNotesFlow(stateKey);
+        await renderNoteDetails(ctx, flow.noteId, flow.viewContext ?? {});
+        return;
+      }
+      if (flow.step === 'caption_category' && flow.currentCategory) {
+        const caption = text.length > 0 ? rawText : null;
+        const category = flow.currentCategory;
+        const kinds =
+          category === 'files'
+            ? (['document', 'audio'] as NoteAttachmentKind[])
+            : ([category] as NoteAttachmentKind[]);
+        await updateNoteAttachmentsCaptionByKinds({ noteId: flow.noteId, kinds, caption });
+        const remaining = (flow.captionCategories ?? []).filter((item) => item !== category);
+        if (remaining.length === 0) {
+          await clearPendingNoteAttachments({ noteId: flow.noteId });
+          clearNotesFlow(stateKey);
+          await renderNoteDetails(ctx, flow.noteId, flow.viewContext ?? {});
+          return;
+        }
+        await promptNoteCaptionCategory(ctx, flow.noteId, remaining[0], flow.viewContext ?? {}, remaining);
         return;
       }
     }
@@ -7068,9 +7890,9 @@ bot.on('message:text', async (ctx: Context) => {
         }
         const greg = jalaliToGregorian(year, month, day);
         const localDate = `${greg.year}-${String(greg.month).padStart(2, '0')}-${String(greg.day).padStart(2, '0')}`;
-        const nextDraft = ensureReminderTimeDraft({ ...flow.draft, localDate, dateSource: 'custom' }, timezone);
+        const nextDraft = ensureReminderTimeDraft({ ...flow.draft, localDate, dateSource: 'custom', scheduleType: flow.draft.scheduleType ?? 'once' }, timezone);
         setReminderFlow(stateKey, { ...flow, step: 'time', draft: nextDraft });
-        await renderReminderTimePicker(ctx, { mode: flow.mode, reminderId: flow.mode === 'edit' ? flow.reminderId : undefined, draft: nextDraft });
+        await renderReminderTimePicker(ctx, { mode: flow.mode, reminderId: getReminderIdFromFlow(flow), draft: nextDraft });
         return;
       }
 
@@ -7081,9 +7903,9 @@ bot.on('message:text', async (ctx: Context) => {
         });
         return;
       }
-      const nextDraft = ensureReminderTimeDraft({ ...flow.draft, localDate: raw, dateSource: 'custom' }, timezone);
+      const nextDraft = ensureReminderTimeDraft({ ...flow.draft, localDate: raw, dateSource: 'custom', scheduleType: flow.draft.scheduleType ?? 'once' }, timezone);
       setReminderFlow(stateKey, { ...flow, step: 'time', draft: nextDraft });
-      await renderReminderTimePicker(ctx, { mode: flow.mode, reminderId: flow.mode === 'edit' ? flow.reminderId : undefined, draft: nextDraft });
+      await renderReminderTimePicker(ctx, { mode: flow.mode, reminderId: getReminderIdFromFlow(flow), draft: nextDraft });
       return;
     }
 
@@ -7097,32 +7919,15 @@ bot.on('message:text', async (ctx: Context) => {
         return;
       }
       const nextDraft = { ...flow.draft, localTime: parsed.hhmm, timeMinutes: parsed.minutes };
-      if (flow.mode === 'create') {
-        setReminderFlow(stateKey, { ...flow, step: 'title', draft: nextDraft });
-        await renderScreen(ctx, { titleKey: t('screens.reminders.new_title'), bodyLines: [t('screens.reminders.new_enter_title')] });
-        return;
-      }
-      if (flow.mode === 'edit') {
-        if (!nextDraft.localDate) {
-          await renderReminders(ctx);
-          return;
-        }
-        const nextRunUtcIso = localDateTimeToUtcIso(nextDraft.localDate, nextDraft.localTime ?? parsed.hhmm, timezone);
-        await updateReminder(flow.reminderId, { nextRunAtUtc: new Date(nextRunUtcIso) });
-        clearReminderFlow(stateKey);
-        await renderReminderDetails(ctx, flow.reminderId, t('screens.reminders.edit_saved'));
-        return;
-      }
+      setReminderFlow(stateKey, { ...flow, draft: nextDraft });
+      await persistReminderSchedule(ctx, { ...flow, draft: nextDraft });
       return;
     }
 
     if (flow.step === 'title') {
       const title = raw;
       if (!title) {
-        await renderScreen(ctx, {
-          titleKey: t('screens.reminders.new_title'),
-          bodyLines: [t('screens.reminders.new_enter_title')]
-        });
+        await renderReminderTitlePrompt(ctx, flow.mode, getReminderIdFromFlow(flow));
         return;
       }
 
@@ -7132,45 +7937,70 @@ bot.on('message:text', async (ctx: Context) => {
         await renderReminderDetails(ctx, flow.reminderId, t('screens.reminders.edit_saved'));
         return;
       }
-
-      const localDate = flow.draft.localDate;
-      const localTime = flow.draft.localTime;
-      if (!localDate || !localTime) {
-        clearReminderFlow(stateKey);
-        await renderReminders(ctx);
-        return;
-      }
-
-      const nextRunUtcIso = localDateTimeToUtcIso(localDate, localTime, timezone);
-      const nextRunUtc = new Date(nextRunUtcIso);
-
-      await createReminder(user.id, title, null, nextRunUtc);
-      clearReminderFlow(stateKey);
-
-      const local = formatInstantToLocal(nextRunUtcIso, timezone);
-
-      await renderScreen(ctx, {
-        titleKey: t('screens.reminders.new_title'),
-        bodyLines: [
-          t('screens.reminders.new_created', {
-            local_date: local.date,
-            local_time: local.time
-          })
-        ]
-      });
-
-      await renderReminders(ctx);
+      setReminderFlow(stateKey, { ...flow, step: 'description', draft: { ...flow.draft, title } });
+      await renderReminderDescriptionPrompt(ctx, flow.mode, getReminderIdFromFlow(flow));
       return;
     }
 
-    if (flow.step === 'detail') {
-      const detail = raw === '-' || raw.length === 0 ? null : raw;
+    if (flow.step === 'description') {
+      const description = raw === '-' || raw.length === 0 ? null : raw;
       if (flow.mode === 'edit') {
-        await updateReminder(flow.reminderId, { detail });
+        await updateReminder(flow.reminderId, { description });
         clearReminderFlow(stateKey);
         await renderReminderDetails(ctx, flow.reminderId, t('screens.reminders.edit_saved'));
         return;
       }
+      setReminderFlow(stateKey, { ...flow, step: 'schedule_type', draft: { ...flow.draft, description } });
+      await renderReminderScheduleTypePrompt(ctx, flow.mode);
+      return;
+    }
+
+    if (flow.step === 'interval_minutes') {
+      const interval = Number(raw);
+      if (!Number.isInteger(interval) || interval <= 0) {
+        await renderScreen(ctx, { titleKey: t('screens.reminders.new_title'), bodyLines: [t('screens.reminders.interval_invalid')] });
+        return;
+      }
+      const nextDraft = { ...flow.draft, intervalMinutes: interval };
+      setReminderFlow(stateKey, { ...flow, draft: nextDraft });
+      await persistReminderSchedule(ctx, { ...flow, draft: nextDraft });
+      return;
+    }
+
+    if (flow.step === 'daily_time' || flow.step === 'weekly_time' || flow.step === 'monthly_time' || flow.step === 'yearly_time') {
+      const parsed = parseTimeHhmm(raw);
+      if (!parsed) {
+        await renderScreen(ctx, { titleKey: t('screens.reminders.new_title'), bodyLines: [t('screens.reminders.new_invalid_time')] });
+        return;
+      }
+      const nextDraft = { ...flow.draft, atTime: parsed.hhmm };
+      setReminderFlow(stateKey, { ...flow, draft: nextDraft });
+      await persistReminderSchedule(ctx, { ...flow, draft: nextDraft });
+      return;
+    }
+
+    if (flow.step === 'monthly_day') {
+      const day = Number(raw);
+      if (!Number.isInteger(day) || day < 1 || day > 31) {
+        await renderScreen(ctx, { titleKey: t('screens.reminders.new_title'), bodyLines: [t('screens.reminders.monthly_day_invalid')] });
+        return;
+      }
+      const nextDraft = { ...flow.draft, byMonthday: day };
+      setReminderFlow(stateKey, { ...flow, step: 'monthly_time', draft: nextDraft });
+      await renderReminderDailyTimePrompt(ctx);
+      return;
+    }
+
+    if (flow.step === 'yearly_day') {
+      const day = Number(raw);
+      if (!Number.isInteger(day) || day < 1 || day > 31) {
+        await renderScreen(ctx, { titleKey: t('screens.reminders.new_title'), bodyLines: [t('screens.reminders.monthly_day_invalid')] });
+        return;
+      }
+      const nextDraft = { ...flow.draft, byMonthday: day };
+      setReminderFlow(stateKey, { ...flow, step: 'yearly_time', draft: nextDraft });
+      await renderReminderDailyTimePrompt(ctx);
+      return;
     }
   }
 
@@ -7677,6 +8507,11 @@ bot.on('message:photo', async (ctx: Context) => {
     fileUniqueId: photo.file_unique_id,
     caption: ctx.message?.caption ?? null
   });
+  await handleReminderAttachmentMessage(ctx, {
+    kind: 'photo',
+    fileUniqueId: photo.file_unique_id,
+    caption: ctx.message?.caption ?? null
+  });
 });
 
 bot.on('message:video', async (ctx: Context) => {
@@ -7688,6 +8523,12 @@ bot.on('message:video', async (ctx: Context) => {
     fileUniqueId: video.file_unique_id,
     caption: ctx.message?.caption ?? null
   });
+  await handleReminderAttachmentMessage(ctx, {
+    kind: 'video',
+    fileUniqueId: video.file_unique_id,
+    caption: ctx.message?.caption ?? null,
+    mimeType: video.mime_type ?? null
+  });
 });
 
 bot.on('message:voice', async (ctx: Context) => {
@@ -7697,6 +8538,11 @@ bot.on('message:voice', async (ctx: Context) => {
     kind: 'voice',
     fileId: voice.file_id,
     fileUniqueId: voice.file_unique_id
+  });
+  await handleReminderAttachmentMessage(ctx, {
+    kind: 'voice',
+    fileUniqueId: voice.file_unique_id,
+    mimeType: voice.mime_type ?? null
   });
 });
 
@@ -7708,6 +8554,43 @@ bot.on('message:document', async (ctx: Context) => {
     fileId: document.file_id,
     fileUniqueId: document.file_unique_id,
     caption: ctx.message?.caption ?? null
+  });
+  await handleReminderAttachmentMessage(ctx, {
+    kind: 'document',
+    fileUniqueId: document.file_unique_id,
+    caption: ctx.message?.caption ?? null,
+    mimeType: document.mime_type ?? null
+  });
+});
+
+bot.on('message:audio', async (ctx: Context) => {
+  const audio = ctx.message?.audio;
+  if (!audio) return;
+  await handleNoteAttachmentMessage(ctx, {
+    kind: 'audio',
+    fileId: audio.file_id,
+    fileUniqueId: audio.file_unique_id,
+    caption: ctx.message?.caption ?? null
+  });
+  await handleReminderAttachmentMessage(ctx, {
+    kind: 'audio',
+    fileUniqueId: audio.file_unique_id,
+    caption: ctx.message?.caption ?? null,
+    mimeType: audio.mime_type ?? null
+  });
+});
+
+bot.on('message:video_note', async (ctx: Context) => {
+  const videoNote = ctx.message?.video_note;
+  if (!videoNote) return;
+  await handleNoteAttachmentMessage(ctx, {
+    kind: 'video_note',
+    fileId: videoNote.file_id,
+    fileUniqueId: videoNote.file_unique_id
+  });
+  await handleReminderAttachmentMessage(ctx, {
+    kind: 'video_note',
+    fileUniqueId: videoNote.file_unique_id
   });
 });
 
