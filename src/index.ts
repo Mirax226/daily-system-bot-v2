@@ -10,13 +10,17 @@ import { logError } from './utils/logger';
 const server = Fastify({ logger: true });
 
 server.setErrorHandler((err, request, reply) => {
-  logError('HTTP request error', {
-    method: request.method,
-    url: request.url,
-    statusCode: reply.statusCode,
-    error: err.message,
-    stack: err.stack
-  });
+  try {
+    logError('HTTP request error', {
+      method: request.method,
+      url: request.url,
+      statusCode: reply.statusCode,
+      error: err.message,
+      stack: err.stack
+    });
+  } catch (logErrorErr) {
+    request.log.error({ err: logErrorErr }, 'Failed to log HTTP request error.');
+  }
 
   reply.status(500).send({ ok: false });
 });
@@ -30,7 +34,11 @@ process.on('uncaughtException', (err) => {
 });
 
 server.get('/health', async () => {
-  return { status: 'ok' };
+  return { ok: true };
+});
+
+server.get('/', async () => {
+  return { ok: true, service: 'daily-system', ts: new Date().toISOString() };
 });
 
 server.post('/webhook', webhookCallback(bot, 'fastify'));
@@ -67,34 +75,50 @@ const isTelegramTooManyRequests = (error: unknown): boolean => {
 
 const start = async () => {
   try {
-    await runMigrations();
-    getSupabaseClient();
+    const port = Number(process.env.PORT ?? config.server.port);
+    const host = '0.0.0.0';
+    await server.listen({ host, port });
+    server.log.info({ host, port }, 'HTTP server is listening');
 
-    await server.listen({ host: config.server.host, port: config.server.port });
-    server.log.info(`Server listening on ${config.server.host}:${config.server.port}`);
+    void (async () => {
+      try {
+        server.log.info('Init start');
+        await runMigrations();
+        getSupabaseClient();
 
-    if (config.telegram.devPolling) {
-      server.log.info('Running in DEV_POLLING mode: starting bot via long polling.');
-      await bot.start();
-    } else {
-      if (config.telegram.webhookUrl) {
-        try {
-          await bot.api.setWebhook(config.telegram.webhookUrl);
-          server.log.info('Webhook registered with Telegram.');
-        } catch (error) {
-          if (isTelegramTooManyRequests(error)) {
-            server.log.warn(
-              { err: error, scope: 'telegram/webhook' },
-              'Telegram setWebhook rate limited.'
-            );
-          } else {
-            server.log.error({ err: error }, 'Failed to set Telegram webhook.');
+        if (config.telegram.devPolling) {
+          server.log.info('Running in DEV_POLLING mode: starting bot via long polling.');
+          await bot.start();
+        } else {
+          if (config.telegram.webhookUrl) {
+            try {
+              await bot.api.setWebhook(config.telegram.webhookUrl);
+              server.log.info('Webhook registered with Telegram.');
+            } catch (error) {
+              if (isTelegramTooManyRequests(error)) {
+                server.log.warn(
+                  { err: error, scope: 'telegram/webhook' },
+                  'Telegram setWebhook rate limited.'
+                );
+              } else {
+                server.log.error(
+                  { err: error },
+                  'Failed to set Telegram webhook (non-fatal).'
+                );
+              }
+            }
           }
-        }
-      }
 
-      server.log.info('Running in WEBHOOK mode: NOT calling bot.start(), updates come via /webhook.');
-    }
+          server.log.info(
+            'Running in WEBHOOK mode: NOT calling bot.start(), updates come via /webhook.'
+          );
+        }
+
+        server.log.info('Init done');
+      } catch (err) {
+        server.log.error({ err }, 'Init failed (service stays up, health still OK).');
+      }
+    })();
   } catch (error) {
     server.log.error({ err: error }, 'Failed to start application.');
     process.exit(1);
