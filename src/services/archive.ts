@@ -1,5 +1,5 @@
 import type { Context } from 'grammy';
-import type { Api, ParseMode } from 'grammy';
+import type { Api } from 'grammy';
 import { randomUUID } from 'crypto';
 
 import { config } from '../config';
@@ -10,6 +10,7 @@ export type ArchiveFeature = 'notes' | 'reminders';
 export type ArchiveEntityType = 'reminder' | 'note';
 export type ArchiveKind = 'desc' | 'attachment';
 export type ArchiveMediaType = 'text' | 'photo' | 'video' | 'voice' | 'video_note' | 'document' | 'audio';
+type ParseMode = 'HTML' | 'Markdown' | 'MarkdownV2';
 
 const ARCHIVE_TABLE = 'archive_messages';
 const ARCHIVE_COPY_DELAY_MS = 200;
