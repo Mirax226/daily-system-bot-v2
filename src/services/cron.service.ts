@@ -3,7 +3,7 @@ import crypto from 'node:crypto';
 import os from 'node:os';
 
 import { config } from '../config';
-import { getSupabaseClient } from '../db';
+import { getSupabaseClient, queryDb } from '../db';
 import type { ReminderRow } from '../types/supabase';
 import {
   computeNextRunAt as computeNextRunAtFromSchedule,
@@ -45,23 +45,14 @@ type ReminderDeliveryRow = {
   ok: boolean;
 };
 
-const getCronLockTimeoutSeconds = (): number => {
-  const base = Math.ceil(config.cron.maxRuntimeMs / 1000);
-  return Math.max(60, base * 3);
-};
-
 const buildDeliveryKey = (reminder: ReminderRow, occurrenceIso: string): string => {
   return `${reminder.id}:${occurrenceIso}`;
-};
-
-const shouldRequireCronSecret = (): boolean => {
-  return process.env.NODE_ENV === 'production';
 };
 
 const isCronAuthorized = (key: string | undefined): boolean => {
   const secret = config.cron.secret?.trim();
   if (!secret) {
-    return !shouldRequireCronSecret();
+    return true;
   }
   return key === secret;
 };
@@ -102,22 +93,37 @@ const updateCronRunFinish = async (tickId: string, data: Record<string, unknown>
 };
 
 const claimDueReminders = async (tickId: string, batchLimit: number): Promise<ReminderRow[]> => {
-  const client = getSupabaseClient();
-  const lockTimeoutSeconds = getCronLockTimeoutSeconds();
   const lockedBy = `${os.hostname()}:${process.pid}`;
 
-  const { data, error } = await client.rpc('claim_due_reminders', {
-    batch_limit: batchLimit,
-    tick_id: tickId,
-    locked_by: lockedBy,
-    lock_timeout_seconds: lockTimeoutSeconds
-  });
+  const { rows } = await queryDb<ReminderRow>(
+    `
+    with cte as (
+      select id
+      from public.reminders
+      where enabled = true
+        and status = 'active'
+        and is_active = true
+        and deleted_at is null
+        and coalesce(next_run_at_utc, next_run_at) is not null
+        and coalesce(next_run_at_utc, next_run_at) <= now()
+      order by coalesce(next_run_at_utc, next_run_at) asc
+      limit $1
+      for update skip locked
+    )
+    update public.reminders r
+    set status = 'processing',
+        locked_at = now(),
+        locked_by = $2,
+        last_tick_id = $3,
+        updated_at = now()
+    from cte
+    where r.id = cte.id
+    returning r.*
+    `,
+    [batchLimit, lockedBy, tickId]
+  );
 
-  if (error) {
-    throw new Error(`Failed to claim reminders: ${error.message}`);
-  }
-
-  return (data as ReminderRow[]) ?? [];
+  return rows ?? [];
 };
 
 const findExistingDelivery = async (
@@ -169,18 +175,21 @@ const upsertDelivery = async (params: {
 
 const releaseUnprocessedReminders = async (reminderIds: string[]): Promise<void> => {
   if (reminderIds.length === 0) return;
-  const client = getSupabaseClient();
-  const { error } = await client
-    .from(REMINDERS_TABLE)
-    .update({
-      status: 'active',
-      locked_at: null,
-      locked_by: null
-    })
-    .in('id', reminderIds);
-
-  if (error) {
-    logWarn('Failed to release unprocessed reminders', { scope: 'cron', error: error.message });
+  try {
+    await queryDb(
+      `
+      update public.reminders
+      set status = 'active',
+          locked_at = null,
+          locked_by = null,
+          updated_at = now()
+      where id = any($1::uuid[])
+      `,
+      [reminderIds]
+    );
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    logWarn('Failed to release unprocessed reminders', { scope: 'cron', error: message });
   }
 };
 
@@ -189,38 +198,46 @@ const updateReminderAfterSuccess = async (
   sentAtUtc: Date,
   tickId: string
 ): Promise<void> => {
-  const client = getSupabaseClient();
   const isOnce = reminder.schedule_type === 'once';
   const nextRunAt = isOnce ? null : computeNextRunAt(reminder, sentAtUtc);
+  const status = isOnce ? 'done' : 'active';
+  const enabled = !isOnce;
+  const isActive = !isOnce;
 
-  const { error } = await client
-    .from(REMINDERS_TABLE)
-    .update({
-      last_sent_at_utc: asIsoString(sentAtUtc),
-      next_run_at_utc: nextRunAt ? asIsoString(nextRunAt) : null,
-      next_run_at: nextRunAt ? asIsoString(nextRunAt) : null,
-      status: isOnce ? 'sent' : 'active',
-      is_active: !isOnce,
-      send_attempt_count: 0,
-      last_error: null,
-      retry_after_utc: null,
-      locked_at: null,
-      locked_by: null,
-      last_tick_id: tickId,
-      updated_at: asIsoString(new Date())
-    })
-    .eq('id', reminder.id);
-
-  if (error) {
-    throw new Error(`Failed to update reminder after success: ${error.message}`);
-  }
+  await queryDb(
+    `
+    update public.reminders
+    set last_sent_at_utc = $2,
+        next_run_at_utc = $3,
+        next_run_at = $3,
+        status = $4,
+        enabled = $5,
+        is_active = $6,
+        send_attempt_count = 0,
+        last_error = null,
+        retry_after_utc = null,
+        locked_at = null,
+        locked_by = null,
+        last_tick_id = $7,
+        updated_at = now()
+    where id = $1
+    `,
+    [
+      reminder.id,
+      asIsoString(sentAtUtc),
+      nextRunAt ? asIsoString(nextRunAt) : null,
+      status,
+      enabled,
+      isActive,
+      tickId
+    ]
+  );
 };
 
 const updateReminderAfterFailure = async (
   reminder: ReminderRow,
   params: { tickId: string; errorMessage: string; retryAfterSeconds?: number | null }
 ): Promise<void> => {
-  const client = getSupabaseClient();
   const attemptCount = (reminder.send_attempt_count ?? 0) + 1;
   const fallbackRetrySeconds = Math.min(2 ** attemptCount * 30, 3600);
   const retryAfterSeconds =
@@ -230,23 +247,21 @@ const updateReminderAfterFailure = async (
 
   const retryAfterUtc = new Date(Date.now() + retryAfterSeconds * 1000);
 
-  const { error } = await client
-    .from(REMINDERS_TABLE)
-    .update({
-      status: 'failed',
-      send_attempt_count: attemptCount,
-      last_error: params.errorMessage,
-      retry_after_utc: asIsoString(retryAfterUtc),
-      locked_at: null,
-      locked_by: null,
-      last_tick_id: params.tickId,
-      updated_at: asIsoString(new Date())
-    })
-    .eq('id', reminder.id);
-
-  if (error) {
-    throw new Error(`Failed to update reminder after failure: ${error.message}`);
-  }
+  await queryDb(
+    `
+    update public.reminders
+    set status = 'failed',
+        send_attempt_count = $2,
+        last_error = $3,
+        retry_after_utc = $4,
+        locked_at = null,
+        locked_by = null,
+        last_tick_id = $5,
+        updated_at = now()
+    where id = $1
+    `,
+    [reminder.id, attemptCount, params.errorMessage, asIsoString(retryAfterUtc), params.tickId]
+  );
 };
 
 const sendReminderWithAttachments = async (reminder: ReminderRow, botClient: Bot): Promise<void> => {
@@ -271,10 +286,6 @@ export const runCronTick = async (params: {
   key?: string;
   botClient: Bot;
 }): Promise<CronTickResult> => {
-  if (shouldRequireCronSecret() && !config.cron.secret) {
-    logWarn('CRON_SECRET missing in production', { scope: 'cron' });
-  }
-
   if (!isCronAuthorized(params.key)) {
     return {
       ok: false,

@@ -54,7 +54,14 @@ server.get(
     if (!result.ok && result.error === 'unauthorized') {
       reply.code(401);
     }
-    return result;
+    const processed = 'sent' in result ? result.sent : 0;
+    const errors = 'failed' in result ? result.failed : 0;
+    return {
+      ok: result.ok,
+      processed,
+      errors,
+      time: new Date().toISOString()
+    };
   }
 );
 
