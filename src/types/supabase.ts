@@ -37,6 +37,59 @@ export type Database = {
         };
         Relationships: [];
       };
+      archive_messages: {
+        Row: {
+          id: string;
+          user_id: string;
+          entity_type: string;
+          entity_id: string;
+          kind: string;
+          media_type: string;
+          archive_chat_id: number;
+          archive_message_id: number;
+          chunk_index: number;
+          group_key: string;
+          caption: string | null;
+          created_at: string;
+        };
+        Insert: {
+          id?: string;
+          user_id: string;
+          entity_type: string;
+          entity_id: string;
+          kind: string;
+          media_type: string;
+          archive_chat_id: number;
+          archive_message_id: number;
+          chunk_index?: number;
+          group_key?: string;
+          caption?: string | null;
+          created_at?: string;
+        };
+        Update: {
+          id?: string;
+          user_id?: string;
+          entity_type?: string;
+          entity_id?: string;
+          kind?: string;
+          media_type?: string;
+          archive_chat_id?: number;
+          archive_message_id?: number;
+          chunk_index?: number;
+          group_key?: string;
+          caption?: string | null;
+          created_at?: string;
+        };
+        Relationships: [
+          {
+            foreignKeyName: 'archive_messages_user_id_fkey';
+            columns: ['user_id'];
+            isOneToOne: false;
+            referencedRelation: 'users';
+            referencedColumns: ['id'];
+          }
+        ];
+      };
       reminders: {
         Row: {
           id: string;
@@ -44,6 +97,7 @@ export type Database = {
           title: string;
           detail: string | null;
           description: string | null;
+          desc_group_key: string | null;
           schedule_type: string;
           timezone: string;
           next_run_at: string | null;
@@ -68,6 +122,7 @@ export type Database = {
           title: string;
           detail?: string | null;
           description?: string | null;
+          desc_group_key?: string | null;
           schedule_type?: string;
           timezone?: string;
           next_run_at?: string | null;
@@ -92,6 +147,7 @@ export type Database = {
           title?: string;
           detail?: string | null;
           description?: string | null;
+          desc_group_key?: string | null;
           schedule_type?: string;
           timezone?: string;
           next_run_at?: string | null;
@@ -119,6 +175,7 @@ export type Database = {
           note_date: string;
           title: string | null;
           body: string;
+          content_group_key: string | null;
           created_at: string;
           deleted_at: string | null;
           deleted_by: string | null;
@@ -129,6 +186,7 @@ export type Database = {
           note_date: string;
           title?: string | null;
           body: string;
+          content_group_key?: string | null;
           created_at?: string;
           deleted_at?: string | null;
           deleted_by?: string | null;
@@ -139,6 +197,7 @@ export type Database = {
           note_date?: string;
           title?: string | null;
           body?: string;
+          content_group_key?: string | null;
           created_at?: string;
           deleted_at?: string | null;
           deleted_by?: string | null;
@@ -900,6 +959,8 @@ export type Database = {
 export type ReminderRow = Database['public']['Tables']['reminders']['Row'];
 export type NoteRow = Database['public']['Tables']['notes']['Row'];
 export type NoteAttachmentRow = Database['public']['Tables']['note_attachments']['Row'];
+export type ArchiveMessageRow = Database['public']['Tables']['archive_messages']['Row'];
+export type RpcFunctionName = keyof Database['public']['Functions'];
 export type DailyReportRow = Database['public']['Tables']['daily_reports']['Row'];
 export type DailyReportInsert = Database['public']['Tables']['daily_reports']['Insert'];
 export type DailyReportUpdate = Database['public']['Tables']['daily_reports']['Update'];
