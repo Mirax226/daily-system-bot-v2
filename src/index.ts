@@ -74,15 +74,19 @@ const isTelegramTooManyRequests = (error: unknown): boolean => {
   return false;
 };
 
-const logArchiveStatus = (logger: typeof server.log, feature: 'notes' | 'reminders'): void => {
-  const enabled = feature === 'notes' ? config.notes.archive.enabled : config.reminders.archive.enabled;
-  const chatId = resolveArchiveChatId(feature);
+const logArchiveStatus = (logger: typeof server.log): void => {
+  const enabled = config.archive.enabled;
+  const chatId = resolveArchiveChatId();
   const looksValid = Boolean(chatId && /^-100\\d+$/.test(String(chatId)));
   if (enabled && looksValid) {
-    logger.info(`[${feature}] archive channel configured`);
-  } else {
-    logger.info(`[${feature}] archive channel missing`);
+    logger.info('[archive] channel configured');
+    return;
   }
+  if (enabled) {
+    logger.warn('[archive] channel missing, archive fallback enabled');
+    return;
+  }
+  logger.info('[archive] disabled');
 };
 
 const start = async () => {
@@ -97,8 +101,7 @@ const start = async () => {
         server.log.info('Init start');
         await runMigrations();
         getSupabaseClient();
-        logArchiveStatus(server.log, 'notes');
-        logArchiveStatus(server.log, 'reminders');
+        logArchiveStatus(server.log);
 
         if (config.telegram.devPolling) {
           server.log.info('Running in DEV_POLLING mode: starting bot via long polling.');

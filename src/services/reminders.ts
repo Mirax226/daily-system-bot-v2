@@ -1,6 +1,7 @@
 import type { Bot } from 'grammy';
 
 import { config } from '../config';
+import { listArchiveMessagesByGroupKey } from './archive';
 import { getSupabaseClient } from '../db';
 import type { Database, ReminderRow } from '../types/supabase';
 import { formatInstantToLocal, localDateTimeToUtcIso } from '../utils/time';
@@ -8,6 +9,9 @@ import { formatInstantToLocal, localDateTimeToUtcIso } from '../utils/time';
 const REMINDERS_TABLE = 'reminders';
 const REMINDERS_ATTACHMENTS_TABLE = 'reminders_attachments';
 const USERS_TABLE = 'users';
+const ARCHIVE_COPY_DELAY_MS = 200;
+
+const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
 
 export type ReminderScheduleType = 'once' | 'hourly' | 'daily' | 'weekly' | 'monthly' | 'yearly';
 
@@ -212,18 +216,20 @@ export async function createReminder(
     userId: string;
     title: string;
     description?: string | null;
+    descGroupKey?: string | null;
     schedule: ReminderSchedule;
     nextRunAt: Date | null;
   },
   client = getSupabaseClient()
 ): Promise<ReminderRow> {
-  const { userId, title, description, schedule, nextRunAt } = params;
+  const { userId, title, description, descGroupKey, schedule, nextRunAt } = params;
   const { data, error } = await client
     .from(REMINDERS_TABLE)
     .insert({
       user_id: userId,
       title,
       description: description ?? null,
+      desc_group_key: descGroupKey ?? null,
       schedule_type: schedule.scheduleType,
       timezone: schedule.timezone,
       next_run_at: nextRunAt ? toIsoString(nextRunAt) : null,
@@ -252,6 +258,7 @@ export async function updateReminder(
   patch: {
     title?: string;
     description?: string | null;
+    descGroupKey?: string | null;
     schedule?: ReminderSchedule;
     nextRunAt?: Date | null;
     isActive?: boolean;
@@ -267,6 +274,7 @@ export async function updateReminder(
   if (typeof patch.description !== 'undefined') updates.description = patch.description;
   if (typeof patch.isActive !== 'undefined') updates.is_active = patch.isActive;
   if (typeof patch.enabled !== 'undefined') updates.enabled = patch.enabled;
+  if (typeof patch.descGroupKey !== 'undefined') updates.desc_group_key = patch.descGroupKey;
   if ('nextRunAt' in patch) updates.next_run_at = patch.nextRunAt ? toIsoString(patch.nextRunAt) : null;
   if (patch.schedule) {
     updates.schedule_type = patch.schedule.scheduleType;
@@ -406,13 +414,26 @@ export async function sendReminderMessage(params: { reminder: ReminderRow; user:
 
   const title = reminder.title?.trim().length ? reminder.title : 'Reminder';
   const lines = [`⏰ Reminder: ${title}`];
-  if (reminder.description) {
-    lines.push('', reminder.description);
+  const description = reminder.description?.trim() ?? '';
+  if (description.length > 0) {
+    const preview = description.length > 600 ? `${description.slice(0, 600)}…` : description;
+    lines.push('', preview);
+    if (reminder.desc_group_key || description.length > 600) {
+      lines.push('📄 Full description archived');
+    }
   }
 
   const text = lines.join('\n');
 
   await botClient.api.sendMessage(chatId, text);
+
+  if (reminder.desc_group_key) {
+    const entries = await listArchiveMessagesByGroupKey({ groupKey: reminder.desc_group_key });
+    for (const entry of entries) {
+      await botClient.api.copyMessage(chatId, entry.archive_chat_id, entry.archive_message_id);
+      await sleep(ARCHIVE_COPY_DELAY_MS);
+    }
+  }
 }
 
 export async function processDueReminders(

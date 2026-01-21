@@ -1,5 +1,5 @@
 import { getSupabaseClient } from '../db';
-import type { NoteAttachmentRow, NoteRow } from '../types/supabase';
+import type { NoteAttachmentRow, NoteRow, RpcFunctionName } from '../types/supabase';
 
 const NOTES_TABLE = 'notes';
 
@@ -8,17 +8,18 @@ type DateSummary = { date: string; count: number };
 const ATTACHMENTS_TABLE = 'note_attachments';
 
 export async function createNote(
-  params: { userId: string; noteDate: string; title?: string | null; body: string },
+  params: { userId: string; noteDate: string; title?: string | null; body: string; contentGroupKey?: string | null },
   client = getSupabaseClient()
 ): Promise<NoteRow> {
-  const { userId, noteDate, title, body } = params;
+  const { userId, noteDate, title, body, contentGroupKey } = params;
   const { data, error } = await client
     .from(NOTES_TABLE)
     .insert({
       user_id: userId,
       note_date: noteDate,
       title: title ?? null,
-      body
+      body,
+      content_group_key: contentGroupKey ?? null
     })
     .select('*')
     .single();
@@ -55,7 +56,8 @@ export async function listNoteDateSummaries(
   client = getSupabaseClient()
 ): Promise<{ entries: DateSummary[]; hasMore: boolean }> {
   const { userId, limit, offset } = params;
-  const { data, error } = await client.rpc('list_note_date_counts', { p_user_id: userId, p_limit: limit + 1, p_offset: offset });
+  const rpcName: RpcFunctionName = 'list_note_date_counts';
+  const { data, error } = await client.rpc(rpcName, { p_user_id: userId, p_limit: limit + 1, p_offset: offset });
 
   if (error) {
     throw new Error(`Failed to list note dates: ${error.message}`);
@@ -125,13 +127,14 @@ export async function deleteNote(
 }
 
 export async function updateNote(
-  params: { userId: string; id: string; title?: string | null; body?: string },
+  params: { userId: string; id: string; title?: string | null; body?: string; contentGroupKey?: string | null },
   client = getSupabaseClient()
 ): Promise<NoteRow> {
-  const { userId, id, title, body } = params;
+  const { userId, id, title, body, contentGroupKey } = params;
   const update: Partial<NoteRow> = {};
   if (title !== undefined) update.title = title;
   if (body !== undefined) update.body = body;
+  if (contentGroupKey !== undefined) update.content_group_key = contentGroupKey;
 
   const { data, error } = await client
     .from(NOTES_TABLE)

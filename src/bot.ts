@@ -96,7 +96,17 @@ import {
 } from './services/reminders';
 import type { ReminderScheduleType } from './services/reminders';
 
-import { archiveCopyFromUser, deliverCopyToUser, resolveArchiveChatId } from './services/archive';
+import {
+  archiveCopyFromUser,
+  archiveIncomingMediaMessage,
+  archiveLongText,
+  copyArchiveEntityToUser,
+  copyArchiveGroupToUser,
+  deliverCopyToUser,
+  recordArchiveMessage,
+  resolveArchiveChatId,
+  type ArchiveMediaType
+} from './services/archive';
 
 import { makeActionButton } from './ui/inlineButtons';
 import { renderScreen, ensureUserAndSettings as renderEnsureUserAndSettings, updateCachedUserContext } from './ui/renderScreen';
@@ -200,6 +210,7 @@ type ReminderDraft = {
   timeMinutes?: number;
   title?: string | null;
   description?: string | null;
+  descGroupKey?: string | null;
   scheduleType?: ReminderScheduleType;
   intervalMinutes?: number;
   atTime?: string;
@@ -207,6 +218,7 @@ type ReminderDraft = {
   byMonthday?: number;
   byMonth?: number;
   attachments?: ReminderAttachmentDraft[];
+  descriptionAttachments?: ArchiveAttachmentDraft[];
   dateMode?: 'gregorian' | 'jalali';
   year?: number;
   month?: number;
@@ -1566,7 +1578,11 @@ const NOTE_ATTACHMENT_KINDS = ['photo', 'video', 'voice', 'document', 'video_not
 type NoteAttachmentKind = (typeof NOTE_ATTACHMENT_KINDS)[number];
 type NoteCaptionCategory = 'photo' | 'video' | 'voice' | 'video_note' | 'files';
 const NOTE_UPLOAD_IDLE_MS = 5000;
+const NOTE_DETAIL_MAX_CHARS = 1500;
+const NOTE_BODY_PREVIEW_LIMIT = 600;
 type ReminderAttachmentKind = NoteAttachmentKind;
+const REMINDER_DETAIL_MAX_CHARS = 1500;
+const REMINDER_DESC_PREVIEW_LIMIT = 600;
 type ReminderAttachmentDraft = {
   archiveChatId: number;
   archiveMessageId: number;
@@ -1574,6 +1590,12 @@ type ReminderAttachmentDraft = {
   caption?: string | null;
   fileUniqueId?: string | null;
   mimeType?: string | null;
+};
+type ArchiveAttachmentDraft = {
+  archiveChatId: number;
+  archiveMessageId: number;
+  mediaType: ArchiveMediaType;
+  caption?: string | null;
 };
 
 const getNoteAttachmentKindEmoji = (kind: NoteAttachmentKind): string => {
@@ -1634,6 +1656,16 @@ const sendReminderArchiveDeleteLabels = async (ctx: Context, reminderId: string)
   }
 };
 
+const buildPreviewText = (text: string, limit: number): string => {
+  if (text.length <= limit) return text;
+  return `${text.slice(0, limit)}…`;
+};
+
+const buildArchivedPreview = (text: string, limit: number, showNotice: boolean, notice: string): string => {
+  const preview = buildPreviewText(text, limit);
+  return showNotice ? `${preview}\n${notice}` : preview;
+};
+
 const renderNotesToday = async (ctx: Context): Promise<void> => {
   const { user } = await ensureUserAndSettings(ctx);
   const { date } = getTodayDateString(user.timezone ?? config.defaultTimezone);
@@ -1687,7 +1719,11 @@ const renderNotesHistory = async (ctx: Context, page = 0): Promise<void> => {
 
   const kb = new InlineKeyboard();
   for (const entry of entries) {
-    const btn = await makeActionButton(ctx, { label: entry.date, action: 'notes.history_date', data: { date: entry.date, historyPage: page } });
+    const btn = await makeActionButton(ctx, {
+      label: `📅 ${entry.date} (${entry.count})`,
+      action: 'notes.history_date',
+      data: { date: entry.date, historyPage: page }
+    });
     kb.text(btn.text, btn.callback_data).row();
   }
   if (page > 0 || hasMore) {
@@ -1774,24 +1810,50 @@ const renderNoteDetails = async (
   const attachmentSummary = await listNoteAttachmentKinds({ noteId: note.id });
   const local = formatInstantToLocal(note.created_at, user.timezone ?? config.defaultTimezone);
   const title = note.title && note.title.trim().length > 0 ? note.title : t('screens.notes.untitled');
-  const lines = [
-    t('screens.notes.detail_date', { date: note.note_date }),
-    t('screens.notes.detail_time', { time: local.time }),
-    t('screens.notes.detail_title', { title }),
-    '',
-    note.body
-  ];
-  lines.push('', t('screens.notes.attachments_summary', { count: String(attachmentSummary.total) }));
+  const bodyNotice = t('screens.notes.detail_archived_notice');
+  const rawBody = note.body?.trim() ?? '';
+  const hasArchivedBody = Boolean(note.content_group_key);
+  const buildNoteLines = (limit: number): string[] => {
+    const bodyPreview = rawBody.length
+      ? buildArchivedPreview(rawBody, limit, hasArchivedBody, bodyNotice)
+      : t('screens.notes.view_empty');
+    const lines = [
+      t('screens.notes.detail_date', { date: note.note_date }),
+      t('screens.notes.detail_time', { time: local.time }),
+      t('screens.notes.detail_title', { title }),
+      '',
+      bodyPreview
+    ];
+    lines.push('', t('screens.notes.attachments_summary', { count: String(attachmentSummary.total) }));
+    return lines;
+  };
+  let lines = buildNoteLines(NOTE_BODY_PREVIEW_LIMIT);
+  if (lines.join('\n').length > NOTE_DETAIL_MAX_CHARS) {
+    lines = buildNoteLines(300);
+  }
+  if (lines.join('\n').length > NOTE_DETAIL_MAX_CHARS) {
+    lines = buildNoteLines(150);
+  }
 
   const kb = new InlineKeyboard();
+  if (hasArchivedBody) {
+    const viewBtn = await makeActionButton(ctx, {
+      label: t('buttons.notes_view_full'),
+      action: 'notes.body_view',
+      data: { noteId: note.id, noteDate, page, historyPage }
+    });
+    kb.text(viewBtn.text, viewBtn.callback_data).row();
+  }
   const editBtn = await makeActionButton(ctx, { label: t('buttons.notes_edit'), action: 'notes.edit_menu', data: { noteId: note.id, noteDate, page, historyPage } });
   const attachBtn = await makeActionButton(ctx, { label: t('buttons.notes_attach'), action: 'notes.attach_more', data: { noteId: note.id, noteDate, page, historyPage } });
   const deleteBtn = await makeActionButton(ctx, { label: t('buttons.notes_delete'), action: 'notes.delete_note', data: { noteId: note.id, noteDate, page, historyPage } });
   const viewAllBtn = await makeActionButton(ctx, { label: t('buttons.notes_view_all'), action: 'notes.view_all', data: { noteId: note.id, noteDate, page, historyPage } });
+  const sendAllBtn = await makeActionButton(ctx, { label: t('buttons.notes_send_all'), action: 'notes.send_all', data: { noteId: note.id, noteDate, page, historyPage } });
   const backBtn = await makeActionButton(ctx, { label: t('buttons.notes_back'), action: 'notes.history_date', data: { date: noteDate, page, historyPage } });
   kb.text(editBtn.text, editBtn.callback_data).row();
   kb.text(attachBtn.text, attachBtn.callback_data).row();
   kb.text(deleteBtn.text, deleteBtn.callback_data).row();
+  kb.text(sendAllBtn.text, sendAllBtn.callback_data).row();
   if (attachmentSummary.total > 0) {
     kb.text(viewAllBtn.text, viewAllBtn.callback_data).row();
     const { counts } = attachmentSummary;
@@ -2057,19 +2119,18 @@ const handleNoteAttachmentMessage = async (
   const state = userStates.get(stateKey);
   const flow = state?.notesFlow;
   if (!flow || flow.mode !== 'create' || flow.step !== 'attachments') return;
+  const { user } = await ensureUserAndSettings(ctx);
 
   try {
-    const archiveChatId = getNotesArchiveChatId();
-    let archiveMessageId: number | null = null;
-    if (archiveChatId) {
-      try {
-        archiveMessageId = await archiveCopyFromUser(ctx, archiveChatId);
-      } catch (error) {
-        console.error({ scope: 'notes', event: 'archive_copy_failed', error, archiveChatId });
-      }
-    }
+    const archived = await archiveIncomingMediaMessage(ctx, {
+      userId: user.id,
+      entityType: 'note',
+      entityId: flow.noteId,
+      kind: 'attachment',
+      caption: params.caption ?? null
+    });
 
-    if (!archiveChatId || !archiveMessageId) {
+    if (!archived) {
       await renderScreen(ctx, { titleKey: t('screens.notes.title'), bodyLines: [t('screens.notes.attachments_failed')] });
       return;
     }
@@ -2081,8 +2142,8 @@ const handleNoteAttachmentMessage = async (
       fileUniqueId: params.fileUniqueId ?? null,
       caption: params.caption ?? null,
       captionPending: !params.caption,
-      archiveChatId: archiveMessageId ? archiveChatId : null,
-      archiveMessageId
+      archiveChatId: archived.archiveChatId,
+      archiveMessageId: archived.archiveMessageId
     });
     const now = Date.now();
     const existingSession = state?.noteUploadSession;
@@ -2145,6 +2206,34 @@ const handleReminderAttachmentMessage = async (
     return;
   }
 
+  if (flow.mode === 'edit') {
+    const { user } = await ensureUserAndSettings(ctx);
+    const archived = await archiveIncomingMediaMessage(ctx, {
+      userId: user.id,
+      entityType: 'reminder',
+      entityId: flow.reminderId,
+      kind: flow.step === 'description' ? 'desc' : 'attachment',
+      caption: params.caption ?? null
+    });
+    if (!archived) {
+      await renderScreen(ctx, { titleKey: t('screens.reminders.new_title'), bodyLines: [t('screens.reminders.attachments_failed')] });
+      return;
+    }
+    if (flow.step === 'attachments') {
+      await createReminderAttachment({
+        reminderId: flow.reminderId,
+        archiveChatId: archived.archiveChatId,
+        archiveMessageId: archived.archiveMessageId,
+        kind: params.kind,
+        caption: params.caption ?? null,
+        fileUniqueId: params.fileUniqueId ?? null,
+        mimeType: params.mimeType ?? null
+      });
+    }
+    await renderReminderAttachmentPrompt(ctx, { mode: 'edit', reminderId: flow.reminderId });
+    return;
+  }
+
   let archiveMessageId: number | null = null;
   try {
     archiveMessageId = await archiveCopyFromUser(ctx, archiveChatId);
@@ -2157,28 +2246,32 @@ const handleReminderAttachmentMessage = async (
     return;
   }
 
-  if (flow.mode === 'edit') {
-    await createReminderAttachment({
-      reminderId: flow.reminderId,
+  if (flow.step === 'description') {
+    const descriptionAttachments = [
+      ...(flow.draft.descriptionAttachments ?? []),
+      {
+        archiveChatId,
+        archiveMessageId,
+        mediaType: params.kind as ArchiveMediaType,
+        caption: params.caption ?? null
+      }
+    ];
+    setReminderFlow(stateKey, { ...flow, draft: { ...flow.draft, descriptionAttachments } });
+    await renderReminderDescriptionPrompt(ctx, flow.mode, undefined);
+    return;
+  }
+
+  const attachments = [
+    ...(flow.draft.attachments ?? []),
+    {
       archiveChatId,
       archiveMessageId,
       kind: params.kind,
       caption: params.caption ?? null,
       fileUniqueId: params.fileUniqueId ?? null,
       mimeType: params.mimeType ?? null
-    });
-    await renderReminderAttachmentPrompt(ctx, { mode: 'edit', reminderId: flow.reminderId });
-    return;
-  }
-
-  const attachments = [...(flow.draft.attachments ?? []), {
-    archiveChatId,
-    archiveMessageId,
-    kind: params.kind,
-    caption: params.caption ?? null,
-    fileUniqueId: params.fileUniqueId ?? null,
-    mimeType: params.mimeType ?? null
-  }];
+    }
+  ];
   setReminderFlow(stateKey, { ...flow, step: 'attachments', draft: { ...flow.draft, attachments } });
   await renderReminderAttachmentPrompt(ctx, { mode: 'create' });
 };
@@ -2523,17 +2616,41 @@ const renderReminderDetails = async (ctx: Context, reminderId: string, flash?: s
   const attachments = await listReminderAttachments({ reminderId: reminder.id });
   const scheduleLabel = t(`screens.reminders.schedule_type_${reminder.schedule_type}` as const);
 
-  const lines = [
-    flash,
-    t('screens.reminders.details_title_line', { title: reminder.title }),
-    t('screens.reminders.details_detail_line', { detail: reminder.description && reminder.description.trim().length > 0 ? reminder.description : t('screens.reminders.details_empty') }),
-    t('screens.reminders.details_schedule_line', { schedule: scheduleLabel }),
-    t('screens.reminders.details_scheduled_line', { scheduled: local ? `${local.date} ${local.time}` : t('screens.reminders.no_time') }),
-    t('screens.reminders.details_status_line', { status: reminder.is_active ? t('screens.reminders.status_on') : t('screens.reminders.status_off') }),
-    t('screens.reminders.details_attachments_line', { count: String(attachments.length) })
-  ].filter(Boolean) as string[];
+  const rawDescription = reminder.description?.trim() ?? '';
+  const hasArchivedDescription = Boolean(reminder.desc_group_key);
+  const descriptionNotice = t('screens.reminders.details_archived_notice');
+  const buildReminderLines = (limit: number): string[] => {
+    const showNotice = hasArchivedDescription || rawDescription.length > limit;
+    const detail = rawDescription.length
+      ? buildArchivedPreview(rawDescription, limit, showNotice, descriptionNotice)
+      : t('screens.reminders.details_empty');
+    return [
+      flash,
+      t('screens.reminders.details_title_line', { title: reminder.title }),
+      t('screens.reminders.details_detail_line', { detail }),
+      t('screens.reminders.details_schedule_line', { schedule: scheduleLabel }),
+      t('screens.reminders.details_scheduled_line', { scheduled: local ? `${local.date} ${local.time}` : t('screens.reminders.no_time') }),
+      t('screens.reminders.details_status_line', { status: reminder.is_active ? t('screens.reminders.status_on') : t('screens.reminders.status_off') }),
+      t('screens.reminders.details_attachments_line', { count: String(attachments.length) })
+    ].filter(Boolean) as string[];
+  };
+  let lines = buildReminderLines(REMINDER_DESC_PREVIEW_LIMIT);
+  if (lines.join('\n').length > REMINDER_DETAIL_MAX_CHARS) {
+    lines = buildReminderLines(300);
+  }
+  if (lines.join('\n').length > REMINDER_DETAIL_MAX_CHARS) {
+    lines = buildReminderLines(150);
+  }
 
   const kb = new InlineKeyboard();
+  if (hasArchivedDescription || rawDescription.length > REMINDER_DESC_PREVIEW_LIMIT) {
+    const viewBtn = await makeActionButton(ctx, {
+      label: t('buttons.reminders_view_full'),
+      action: 'reminders.desc_view',
+      data: { reminderId }
+    });
+    kb.text(viewBtn.text, viewBtn.callback_data).row();
+  }
   const editTitleBtn = await makeActionButton(ctx, { label: t('buttons.reminders_edit_title'), action: 'reminders.edit_title', data: { reminderId } });
   const editDetailBtn = await makeActionButton(ctx, { label: t('buttons.reminders_edit_detail'), action: 'reminders.edit_detail', data: { reminderId } });
   const editScheduleBtn = await makeActionButton(ctx, { label: t('buttons.reminders_edit_schedule'), action: 'reminders.edit_schedule', data: { reminderId } });
@@ -2700,9 +2817,44 @@ const persistReminderSchedule = async (ctx: Context, flow: ReminderFlow): Promis
       userId: user.id,
       title,
       description: flow.draft.description ?? null,
+      descGroupKey: flow.draft.descGroupKey ?? null,
       schedule,
       nextRunAt
     });
+    if (flow.draft.description && flow.draft.description.length > 900) {
+      const archiveResult = await archiveLongText(ctx, {
+        userId: user.id,
+        entityType: 'reminder',
+        entityId: reminder.id,
+        kind: 'desc',
+        text: flow.draft.description
+      });
+      if (archiveResult) {
+        await updateReminder(reminder.id, { descGroupKey: archiveResult.groupKey });
+      }
+    }
+    for (const attachment of flow.draft.descriptionAttachments ?? []) {
+      try {
+        await recordArchiveMessage({
+          userId: user.id,
+          entityType: 'reminder',
+          entityId: reminder.id,
+          kind: 'desc',
+          mediaType: attachment.mediaType,
+          archiveChatId: attachment.archiveChatId,
+          archiveMessageId: attachment.archiveMessageId,
+          caption: attachment.caption ?? null
+        });
+      } catch (error) {
+        console.error({
+          scope: 'reminders',
+          event: 'description_attachment_archive_failed',
+          error,
+          reminderId: reminder.id,
+          archiveMessageId: attachment.archiveMessageId
+        });
+      }
+    }
     for (const attachment of flow.draft.attachments ?? []) {
       await createReminderAttachment({
         reminderId: reminder.id,
@@ -4682,6 +4834,16 @@ bot.callbackQuery(/^[A-Za-z0-9_-]{8,12}$/, async (ctx) => {
         const note = await getNoteById({ userId: user.id, id: noteId });
         if (note) {
           await sendNoteArchiveDeleteLabels(ctx, noteId);
+          const archiveChatId = getNotesArchiveChatId();
+          if (archiveChatId) {
+            const title = note.title && note.title.trim().length > 0 ? note.title : t('screens.notes.untitled');
+            const marker = `🗑 Deleted by user\nNote: ${note.id}\nDate: ${note.note_date}\nTitle: ${title}`;
+            try {
+              await ctx.api.sendMessage(archiveChatId, marker, { disable_notification: true });
+            } catch (error) {
+              console.error({ scope: 'notes', event: 'archive_delete_marker_failed', error, noteId, archiveChatId });
+            }
+          }
           await deleteNote({ userId: user.id, id: noteId });
           const page = Number(data?.page ?? 0);
           const historyPage = Number(data?.historyPage ?? 0);
@@ -5075,6 +5237,50 @@ bot.callbackQuery(/^[A-Za-z0-9_-]{8,12}$/, async (ctx) => {
         await renderNoteDetails(ctx, note.id, { noteDate: data.noteDate, page: data.page, historyPage: data.historyPage });
         return;
       }
+      case 'notes.body_view': {
+        const data = (payload as { data?: { noteId?: string; noteDate?: string; page?: number; historyPage?: number } }).data;
+        if (!data?.noteId) {
+          await renderNotesHistory(ctx);
+          return;
+        }
+        const note = await getNoteById({ userId: user.id, id: data.noteId });
+        if (!note) {
+          await renderNotesHistory(ctx);
+          return;
+        }
+        const targetId = ctx.chat?.id ?? ctx.from?.id ?? user.telegram_id;
+        if (!targetId) {
+          await renderNoteDetails(ctx, note.id, { noteDate: data.noteDate, page: data.page, historyPage: data.historyPage });
+          return;
+        }
+        if (note.content_group_key) {
+          await copyArchiveGroupToUser(ctx, { userChatId: targetId, groupKey: note.content_group_key });
+        } else if (note.body) {
+          await ctx.api.sendMessage(targetId, note.body);
+        }
+        await renderNoteDetails(ctx, note.id, { noteDate: data.noteDate, page: data.page, historyPage: data.historyPage });
+        return;
+      }
+      case 'notes.send_all': {
+        const data = (payload as { data?: { noteId?: string; noteDate?: string; page?: number; historyPage?: number } }).data;
+        if (!data?.noteId) {
+          await renderNotesHistory(ctx);
+          return;
+        }
+        const note = await getNoteById({ userId: user.id, id: data.noteId });
+        if (!note) {
+          await renderNotesHistory(ctx);
+          return;
+        }
+        const targetId = ctx.chat?.id ?? ctx.from?.id ?? user.telegram_id;
+        if (!targetId) {
+          await renderNoteDetails(ctx, note.id, { noteDate: data.noteDate, page: data.page, historyPage: data.historyPage });
+          return;
+        }
+        await copyArchiveEntityToUser(ctx, { userChatId: targetId, entityType: 'note', entityId: note.id });
+        await renderNoteDetails(ctx, note.id, { noteDate: data.noteDate, page: data.page, historyPage: data.historyPage });
+        return;
+      }
       case 'settings.language': {
         const { settings, locale } = await ensureUserAndSettings(ctx);
         await renderLanguageSelection(ctx, {
@@ -5142,6 +5348,42 @@ bot.callbackQuery(/^[A-Za-z0-9_-]{8,12}$/, async (ctx) => {
         if (!reminderId) {
           await renderReminders(ctx);
           return;
+        }
+        await renderReminderDetails(ctx, reminderId);
+        return;
+      }
+      case 'reminders.desc_view': {
+        const reminderId = (payload as { data?: { reminderId?: string } }).data?.reminderId;
+        if (!reminderId) {
+          await renderReminders(ctx);
+          return;
+        }
+        const reminder = await getReminderById(reminderId);
+        if (!reminder || reminder.user_id !== user.id) {
+          await renderReminders(ctx);
+          return;
+        }
+        const targetId = ctx.chat?.id ?? ctx.from?.id ?? user.telegram_id;
+        if (!targetId) {
+          await renderReminderDetails(ctx, reminderId);
+          return;
+        }
+        let groupKey = reminder.desc_group_key;
+        if (!groupKey && reminder.description) {
+          const archiveResult = await archiveLongText(ctx, {
+            userId: user.id,
+            entityType: 'reminder',
+            entityId: reminder.id,
+            kind: 'desc',
+            text: reminder.description
+          });
+          if (archiveResult) {
+            await updateReminder(reminder.id, { descGroupKey: archiveResult.groupKey });
+            groupKey = archiveResult.groupKey;
+          }
+        }
+        if (groupKey) {
+          await copyArchiveGroupToUser(ctx, { userChatId: targetId, groupKey });
         }
         await renderReminderDetails(ctx, reminderId);
         return;
@@ -7747,9 +7989,21 @@ bot.on('message:text', async (ctx: Context) => {
           title: flow.draft.title ?? null,
           body: rawText
         });
+        let contentGroupKey: string | null = null;
+        const archiveResult = await archiveLongText(ctx, {
+          userId: user.id,
+          entityType: 'note',
+          entityId: note.id,
+          kind: 'desc',
+          text: rawText
+        });
+        if (archiveResult) {
+          const updated = await updateNote({ userId: user.id, id: note.id, contentGroupKey: archiveResult.groupKey });
+          contentGroupKey = updated.content_group_key;
+        }
         setNotesFlow(stateKey, { mode: 'create', step: 'attachments', noteId: note.id, viewContext: { noteDate: note.note_date } });
         const title = note.title && note.title.trim().length > 0 ? note.title : t('screens.notes.untitled');
-        const preview = note.body.split('\n').slice(0, 3).join('\n');
+        const preview = buildPreviewText(note.body, 120);
         const doneBtn = await makeActionButton(ctx, {
           label: t('buttons.notes_attach_done'),
           action: 'notes.attach_done',
@@ -7819,7 +8073,18 @@ bot.on('message:text', async (ctx: Context) => {
           await renderScreen(ctx, { titleKey: t('screens.notes.edit_menu_title'), bodyLines: [t('screens.notes.edit_body_prompt')] });
           return;
         }
-        await updateNote({ userId: user.id, id: flow.noteId, body: rawText });
+        const archiveResult = await archiveLongText(ctx, {
+          userId: user.id,
+          entityType: 'note',
+          entityId: flow.noteId,
+          kind: 'desc',
+          text: rawText
+        });
+        if (archiveResult) {
+          await updateNote({ userId: user.id, id: flow.noteId, body: rawText, contentGroupKey: archiveResult.groupKey });
+        } else {
+          await updateNote({ userId: user.id, id: flow.noteId, body: rawText });
+        }
         clearNotesFlow(stateKey);
         await renderNoteDetails(ctx, flow.noteId, flow.viewContext ?? {});
         return;
@@ -7945,7 +8210,20 @@ bot.on('message:text', async (ctx: Context) => {
     if (flow.step === 'description') {
       const description = raw === '-' || raw.length === 0 ? null : raw;
       if (flow.mode === 'edit') {
-        await updateReminder(flow.reminderId, { description });
+        let descGroupKey: string | null = null;
+        if (description && description.length > 900) {
+          const archiveResult = await archiveLongText(ctx, {
+            userId: user.id,
+            entityType: 'reminder',
+            entityId: flow.reminderId,
+            kind: 'desc',
+            text: description
+          });
+          if (archiveResult) {
+            descGroupKey = archiveResult.groupKey;
+          }
+        }
+        await updateReminder(flow.reminderId, { description, descGroupKey });
         clearReminderFlow(stateKey);
         await renderReminderDetails(ctx, flow.reminderId, t('screens.reminders.edit_saved'));
         return;
