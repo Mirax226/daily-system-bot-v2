@@ -98,9 +98,18 @@ export type Database = {
           detail: string | null;
           description: string | null;
           desc_group_key: string | null;
+          status: string;
           schedule_type: string;
           timezone: string;
           next_run_at: string | null;
+          next_run_at_utc: string | null;
+          last_sent_at_utc: string | null;
+          last_tick_id: string | null;
+          send_attempt_count: number;
+          last_error: string | null;
+          locked_at: string | null;
+          locked_by: string | null;
+          retry_after_utc: string | null;
           is_active: boolean;
           deleted_at: string | null;
           deleted_by: string | null;
@@ -110,8 +119,6 @@ export type Database = {
           by_weekday: number | null;
           by_monthday: number | null;
           by_month: number | null;
-          next_run_at_utc: string | null;
-          last_sent_at_utc: string | null;
           enabled: boolean;
           created_at: string;
           updated_at: string;
@@ -123,9 +130,18 @@ export type Database = {
           detail?: string | null;
           description?: string | null;
           desc_group_key?: string | null;
+          status?: string;
           schedule_type?: string;
           timezone?: string;
           next_run_at?: string | null;
+          next_run_at_utc?: string | null;
+          last_sent_at_utc?: string | null;
+          last_tick_id?: string | null;
+          send_attempt_count?: number;
+          last_error?: string | null;
+          locked_at?: string | null;
+          locked_by?: string | null;
+          retry_after_utc?: string | null;
           is_active?: boolean;
           deleted_at?: string | null;
           deleted_by?: string | null;
@@ -135,8 +151,6 @@ export type Database = {
           by_weekday?: number | null;
           by_monthday?: number | null;
           by_month?: number | null;
-          next_run_at_utc?: string | null;
-          last_sent_at_utc?: string | null;
           enabled?: boolean;
           created_at?: string;
           updated_at?: string;
@@ -148,9 +162,18 @@ export type Database = {
           detail?: string | null;
           description?: string | null;
           desc_group_key?: string | null;
+          status?: string;
           schedule_type?: string;
           timezone?: string;
           next_run_at?: string | null;
+          next_run_at_utc?: string | null;
+          last_sent_at_utc?: string | null;
+          last_tick_id?: string | null;
+          send_attempt_count?: number;
+          last_error?: string | null;
+          locked_at?: string | null;
+          locked_by?: string | null;
+          retry_after_utc?: string | null;
           is_active?: boolean;
           deleted_at?: string | null;
           deleted_by?: string | null;
@@ -160,11 +183,79 @@ export type Database = {
           by_weekday?: number | null;
           by_monthday?: number | null;
           by_month?: number | null;
-          next_run_at_utc?: string | null;
-          last_sent_at_utc?: string | null;
           enabled?: boolean;
           created_at?: string;
           updated_at?: string;
+        };
+        Relationships: [];
+      };
+      reminder_deliveries: {
+        Row: {
+          id: string;
+          reminder_id: string;
+          tick_id: string;
+          sent_at_utc: string;
+          delivery_key: string;
+          ok: boolean;
+          error: string | null;
+        };
+        Insert: {
+          id?: string;
+          reminder_id: string;
+          tick_id: string;
+          sent_at_utc?: string;
+          delivery_key: string;
+          ok: boolean;
+          error?: string | null;
+        };
+        Update: {
+          id?: string;
+          reminder_id?: string;
+          tick_id?: string;
+          sent_at_utc?: string;
+          delivery_key?: string;
+          ok?: boolean;
+          error?: string | null;
+        };
+        Relationships: [
+          {
+            foreignKeyName: 'reminder_deliveries_reminder_id_fkey';
+            columns: ['reminder_id'];
+            referencedRelation: 'reminders';
+            referencedColumns: ['id'];
+          }
+        ];
+      };
+      cron_runs: {
+        Row: {
+          tick_id: string;
+          started_at: string;
+          finished_at: string | null;
+          claimed: number;
+          sent: number;
+          failed: number;
+          skipped: number;
+          notes: string | null;
+        };
+        Insert: {
+          tick_id: string;
+          started_at?: string;
+          finished_at?: string | null;
+          claimed?: number;
+          sent?: number;
+          failed?: number;
+          skipped?: number;
+          notes?: string | null;
+        };
+        Update: {
+          tick_id?: string;
+          started_at?: string;
+          finished_at?: string | null;
+          claimed?: number;
+          sent?: number;
+          failed?: number;
+          skipped?: number;
+          notes?: string | null;
         };
         Relationships: [];
       };

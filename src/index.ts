@@ -5,7 +5,7 @@ import { config } from './config';
 import { getSupabaseClient } from './db';
 import { runMigrations } from './db/migrations';
 import { resolveArchiveChatId } from './services/archive';
-import { processDueReminders } from './services/reminders';
+import { getCronHealth, runCronTick } from './services/cron.service';
 import { logError } from './utils/logger';
 
 const server = Fastify({ logger: true });
@@ -44,21 +44,23 @@ server.get('/', async () => {
 
 server.post('/webhook', webhookCallback(bot, 'fastify'));
 
-server.post('/cron/tick', async (request: FastifyRequest, reply: FastifyReply) => {
-  const headerSecret = request.headers['x-cron-secret'];
-  const providedSecret = Array.isArray(headerSecret) ? headerSecret[0] : headerSecret;
-
-  if (providedSecret !== config.cron.secret) {
-    console.warn({ scope: 'cron', event: 'cron_unauthorized' });
-    reply.code(401);
-    return { error: 'unauthorized' };
+server.get(
+  '/cron/tick',
+  async (
+    request: FastifyRequest<{ Querystring: { key?: string } }>,
+    reply: FastifyReply
+  ) => {
+    const result = await runCronTick({ key: request.query.key, botClient: bot });
+    if (!result.ok && result.error === 'unauthorized') {
+      reply.code(401);
+    }
+    return result;
   }
+);
 
-  const nowUtc = new Date();
-  const result = await processDueReminders(nowUtc, bot);
-
-  console.log({ scope: 'cron', event: 'cron_tick_done', processed: result.processed });
-  return { status: 'ok', processed: result.processed };
+server.get('/cron/health', async () => {
+  const health = await getCronHealth();
+  return { ok: true, ...health };
 });
 
 const isTelegramTooManyRequests = (error: unknown): boolean => {

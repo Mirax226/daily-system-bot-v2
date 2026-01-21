@@ -13,7 +13,15 @@ const envSchema = z.object({
       const trimmed = value.trim();
       return trimmed.length === 0 ? undefined : trimmed;
     }, z.string().url().optional()),
-  CRON_SECRET: z.string().min(1, 'CRON_SECRET is required'),
+  CRON_SECRET: z
+    .preprocess((value: unknown) => {
+      if (typeof value !== 'string') return undefined;
+      const trimmed = value.trim();
+      return trimmed.length === 0 ? undefined : trimmed;
+    }, z.string().optional()),
+  CRON_MAX_BATCH: z.coerce.number().int().positive().default(50),
+  CRON_MAX_RUNTIME_MS: z.coerce.number().int().positive().default(20000),
+  TELEGRAM_SEND_DELAY_MS: z.coerce.number().int().nonnegative().default(0),
   SUPABASE_URL: z.string().url('SUPABASE_URL must be a valid URL'),
   SUPABASE_SERVICE_ROLE_KEY: z.string().min(1, 'SUPABASE_SERVICE_ROLE_KEY is required'),
   DEFAULT_TIMEZONE: z.string().min(1, 'DEFAULT_TIMEZONE is required'),
@@ -41,7 +49,10 @@ export const config = {
     devPolling: env.DEV_POLLING
   },
   cron: {
-    secret: env.CRON_SECRET
+    secret: env.CRON_SECRET,
+    maxBatch: env.CRON_MAX_BATCH,
+    maxRuntimeMs: env.CRON_MAX_RUNTIME_MS,
+    telegramSendDelayMs: env.TELEGRAM_SEND_DELAY_MS
   },
   supabase: {
     url: env.SUPABASE_URL,
