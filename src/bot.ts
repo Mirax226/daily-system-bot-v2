@@ -1,6 +1,7 @@
 /* eslint-disable no-console */
 import { Bot, InlineKeyboard, GrammyError } from 'grammy';
-import type { BotError, Context, InputMedia } from 'grammy';
+import type { BotError, Context } from 'grammy';
+import type { InputMediaPhoto, InputMediaVideo } from '@grammyjs/types';
 
 import { config } from './config';
 
@@ -2640,7 +2641,7 @@ const sendNoteMediaGroup = async (
   kind: 'photo' | 'video',
   attachments: NoteAttachmentRow[]
 ): Promise<void> => {
-  const media = attachments.map((attachment) => ({ type: kind, media: attachment.file_id })) as InputMedia[];
+  const media: Array<InputMediaPhoto | InputMediaVideo> = attachments.map((attachment) => ({ type: kind, media: attachment.file_id }));
   for (const chunk of chunkItems(media, 10)) {
     await ctx.api.sendMediaGroup(targetId, chunk);
   }
