@@ -50,12 +50,24 @@ const buildDeliveryKey = (reminder: ReminderRow, occurrenceIso: string): string 
   return `${reminder.id}:${occurrenceIso}`;
 };
 
-const isCronAuthorized = (key: string | undefined): boolean => {
+const CRON_SECRET_PATTERN = /^[A-Za-z0-9_-]+$/;
+
+const normalizeCronKey = (key: string | undefined): string | null => {
+  if (!key) return null;
+  const trimmed = key.trim();
+  if (!trimmed) return null;
+  if (!CRON_SECRET_PATTERN.test(trimmed)) return null;
+  return trimmed;
+};
+
+export const isCronAuthorized = (key: string | undefined): boolean => {
   const secret = config.cron.secret?.trim();
   if (!secret) {
     return true;
   }
-  return key === secret;
+  const normalized = normalizeCronKey(key);
+  if (!normalized) return false;
+  return normalized === secret;
 };
 
 const asIsoString = (value: Date): string => value.toISOString();
@@ -318,6 +330,12 @@ export const runCronTick = async (params: {
   const counts = { claimed: 0, sent: 0, failed: 0, skipped: 0 };
 
   await insertCronRunStart(tickId);
+  logInfo('Cron tick started', {
+    scope: 'cron',
+    tickId,
+    maxBatch: config.cron.maxBatch,
+    maxRuntimeMs: config.cron.maxRuntimeMs
+  });
 
   try {
     const reminders = await claimDueReminders(tickId, config.cron.maxBatch);
@@ -443,12 +461,23 @@ export const runCronTick = async (params: {
     };
   }
 
+  const durationMs = Date.now() - start;
   await updateCronRunFinish(tickId, {
     finished_at: asIsoString(new Date()),
     claimed: counts.claimed,
     sent: counts.sent,
     failed: counts.failed,
     skipped: counts.skipped
+  });
+
+  logInfo('Cron tick finished', {
+    scope: 'cron',
+    tickId,
+    claimed: counts.claimed,
+    sent: counts.sent,
+    failed: counts.failed,
+    skipped: counts.skipped,
+    durationMs
   });
 
   return {
@@ -458,7 +487,7 @@ export const runCronTick = async (params: {
     sent: counts.sent,
     failed: counts.failed,
     skipped: counts.skipped,
-    duration_ms: Date.now() - start
+    duration_ms: durationMs
   };
 };
 
