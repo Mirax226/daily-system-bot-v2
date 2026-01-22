@@ -355,8 +355,10 @@ export async function toggleReminderEnabled(reminderId: string, client = getSupa
     throw new Error('Reminder not found');
   }
 
-  const nextEnabled = !current.is_active;
-  return updateReminder(reminderId, { isActive: nextEnabled }, client);
+  const nextEnabled = !current.enabled;
+  const isActive = nextEnabled && Boolean(current.next_run_at);
+  const status = isActive ? 'active' : 'inactive';
+  return updateReminder(reminderId, { enabled: nextEnabled, isActive, status }, client);
 }
 
 export async function createReminderAttachment(

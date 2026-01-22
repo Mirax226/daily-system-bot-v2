@@ -73,3 +73,17 @@ export function localDateTimeToUtcIso(localDate: string, localTime: string, time
   const adjusted = new Date(baseUtc.getTime() - offsetMs);
   return adjusted.toISOString();
 }
+
+const CLOCK_EMOJIS = ['🕛', '🕧', '🕐', '🕜', '🕑', '🕝', '🕒', '🕞', '🕓', '🕟', '🕔', '🕠', '🕕', '🕡', '🕖', '🕢', '🕗', '🕣', '🕘', '🕤', '🕙', '🕥', '🕚', '🕦'] as const;
+
+export function getClockEmojiForTime(time?: string | null): string {
+  if (!time) return '🕒';
+  const [hhRaw, mmRaw] = time.split(':');
+  const hh = Number(hhRaw);
+  const mm = Number(mmRaw);
+  if (!Number.isFinite(hh) || !Number.isFinite(mm)) return '🕒';
+  const minutes = hh * 60 + mm;
+  if (minutes < 0 || minutes >= 24 * 60) return '🕒';
+  const index = Math.round(minutes / 30) % CLOCK_EMOJIS.length;
+  return CLOCK_EMOJIS[index] ?? '🕒';
+}
