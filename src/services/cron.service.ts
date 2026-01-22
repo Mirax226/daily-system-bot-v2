@@ -13,6 +13,7 @@ import {
   type ReminderSchedule,
   type ReminderScheduleType
 } from './reminders';
+import { getArchiveItemByEntity, markArchiveItemStatus } from './archive';
 import { parseTelegramError } from './telegramSend';
 import { logError, logInfo, logWarn } from '../utils/logger';
 
@@ -200,7 +201,7 @@ const updateReminderAfterSuccess = async (
 ): Promise<void> => {
   const isOnce = reminder.schedule_type === 'once';
   const nextRunAt = isOnce ? null : computeNextRunAt(reminder, sentAtUtc);
-  const status = isOnce ? 'done' : 'active';
+  const status = isOnce ? 'ringed' : 'active';
   const enabled = !isOnce;
   const isActive = !isOnce;
 
@@ -273,13 +274,32 @@ const sendReminderWithAttachments = async (reminder: ReminderRow, botClient: Bot
   await sendReminderMessage({ reminder, user, botClient });
 
   const attachments = await listReminderAttachments({ reminderId: reminder.id });
-  for (const attachment of attachments) {
-    await botClient.api.copyMessage(
-      user.telegram_id,
-      attachment.archive_chat_id,
-      attachment.archive_message_id
-    );
+  const archiveItem = await getArchiveItemByEntity({ kind: 'reminder', entityId: reminder.id });
+  const attachmentIds = attachments.map((attachment) => attachment.archive_message_id);
+  const orderedMessageIds = archiveItem
+    ? (archiveItem.message_ids as number[]).filter((messageId) => attachmentIds.includes(messageId))
+    : attachmentIds;
+  const archiveChatId = archiveItem?.channel_id ?? attachments[0]?.archive_chat_id;
+  if (!archiveChatId) return;
+  const targetChatId = Number(user.telegram_id);
+  for (const messageId of orderedMessageIds) {
+    await botClient.api.copyMessage(targetChatId, archiveChatId, messageId);
   }
+};
+
+const markReminderArchiveRinged = async (reminder: ReminderRow, botClient: Bot): Promise<void> => {
+  const user = await loadUser(reminder.user_id);
+  if (!user) return;
+  const archiveItem = await getArchiveItemByEntity({ kind: 'reminder', entityId: reminder.id });
+  if (!archiveItem) return;
+  const displayName = user.username ? `@${user.username}` : 'User';
+  const statusLine = `🔔 Alert ringed. This alert disappeared for ${displayName}`;
+  await markArchiveItemStatus(botClient.api, {
+    item: archiveItem,
+    status: 'ringed',
+    statusNote: statusLine,
+    statusLine
+  });
 };
 
 export const runCronTick = async (params: {
@@ -322,6 +342,9 @@ export const runCronTick = async (params: {
           counts.skipped += 1;
           const sentAtUtc = occurrenceIso ? new Date(occurrenceIso) : new Date();
           await updateReminderAfterSuccess(reminder, sentAtUtc, tickId);
+          if (reminder.schedule_type === 'once') {
+            await markReminderArchiveRinged(reminder, params.botClient);
+          }
           logInfo('Reminder skipped due to idempotency', {
             scope: 'cron',
             tickId,
@@ -342,6 +365,9 @@ export const runCronTick = async (params: {
           sentAtUtc
         });
         await updateReminderAfterSuccess(reminder, sentAtUtc, tickId);
+        if (reminder.schedule_type === 'once') {
+          await markReminderArchiveRinged(reminder, params.botClient);
+        }
         counts.sent += 1;
 
         logInfo('Reminder sent', {

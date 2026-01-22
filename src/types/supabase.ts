@@ -1,3 +1,11 @@
+export type Json =
+  | string
+  | number
+  | boolean
+  | null
+  | { [key: string]: Json | undefined }
+  | Json[];
+
 export type Database = {
   public: {
     Tables: {
@@ -90,14 +98,74 @@ export type Database = {
           }
         ];
       };
+      archive_items: {
+        Row: {
+          id: string;
+          owner_user_id: string;
+          kind: string;
+          entity_id: string;
+          channel_id: number;
+          message_ids: Json;
+          media_summary: Json;
+          title: string | null;
+          description: string | null;
+          meta: Json;
+          status: string;
+          status_note: string | null;
+          created_at: string;
+          updated_at: string;
+        };
+        Insert: {
+          id?: string;
+          owner_user_id: string;
+          kind: string;
+          entity_id: string;
+          channel_id: number;
+          message_ids?: Json;
+          media_summary?: Json;
+          title?: string | null;
+          description?: string | null;
+          meta?: Json;
+          status?: string;
+          status_note?: string | null;
+          created_at?: string;
+          updated_at?: string;
+        };
+        Update: {
+          id?: string;
+          owner_user_id?: string;
+          kind?: string;
+          entity_id?: string;
+          channel_id?: number;
+          message_ids?: Json;
+          media_summary?: Json;
+          title?: string | null;
+          description?: string | null;
+          meta?: Json;
+          status?: string;
+          status_note?: string | null;
+          created_at?: string;
+          updated_at?: string;
+        };
+        Relationships: [
+          {
+            foreignKeyName: 'archive_items_owner_user_id_fkey';
+            columns: ['owner_user_id'];
+            isOneToOne: false;
+            referencedRelation: 'users';
+            referencedColumns: ['id'];
+          }
+        ];
+      };
       reminders: {
         Row: {
           id: string;
           user_id: string;
-          title: string;
+          title: string | null;
           detail: string | null;
           description: string | null;
           desc_group_key: string | null;
+          archive_item_id: string | null;
           status: string;
           schedule_type: string;
           timezone: string;
@@ -126,10 +194,11 @@ export type Database = {
         Insert: {
           id?: string;
           user_id: string;
-          title: string;
+          title?: string | null;
           detail?: string | null;
           description?: string | null;
           desc_group_key?: string | null;
+          archive_item_id?: string | null;
           status?: string;
           schedule_type?: string;
           timezone?: string;
@@ -158,10 +227,11 @@ export type Database = {
         Update: {
           id?: string;
           user_id?: string;
-          title?: string;
+          title?: string | null;
           detail?: string | null;
           description?: string | null;
           desc_group_key?: string | null;
+          archive_item_id?: string | null;
           status?: string;
           schedule_type?: string;
           timezone?: string;
@@ -265,9 +335,12 @@ export type Database = {
           user_id: string;
           note_date: string;
           title: string | null;
+          description: string | null;
           body: string;
           content_group_key: string | null;
+          archive_item_id: string | null;
           created_at: string;
+          updated_at: string;
           deleted_at: string | null;
           deleted_by: string | null;
         };
@@ -276,9 +349,12 @@ export type Database = {
           user_id: string;
           note_date: string;
           title?: string | null;
+          description?: string | null;
           body: string;
           content_group_key?: string | null;
+          archive_item_id?: string | null;
           created_at?: string;
+          updated_at?: string;
           deleted_at?: string | null;
           deleted_by?: string | null;
         };
@@ -287,9 +363,12 @@ export type Database = {
           user_id?: string;
           note_date?: string;
           title?: string | null;
+          description?: string | null;
           body?: string;
           content_group_key?: string | null;
+          archive_item_id?: string | null;
           created_at?: string;
+          updated_at?: string;
           deleted_at?: string | null;
           deleted_by?: string | null;
         };
@@ -1051,6 +1130,7 @@ export type ReminderRow = Database['public']['Tables']['reminders']['Row'];
 export type NoteRow = Database['public']['Tables']['notes']['Row'];
 export type NoteAttachmentRow = Database['public']['Tables']['note_attachments']['Row'];
 export type ArchiveMessageRow = Database['public']['Tables']['archive_messages']['Row'];
+export type ArchiveItemRow = Database['public']['Tables']['archive_items']['Row'];
 export type RpcFunctionName = keyof Database['public']['Functions'];
 export type DailyReportRow = Database['public']['Tables']['daily_reports']['Row'];
 export type DailyReportInsert = Database['public']['Tables']['daily_reports']['Insert'];

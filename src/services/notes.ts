@@ -18,6 +18,7 @@ export async function createNote(
       user_id: userId,
       note_date: noteDate,
       title: title ?? null,
+      description: body,
       body,
       content_group_key: contentGroupKey ?? null
     })
@@ -127,14 +128,29 @@ export async function deleteNote(
 }
 
 export async function updateNote(
-  params: { userId: string; id: string; title?: string | null; body?: string; contentGroupKey?: string | null },
+  params: {
+    userId: string;
+    id: string;
+    title?: string | null;
+    body?: string;
+    description?: string | null;
+    contentGroupKey?: string | null;
+    archiveItemId?: string | null;
+  },
   client = getSupabaseClient()
 ): Promise<NoteRow> {
-  const { userId, id, title, body, contentGroupKey } = params;
+  const { userId, id, title, body, description, contentGroupKey, archiveItemId } = params;
   const update: Partial<NoteRow> = {};
   if (title !== undefined) update.title = title;
-  if (body !== undefined) update.body = body;
+  if (body !== undefined) {
+    update.body = body;
+    if (description === undefined) {
+      update.description = body;
+    }
+  }
+  if (description !== undefined) update.description = description;
   if (contentGroupKey !== undefined) update.content_group_key = contentGroupKey;
+  if (archiveItemId !== undefined) update.archive_item_id = archiveItemId;
 
   const { data, error } = await client
     .from(NOTES_TABLE)
@@ -262,6 +278,25 @@ export async function listNoteAttachments(
   return (data as NoteAttachmentRow[]) ?? [];
 }
 
+export async function listUnarchivedNoteAttachments(
+  params: { noteId: string },
+  client = getSupabaseClient()
+): Promise<NoteAttachmentRow[]> {
+  const { noteId } = params;
+  const { data, error } = await client
+    .from(ATTACHMENTS_TABLE)
+    .select('*')
+    .eq('note_id', noteId)
+    .is('archive_message_id', null)
+    .order('created_at', { ascending: true });
+
+  if (error) {
+    throw new Error(`Failed to list pending attachments: ${error.message}`);
+  }
+
+  return (data as NoteAttachmentRow[]) ?? [];
+}
+
 export async function listNoteAttachmentsByKind(
   params: { noteId: string; kind: NoteAttachmentRow['kind'] },
   client = getSupabaseClient()
@@ -352,6 +387,21 @@ export async function getNoteAttachmentById(
   }
 
   return data ?? null;
+}
+
+export async function updateNoteAttachmentArchiveInfo(
+  params: { attachmentId: string; archiveChatId: number; archiveMessageId: number },
+  client = getSupabaseClient()
+): Promise<void> {
+  const { attachmentId, archiveChatId, archiveMessageId } = params;
+  const { error } = await client
+    .from(ATTACHMENTS_TABLE)
+    .update({ archive_chat_id: archiveChatId, archive_message_id: archiveMessageId })
+    .eq('id', attachmentId);
+
+  if (error) {
+    throw new Error(`Failed to update attachment archive: ${error.message}`);
+  }
 }
 
 export type { DateSummary };
