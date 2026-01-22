@@ -5,7 +5,7 @@ import { config } from './config';
 import { getSupabaseClient } from './db';
 import { runMigrations } from './db/migrations';
 import { resolveArchiveChatId, setArchiveRuntimeStatus, validateArchiveChannel } from './services/archive';
-import { getCronHealth, runCronTick } from './services/cron.service';
+import { getCronHealth, isCronAuthorized, runCronTick } from './services/cron.service';
 import { logError } from './utils/logger';
 
 const server = Fastify({ logger: true });
@@ -50,18 +50,26 @@ server.get(
     request: FastifyRequest<{ Querystring: { key?: string } }>,
     reply: FastifyReply
   ) => {
-    const result = await runCronTick({ key: request.query.key, botClient: bot });
-    if (!result.ok && result.error === 'unauthorized') {
+    if (!isCronAuthorized(request.query.key)) {
       reply.code(401);
+      return { ok: false, error: 'unauthorized', time: new Date().toISOString() };
     }
-    const processed = 'sent' in result ? result.sent : 0;
-    const errors = 'failed' in result ? result.failed : 0;
-    return {
-      ok: result.ok,
-      processed,
-      errors,
-      time: new Date().toISOString()
-    };
+
+    const time = new Date().toISOString();
+    reply.code(200).send({ ok: true, started: true, time });
+
+    setImmediate(() => {
+      void (async () => {
+        try {
+          await runCronTick({ key: request.query.key, botClient: bot });
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error);
+          logError('Cron tick background task failed', { scope: 'cron', error: message });
+        }
+      })();
+    });
+
+    return reply;
   }
 );
 

@@ -18,8 +18,8 @@ const envSchema = z.object({
       if (typeof value !== 'string') return undefined;
       const trimmed = value.trim();
       return trimmed.length === 0 ? undefined : trimmed;
-    }, z.string().optional()),
-  CRON_MAX_BATCH: z.coerce.number().int().positive().default(50),
+    }, z.string().regex(/^[A-Za-z0-9_-]+$/, 'CRON_SECRET must be URL-safe').optional()),
+  CRON_MAX_BATCH: z.coerce.number().int().positive().default(20),
   CRON_MAX_RUNTIME_MS: z.coerce.number().int().positive().default(20000),
   TELEGRAM_SEND_DELAY_MS: z.coerce.number().int().nonnegative().default(0),
   SUPABASE_URL: z.string().url('SUPABASE_URL must be a valid URL'),
