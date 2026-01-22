@@ -1,5 +1,5 @@
 import { createClient, SupabaseClient } from '@supabase/supabase-js';
-import { Pool } from 'pg';
+import { Pool, QueryResultRow } from 'pg';
 import { config } from './config';
 import { type Database } from './types/supabase';
 
@@ -37,7 +37,10 @@ export function getDbPool(): Pool {
   return pgPool;
 }
 
-export async function queryDb<T>(sql: string, params: unknown[] = []): Promise<{ rows: T[] }> {
+export async function queryDb<T extends QueryResultRow>(
+  sql: string,
+  params: unknown[] = [],
+): Promise<{ rows: T[] }> {
   const pool = getDbPool();
   return pool.query<T>(sql, params);
 }
