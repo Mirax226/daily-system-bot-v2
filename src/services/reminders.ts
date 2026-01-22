@@ -190,6 +190,7 @@ export async function listRemindersForUser(userId: string, client = getSupabaseC
     .from(REMINDERS_TABLE)
     .select('*')
     .eq('user_id', userId)
+    .neq('status', 'draft')
     .is('deleted_at', null)
     .order('next_run_at', { ascending: true, nullsFirst: false })
     .order('created_at', { ascending: true });
@@ -211,18 +212,55 @@ export async function getReminderById(reminderId: string, client = getSupabaseCl
   return data ?? null;
 }
 
+export async function createReminderDraft(
+  params: { userId: string; title: string | null; timezone: string },
+  client = getSupabaseClient()
+): Promise<ReminderRow> {
+  const { data, error } = await client
+    .from(REMINDERS_TABLE)
+    .insert({
+      user_id: params.userId,
+      title: params.title ?? null,
+      description: null,
+      schedule_type: 'once',
+      timezone: params.timezone,
+      next_run_at: null,
+      once_at: null,
+      interval_minutes: null,
+      at_time: null,
+      by_weekday: null,
+      by_monthday: null,
+      by_month: null,
+      is_active: false,
+      enabled: false,
+      status: 'draft'
+    })
+    .select('*')
+    .single();
+
+  if (error) {
+    throw new Error(`Failed to create reminder draft: ${error.message}`);
+  }
+
+  return data as ReminderRow;
+}
+
 export async function createReminder(
   params: {
     userId: string;
-    title: string;
+    title: string | null;
     description?: string | null;
     descGroupKey?: string | null;
     schedule: ReminderSchedule;
     nextRunAt: Date | null;
+    status?: string;
+    isActive?: boolean;
+    enabled?: boolean;
+    archiveItemId?: string | null;
   },
   client = getSupabaseClient()
 ): Promise<ReminderRow> {
-  const { userId, title, description, descGroupKey, schedule, nextRunAt } = params;
+  const { userId, title, description, descGroupKey, schedule, nextRunAt, status, isActive, enabled, archiveItemId } = params;
   const { data, error } = await client
     .from(REMINDERS_TABLE)
     .insert({
@@ -230,6 +268,7 @@ export async function createReminder(
       title,
       description: description ?? null,
       desc_group_key: descGroupKey ?? null,
+      archive_item_id: archiveItemId ?? null,
       schedule_type: schedule.scheduleType,
       timezone: schedule.timezone,
       next_run_at: nextRunAt ? toIsoString(nextRunAt) : null,
@@ -239,9 +278,10 @@ export async function createReminder(
       by_weekday: schedule.byWeekday ?? null,
       by_monthday: schedule.byMonthday ?? null,
       by_month: schedule.byMonth ?? null,
-      is_active: true,
+      is_active: isActive ?? true,
       last_sent_at_utc: null,
-      enabled: true
+      enabled: enabled ?? true,
+      status: status ?? 'active'
     })
     .select('*')
     .single();
@@ -256,13 +296,15 @@ export async function createReminder(
 export async function updateReminder(
   reminderId: string,
   patch: {
-    title?: string;
+    title?: string | null;
     description?: string | null;
     descGroupKey?: string | null;
     schedule?: ReminderSchedule;
     nextRunAt?: Date | null;
     isActive?: boolean;
     enabled?: boolean;
+    status?: string;
+    archiveItemId?: string | null;
   },
   client = getSupabaseClient()
 ): Promise<ReminderRow> {
@@ -275,6 +317,8 @@ export async function updateReminder(
   if (typeof patch.isActive !== 'undefined') updates.is_active = patch.isActive;
   if (typeof patch.enabled !== 'undefined') updates.enabled = patch.enabled;
   if (typeof patch.descGroupKey !== 'undefined') updates.desc_group_key = patch.descGroupKey;
+  if (typeof patch.status !== 'undefined') updates.status = patch.status;
+  if (typeof patch.archiveItemId !== 'undefined') updates.archive_item_id = patch.archiveItemId;
   if ('nextRunAt' in patch) updates.next_run_at = patch.nextRunAt ? toIsoString(patch.nextRunAt) : null;
   if (patch.schedule) {
     updates.schedule_type = patch.schedule.scheduleType;

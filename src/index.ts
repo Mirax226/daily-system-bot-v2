@@ -4,7 +4,7 @@ import { bot } from './bot';
 import { config } from './config';
 import { getSupabaseClient } from './db';
 import { runMigrations } from './db/migrations';
-import { resolveArchiveChatId } from './services/archive';
+import { resolveArchiveChatId, setArchiveRuntimeStatus, validateArchiveChannel } from './services/archive';
 import { getCronHealth, runCronTick } from './services/cron.service';
 import { logError } from './utils/logger';
 
@@ -92,7 +92,7 @@ const logArchiveStatus = (logger: typeof server.log): void => {
     return;
   }
   if (enabled) {
-    logger.warn('[archive] channel missing, archive fallback enabled');
+    logger.warn('[archive] channel missing, archive disabled');
     return;
   }
   logger.info('[archive] disabled');
@@ -111,6 +111,13 @@ const start = async () => {
         await runMigrations();
         getSupabaseClient();
         logArchiveStatus(server.log);
+        if (config.archive.enabled) {
+          const validation = await validateArchiveChannel(bot.api);
+          if (!validation.ok) {
+            setArchiveRuntimeStatus(false);
+            server.log.warn({ reason: validation.reason }, '[archive] disabled: invalid channel config');
+          }
+        }
 
         if (config.telegram.devPolling) {
           server.log.info('Running in DEV_POLLING mode: starting bot via long polling.');

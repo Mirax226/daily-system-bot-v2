@@ -26,6 +26,13 @@ const envSchema = z.object({
   SUPABASE_SERVICE_ROLE_KEY: z.string().min(1, 'SUPABASE_SERVICE_ROLE_KEY is required'),
   DEFAULT_TIMEZONE: z.string().min(1, 'DEFAULT_TIMEZONE is required'),
   ARCHIVE_ENABLED: z.coerce.boolean().default(true),
+  ARCHIVE_MODE: z.string().default('channel'),
+  ARCHIVE_CHANNEL_ID: z
+    .preprocess((value: unknown) => {
+      if (typeof value !== 'string') return undefined;
+      const trimmed = value.trim();
+      return trimmed.length === 0 ? undefined : trimmed;
+    }, z.string().optional()),
   ARCHIVE_CHAT_ID: z
     .preprocess((value: unknown) => {
       if (typeof value !== 'string') return undefined;
@@ -61,7 +68,8 @@ export const config = {
   defaultTimezone: env.DEFAULT_TIMEZONE,
   archive: {
     enabled: env.ARCHIVE_ENABLED,
-    chatId: env.ARCHIVE_CHAT_ID,
+    mode: env.ARCHIVE_MODE,
+    channelId: env.ARCHIVE_CHANNEL_ID ?? env.ARCHIVE_CHAT_ID,
     maxChunk: env.ARCHIVE_MAX_CHUNK
   }
 };
