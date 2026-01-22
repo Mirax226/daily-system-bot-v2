@@ -136,10 +136,28 @@ export async function updateNote(
     description?: string | null;
     contentGroupKey?: string | null;
     archiveItemId?: string | null;
+    notePhotoCaption?: string | null;
+    noteVideoCaption?: string | null;
+    noteVoiceCaption?: string | null;
+    noteVideoNoteCaption?: string | null;
+    noteFileCaption?: string | null;
   },
   client = getSupabaseClient()
 ): Promise<NoteRow> {
-  const { userId, id, title, body, description, contentGroupKey, archiveItemId } = params;
+  const {
+    userId,
+    id,
+    title,
+    body,
+    description,
+    contentGroupKey,
+    archiveItemId,
+    notePhotoCaption,
+    noteVideoCaption,
+    noteVoiceCaption,
+    noteVideoNoteCaption,
+    noteFileCaption
+  } = params;
   const update: Partial<NoteRow> = {};
   if (title !== undefined) update.title = title;
   if (body !== undefined) {
@@ -151,6 +169,11 @@ export async function updateNote(
   if (description !== undefined) update.description = description;
   if (contentGroupKey !== undefined) update.content_group_key = contentGroupKey;
   if (archiveItemId !== undefined) update.archive_item_id = archiveItemId;
+  if (notePhotoCaption !== undefined) update.note_photo_caption = notePhotoCaption;
+  if (noteVideoCaption !== undefined) update.note_video_caption = noteVideoCaption;
+  if (noteVoiceCaption !== undefined) update.note_voice_caption = noteVoiceCaption;
+  if (noteVideoNoteCaption !== undefined) update.note_videonote_caption = noteVideoNoteCaption;
+  if (noteFileCaption !== undefined) update.note_file_caption = noteFileCaption;
 
   const { data, error } = await client
     .from(NOTES_TABLE)
@@ -356,6 +379,23 @@ export async function updateNoteAttachmentsCaptionByKinds(
 
   if (error) {
     throw new Error(`Failed to update attachment captions: ${error.message}`);
+  }
+}
+
+export async function clearPendingNoteAttachmentsByKinds(
+  params: { noteId: string; kinds: NoteAttachmentRow['kind'][] },
+  client = getSupabaseClient()
+): Promise<void> {
+  const { noteId, kinds } = params;
+  const { error } = await client
+    .from(ATTACHMENTS_TABLE)
+    .update({ caption_pending: false })
+    .eq('note_id', noteId)
+    .in('kind', kinds)
+    .eq('caption_pending', true);
+
+  if (error) {
+    throw new Error(`Failed to clear attachment captions: ${error.message}`);
   }
 }
 

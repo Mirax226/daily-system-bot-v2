@@ -339,6 +339,11 @@ export type Database = {
           body: string;
           content_group_key: string | null;
           archive_item_id: string | null;
+          note_photo_caption: string | null;
+          note_video_caption: string | null;
+          note_voice_caption: string | null;
+          note_videonote_caption: string | null;
+          note_file_caption: string | null;
           created_at: string;
           updated_at: string;
           deleted_at: string | null;
@@ -353,6 +358,11 @@ export type Database = {
           body: string;
           content_group_key?: string | null;
           archive_item_id?: string | null;
+          note_photo_caption?: string | null;
+          note_video_caption?: string | null;
+          note_voice_caption?: string | null;
+          note_videonote_caption?: string | null;
+          note_file_caption?: string | null;
           created_at?: string;
           updated_at?: string;
           deleted_at?: string | null;
@@ -367,6 +377,11 @@ export type Database = {
           body?: string;
           content_group_key?: string | null;
           archive_item_id?: string | null;
+          note_photo_caption?: string | null;
+          note_video_caption?: string | null;
+          note_voice_caption?: string | null;
+          note_videonote_caption?: string | null;
+          note_file_caption?: string | null;
           created_at?: string;
           updated_at?: string;
           deleted_at?: string | null;

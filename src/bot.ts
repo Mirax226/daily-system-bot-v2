@@ -1,6 +1,6 @@
 /* eslint-disable no-console */
 import { Bot, InlineKeyboard, GrammyError } from 'grammy';
-import type { BotError, Context } from 'grammy';
+import type { BotError, Context, InputMedia } from 'grammy';
 
 import { config } from './config';
 
@@ -63,6 +63,7 @@ import { getTodayDateString } from './services/dailyLogs';
 import {
   createNote,
   createNoteAttachment,
+  clearPendingNoteAttachmentsByKinds,
   clearPendingNoteAttachments,
   deleteNote,
   getNoteAttachmentById,
@@ -77,7 +78,6 @@ import {
   listUnarchivedNoteAttachments,
   updateNote,
   updateNoteAttachmentArchiveInfo,
-  updateNoteAttachmentsCaptionByKinds
 } from './services/notes';
 
 import { consumeCallbackToken } from './services/callbackTokens';
@@ -101,7 +101,6 @@ import type { ReminderScheduleType } from './services/reminders';
 
 import {
   copyArchiveGroupToUser,
-  deliverCopyToUser,
   getArchiveItemByEntity,
   markArchiveItemStatus,
   resolveArchiveChatId,
@@ -115,12 +114,12 @@ import { makeActionButton } from './ui/inlineButtons';
 import { renderScreen, ensureUserAndSettings as renderEnsureUserAndSettings, updateCachedUserContext } from './ui/renderScreen';
 import { aiEnabledForUser, sendMainMenu } from './ui/mainMenu';
 
-import { formatInstantToLocal, formatLocalTime, localDateTimeToUtcIso } from './utils/time';
+import { formatInstantToLocal, formatLocalTime, getClockEmojiForTime, localDateTimeToUtcIso } from './utils/time';
 import { gregorianToJalali, isValidJalaliDate, jalaliToGregorian } from './utils/jalali';
 import { logError } from './utils/logger';
 import { resolveLocale, t, withLocale, type Locale } from './i18n';
 
-import type { NoteAttachmentRow, ReportItemRow, ReportDayRow, RewardRow, RoutineRow, RoutineTaskRow } from './types/supabase';
+import type { NoteAttachmentRow, NoteRow, ReportItemRow, ReportDayRow, RewardRow, RoutineRow, RoutineTaskRow } from './types/supabase';
 
 export const bot = new Bot<Context>(config.telegram.botToken);
 
@@ -1651,6 +1650,55 @@ const buildUserStatusLine = (ctx: Context): string => {
   return `${name} ${username}`.trim();
 };
 
+const buildReminderDeleteStatusLine = (ctx: Context): string => {
+  const username = ctx.from?.username ? `@${ctx.from.username}` : '@unknown';
+  const userId = ctx.from?.id ?? 'unknown';
+  return `🗑️ Deleted by user: ${username} (id:${userId})`;
+};
+
+const isReminderActive = (reminder: { enabled: boolean | null; next_run_at: string | null }): boolean =>
+  Boolean(reminder.enabled) && Boolean(reminder.next_run_at);
+
+const NOTE_CAPTION_HEADERS: Record<NoteCaptionCategory, string> = {
+  photo: '🖼️ Photo captions',
+  video: '🎥 Video captions',
+  voice: '🎙️ Voice captions',
+  video_note: '🎞️ Video note captions',
+  files: '📎 File captions'
+};
+
+const buildNoteCaptionPatch = (category: NoteCaptionCategory, caption: string | null) => {
+  if (category === 'photo') return { notePhotoCaption: caption };
+  if (category === 'video') return { noteVideoCaption: caption };
+  if (category === 'voice') return { noteVoiceCaption: caption };
+  if (category === 'video_note') return { noteVideoNoteCaption: caption };
+  return { noteFileCaption: caption };
+};
+
+const resolveNoteCaptionForCategory = (note: NoteRow, category: NoteCaptionCategory): string | null => {
+  if (category === 'photo') return note.note_photo_caption ?? null;
+  if (category === 'video') return note.note_video_caption ?? null;
+  if (category === 'voice') return note.note_voice_caption ?? null;
+  if (category === 'video_note') return note.note_videonote_caption ?? null;
+  return note.note_file_caption ?? null;
+};
+
+const resolveNoteCaptionCategory = (kind: NoteAttachmentRow['kind']): NoteCaptionCategory => {
+  if (kind === 'photo' || kind === 'video' || kind === 'voice' || kind === 'video_note') {
+    return kind;
+  }
+  return 'files';
+};
+
+const chunkItems = <T,>(items: T[], size: number): T[][] => {
+  if (items.length <= size) return [items];
+  const chunks: T[][] = [];
+  for (let index = 0; index < items.length; index += size) {
+    chunks.push(items.slice(index, index + size));
+  }
+  return chunks;
+};
+
 const markNoteArchiveDeleted = async (ctx: Context, noteId: string): Promise<void> => {
   const archiveItem = await getArchiveItemByEntity({ kind: 'note', entityId: noteId });
   if (!archiveItem) return;
@@ -1666,13 +1714,62 @@ const markNoteArchiveDeleted = async (ctx: Context, noteId: string): Promise<voi
 const markReminderArchiveDeleted = async (ctx: Context, reminderId: string): Promise<void> => {
   const archiveItem = await getArchiveItemByEntity({ kind: 'reminder', entityId: reminderId });
   if (!archiveItem) return;
-  const statusLine = `🗑️ Deleted by ${buildUserStatusLine(ctx)}`;
+  const statusLine = buildReminderDeleteStatusLine(ctx);
   await markArchiveItemStatus(ctx.api, {
     item: archiveItem,
     status: 'deleted',
-    statusNote: `Deleted by ${buildUserStatusLine(ctx)}`,
+    statusNote: statusLine,
     statusLine
   });
+};
+
+const maybeArchiveReminderDescription = async (ctx: Context, reminderId: string, description: string | null): Promise<void> => {
+  if (!description || description.length <= ARCHIVE_DESCRIPTION_LIMIT) return;
+  const archiveChatId = getRemindersArchiveChatId();
+  if (!archiveChatId) return;
+  const reminder = await getReminderById(reminderId);
+  if (!reminder) return;
+  const existingItem = await getArchiveItemByEntity({ kind: 'reminder', entityId: reminderId });
+  if (existingItem) return;
+  const { user } = await ensureUserAndSettings(ctx);
+  const telegramMeta = resolveTelegramUserMeta(ctx, user);
+  const timeLabel = buildArchiveTimeLabel(reminder.created_at, user.timezone ?? config.defaultTimezone);
+  const archiveResult = await sendArchiveItemToChannel(ctx.api, {
+    archiveChatId,
+    user: {
+      firstName: telegramMeta.firstName,
+      lastName: telegramMeta.lastName,
+      username: telegramMeta.username,
+      telegramId: telegramMeta.telegramId,
+      appUserId: user.id
+    },
+    timeLabel,
+    kindLabel: 'Reminder',
+    title: reminder.title ?? null,
+    description,
+    attachments: []
+  });
+  const updatedItem = await upsertArchiveItem({
+    existing: null,
+    ownerUserId: user.id,
+    kind: 'reminder',
+    entityId: reminderId,
+    channelId: archiveChatId,
+    title: reminder.title ?? null,
+    description,
+    summary: emptyArchiveSummary(),
+    messageIds: archiveResult.messageIds,
+    messageMeta: archiveResult.messageMeta,
+    meta: {
+      username: telegramMeta.username ?? null,
+      first_name: telegramMeta.firstName ?? null,
+      last_name: telegramMeta.lastName ?? null,
+      telegram_id: telegramMeta.telegramId ?? null,
+      created_at: reminder.created_at,
+      summary_line: buildCaptionSummaryLine(emptyArchiveSummary())
+    }
+  });
+  await updateReminder(reminderId, { archiveItemId: updatedItem.id });
 };
 
 const buildPreviewText = (text: string, limit: number): string => {
@@ -2518,6 +2615,65 @@ const renderNoteAttachmentsList = async (
   await renderScreen(ctx, { titleKey: t('screens.notes.attachments_title', { kind: kindLabel }), bodyLines: lines, inlineKeyboard: kb });
 };
 
+const buildNoteCaptionBlock = (
+  note: NoteRow,
+  category: NoteCaptionCategory,
+  attachments: NoteAttachmentRow[]
+): string | null => {
+  const header = NOTE_CAPTION_HEADERS[category];
+  const perItemCaptions = attachments
+    .map((attachment, index) => ({ caption: attachment.caption?.trim() ?? '', index: index + 1 }))
+    .filter((entry) => entry.caption.length > 0);
+  if (perItemCaptions.length > 0) {
+    return [header, ...perItemCaptions.map((entry) => `${entry.index}. ${entry.caption}`)].join('\n');
+  }
+  const singleCaption = resolveNoteCaptionForCategory(note, category)?.trim();
+  if (singleCaption) {
+    return `${header}\n${singleCaption}`;
+  }
+  return null;
+};
+
+const sendNoteMediaGroup = async (
+  ctx: Context,
+  targetId: number,
+  kind: 'photo' | 'video',
+  attachments: NoteAttachmentRow[]
+): Promise<void> => {
+  const media = attachments.map((attachment) => ({ type: kind, media: attachment.file_id })) as InputMedia[];
+  for (const chunk of chunkItems(media, 10)) {
+    await ctx.api.sendMediaGroup(targetId, chunk);
+  }
+};
+
+const sendNoteAttachmentsToUser = async (
+  ctx: Context,
+  targetId: number,
+  category: NoteCaptionCategory,
+  attachments: NoteAttachmentRow[]
+): Promise<void> => {
+  if (attachments.length === 0) return;
+  if (category === 'photo' || category === 'video') {
+    await sendNoteMediaGroup(ctx, targetId, category, attachments);
+    return;
+  }
+  for (const attachment of attachments) {
+    if (attachment.kind === 'voice') {
+      await ctx.api.sendVoice(targetId, attachment.file_id);
+      continue;
+    }
+    if (attachment.kind === 'video_note') {
+      await ctx.api.sendVideoNote(targetId, attachment.file_id);
+      continue;
+    }
+    if (attachment.kind === 'audio') {
+      await ctx.api.sendAudio(targetId, attachment.file_id);
+      continue;
+    }
+    await ctx.api.sendDocument(targetId, attachment.file_id);
+  }
+};
+
 const sendNoteAttachmentsByKind = async (
   ctx: Context,
   params: { noteId: string; kind: NoteAttachmentKind; noteDate?: string; page?: number; historyPage?: number }
@@ -2536,35 +2692,11 @@ const sendNoteAttachmentsByKind = async (
     return;
   }
 
-  for (const attachment of attachments) {
-    const archiveChatId = attachment.archive_chat_id ?? getNotesArchiveChatId();
-    if (!archiveChatId || !attachment.archive_message_id) {
-      continue;
-    }
-    await deliverCopyToUser(ctx, {
-      userChatId: targetId,
-      archiveChatId,
-      archiveMessageId: attachment.archive_message_id
-    });
-  }
-
-  const captionLines = attachments
-    .map((attachment, index) => ({ caption: attachment.caption?.trim() ?? '', index: index + 1 }))
-    .filter((entry) => entry.caption.length > 0);
-
-  if (captionLines.length > 0) {
-    const headerKey =
-      params.kind === 'photo'
-        ? '🖼️ Photo captions'
-        : params.kind === 'video'
-          ? '🎥 Video captions'
-          : params.kind === 'voice'
-            ? '🎙️ Voice captions'
-            : params.kind === 'video_note'
-              ? '📹 Video note captions'
-              : '📄 File captions';
-    const lines = [headerKey, ...captionLines.map((entry) => `${entry.index}. ${entry.caption}`)];
-    await ctx.api.sendMessage(targetId, lines.join('\n'));
+  const category: NoteCaptionCategory = params.kind === 'document' || params.kind === 'audio' ? 'files' : params.kind;
+  await sendNoteAttachmentsToUser(ctx, targetId, category, attachments);
+  const captionBlock = buildNoteCaptionBlock(note, category, attachments);
+  if (captionBlock) {
+    await ctx.api.sendMessage(targetId, captionBlock);
   }
 
   await renderNoteDetails(ctx, note.id, { noteDate: params.noteDate, page: params.page, historyPage: params.historyPage });
@@ -2586,14 +2718,26 @@ const sendNoteEverything = async (
     return;
   }
   const attachments = await listNoteAttachments({ noteId: note.id });
-  for (const attachment of attachments) {
-    const archiveChatId = attachment.archive_chat_id ?? getNotesArchiveChatId();
-    if (!archiveChatId || !attachment.archive_message_id) continue;
-    await deliverCopyToUser(ctx, {
-      userChatId: targetId,
-      archiveChatId,
-      archiveMessageId: attachment.archive_message_id
-    });
+  const photos = attachments.filter((attachment) => attachment.kind === 'photo');
+  const videos = attachments.filter((attachment) => attachment.kind === 'video');
+  const voices = attachments.filter((attachment) => attachment.kind === 'voice');
+  const videoNotes = attachments.filter((attachment) => attachment.kind === 'video_note');
+  const files = attachments.filter((attachment) => attachment.kind === 'document' || attachment.kind === 'audio');
+
+  const batches: Array<{ category: NoteCaptionCategory; items: NoteAttachmentRow[] }> = [
+    { category: 'photo', items: photos },
+    { category: 'video', items: videos },
+    { category: 'voice', items: voices },
+    { category: 'video_note', items: videoNotes },
+    { category: 'files', items: files }
+  ];
+  for (const batch of batches) {
+    if (batch.items.length === 0) continue;
+    await sendNoteAttachmentsToUser(ctx, targetId, batch.category, batch.items);
+    const captionBlock = buildNoteCaptionBlock(note, batch.category, batch.items);
+    if (captionBlock) {
+      await ctx.api.sendMessage(targetId, captionBlock);
+    }
   }
 
   const title = note.title && note.title.trim().length > 0 ? note.title : t('screens.notes.untitled');
@@ -3021,7 +3165,7 @@ const renderReminders = async (ctx: Context): Promise<void> => {
   } else {
     lines.push(t('screens.reminders.list_header'), '');
     for (const r of reminders) {
-      const status = r.is_active ? t('screens.reminders.status_on') : t('screens.reminders.status_off');
+      const status = isReminderActive(r) ? t('screens.reminders.status_on') : t('screens.reminders.status_off');
       const local = r.next_run_at ? formatInstantToLocal(r.next_run_at, user.timezone ?? config.defaultTimezone) : null;
       const timePart = local ? `${local.date} ${local.time}` : t('screens.reminders.no_time');
       const attachments = attachmentCounts[r.id] ?? 0;
@@ -3047,7 +3191,7 @@ const renderReminders = async (ctx: Context): Promise<void> => {
   for (const r of reminders) {
     const editBtn = await makeActionButton(ctx, { label: t('buttons.reminders_edit') ?? '✏️ Edit', action: 'reminders.edit_open', data: { reminderId: r.id } });
     const toggleBtn = await makeActionButton(ctx, {
-      label: r.is_active ? (t('buttons.reminders_toggle_off') ?? '🔁 Toggle off') : (t('buttons.reminders_toggle_on') ?? '🔁 Toggle on'),
+      label: isReminderActive(r) ? (t('buttons.reminders_toggle_off') ?? '⛔ Deactivate') : (t('buttons.reminders_toggle_on') ?? '✅ Activate'),
       action: 'reminders.toggle',
       data: { reminderId: r.id }
     });
@@ -3079,6 +3223,8 @@ const renderReminderDetails = async (ctx: Context, reminderId: string, flash?: s
 
   const timezone = user.timezone ?? config.defaultTimezone;
   const local = reminder.next_run_at ? formatInstantToLocal(reminder.next_run_at, timezone) : null;
+  const clockEmoji = getClockEmojiForTime(local?.time ?? reminder.at_time ?? null);
+  const statusLabel = isReminderActive(reminder) ? t('screens.reminders.status_on') : t('screens.reminders.status_off');
   const attachments = await listReminderAttachments({ reminderId: reminder.id });
   const scheduleLabel = t(`screens.reminders.schedule_type_${reminder.schedule_type}` as const);
 
@@ -3097,7 +3243,7 @@ const renderReminderDetails = async (ctx: Context, reminderId: string, flash?: s
       t('screens.reminders.details_detail_line', { detail }),
       t('screens.reminders.details_schedule_line', { schedule: scheduleLabel }),
       t('screens.reminders.details_scheduled_line', { scheduled: local ? `${local.date} ${local.time}` : t('screens.reminders.no_time') }),
-      t('screens.reminders.details_status_line', { status: reminder.is_active ? t('screens.reminders.status_on') : t('screens.reminders.status_off') }),
+      t('screens.reminders.details_status_line', { status: statusLabel }),
       t('screens.reminders.details_attachments_line', { count: String(attachments.length) })
     ].filter(Boolean) as string[];
   };
@@ -3123,7 +3269,7 @@ const renderReminderDetails = async (ctx: Context, reminderId: string, flash?: s
   const editScheduleBtn = await makeActionButton(ctx, { label: t('buttons.reminders_edit_schedule'), action: 'reminders.edit_schedule', data: { reminderId } });
   const attachBtn = await makeActionButton(ctx, { label: t('buttons.reminders_attach'), action: 'reminders.attach', data: { reminderId } });
   const toggleBtn = await makeActionButton(ctx, {
-    label: reminder.is_active ? t('buttons.reminders_toggle_off') : t('buttons.reminders_toggle_on'),
+    label: isReminderActive(reminder) ? t('buttons.reminders_toggle_off') : t('buttons.reminders_toggle_on'),
     action: 'reminders.toggle',
     data: { reminderId }
   });
@@ -3139,7 +3285,7 @@ const renderReminderDetails = async (ctx: Context, reminderId: string, flash?: s
   kb.text(backBtn.text, backBtn.callback_data);
 
   await renderScreen(ctx, {
-    titleKey: t('screens.reminders.details_title'),
+    title: `${clockEmoji} ${t('screens.reminders.details_title')}`,
     bodyLines: lines,
     inlineKeyboard: kb
   });
@@ -3163,6 +3309,10 @@ const renderReminderDescriptionPrompt = async (
   reminderId?: string
 ): Promise<void> => {
   const kb = new InlineKeyboard();
+  if (mode === 'create') {
+    const skipBtn = await makeActionButton(ctx, { label: t('buttons.notes_skip'), action: 'reminders.skip_description', data: reminderId ? { reminderId } : undefined });
+    kb.text(skipBtn.text, skipBtn.callback_data).row();
+  }
   const doneBtn = await makeActionButton(ctx, { label: t('buttons.reminders_description_done'), action: 'reminders.description_done', data: reminderId ? { reminderId } : undefined });
   const attachBtn = await makeActionButton(ctx, { label: t('buttons.reminders_attach'), action: 'reminders.attach', data: reminderId ? { reminderId } : undefined });
   const backAction = mode === 'edit' ? 'reminders.edit_open' : 'nav.reminders';
@@ -3277,6 +3427,8 @@ const persistReminderSchedule = async (ctx: Context, flow: ReminderFlow): Promis
   };
 
   const nextRunAt = computeNextRunAt(schedule, new Date());
+  const shouldEnable = Boolean(nextRunAt);
+  const status = shouldEnable ? 'active' : 'inactive';
 
   if (flow.mode === 'create') {
     const reminderId = getReminderIdFromFlow(flow);
@@ -3287,9 +3439,9 @@ const persistReminderSchedule = async (ctx: Context, flow: ReminderFlow): Promis
         description: flow.draft.description ?? null,
         schedule,
         nextRunAt,
-        isActive: true,
-        enabled: true,
-        status: 'active'
+        isActive: shouldEnable,
+        enabled: shouldEnable,
+        status
       });
       clearReminderFlow(String(ctx.from?.id ?? ''));
       const local = nextRunAt ? formatInstantToLocal(nextRunAt.toISOString(), timezone) : null;
@@ -3306,7 +3458,10 @@ const persistReminderSchedule = async (ctx: Context, flow: ReminderFlow): Promis
       description: flow.draft.description ?? null,
       descGroupKey: flow.draft.descGroupKey ?? null,
       schedule,
-      nextRunAt
+      nextRunAt,
+      enabled: shouldEnable,
+      isActive: shouldEnable,
+      status
     });
     clearReminderFlow(String(ctx.from?.id ?? ''));
     const local = nextRunAt ? formatInstantToLocal(nextRunAt.toISOString(), timezone) : null;
@@ -3319,7 +3474,10 @@ const persistReminderSchedule = async (ctx: Context, flow: ReminderFlow): Promis
   }
 
   if (flow.mode === 'edit') {
-    await updateReminder(flow.reminderId, { schedule, nextRunAt });
+    const current = await getReminderById(flow.reminderId);
+    const enabled = current?.enabled ?? true;
+    const isActive = Boolean(enabled) && Boolean(nextRunAt);
+    await updateReminder(flow.reminderId, { schedule, nextRunAt, enabled, isActive, status: isActive ? 'active' : 'inactive' });
     clearReminderFlow(String(ctx.from?.id ?? ''));
     await renderReminderDetails(ctx, flow.reminderId, t('screens.reminders.edit_saved'));
   }
@@ -5559,7 +5717,7 @@ bot.callbackQuery(/^[A-Za-z0-9_-]{8,12}$/, async (ctx) => {
           category === 'files'
             ? (['document', 'audio'] as NoteAttachmentKind[])
             : ([category] as NoteAttachmentKind[]);
-        await updateNoteAttachmentsCaptionByKinds({ noteId: flow.noteId, kinds, caption: null });
+        await clearPendingNoteAttachmentsByKinds({ noteId: flow.noteId, kinds });
         const remaining = (flow.captionCategories ?? []).filter((item) => item !== category);
         if (remaining.length === 0) {
           await clearPendingNoteAttachments({ noteId: flow.noteId });
@@ -5608,16 +5766,8 @@ bot.callbackQuery(/^[A-Za-z0-9_-]{8,12}$/, async (ctx) => {
             await renderScreen(ctx, { titleKey: t('screens.notes.detail_title_label'), bodyLines: [t('screens.notes.attachment_send_failed')] });
             return;
           }
-          const archiveChatId = attachment.archive_chat_id ?? getNotesArchiveChatId();
-          if (!archiveChatId || !attachment.archive_message_id) {
-            await renderScreen(ctx, { titleKey: t('screens.notes.detail_title_label'), bodyLines: [t('screens.notes.attachment_send_failed')] });
-            return;
-          }
-          await deliverCopyToUser(ctx, {
-            userChatId: targetId,
-            archiveChatId,
-            archiveMessageId: attachment.archive_message_id
-          });
+          const category = resolveNoteCaptionCategory(attachment.kind);
+          await sendNoteAttachmentsToUser(ctx, targetId, category, [attachment]);
         } catch (error) {
           console.error({ scope: 'notes', event: 'attachment_send_failed', error, attachmentId: attachment.id });
           await renderScreen(ctx, { titleKey: t('screens.notes.detail_title_label'), bodyLines: [t('screens.notes.attachment_send_failed')] });
@@ -5644,7 +5794,6 @@ bot.callbackQuery(/^[A-Za-z0-9_-]{8,12}$/, async (ctx) => {
           await renderNotesHistory(ctx);
           return;
         }
-        const attachments = await listNoteAttachments({ noteId: note.id });
         const local = formatInstantToLocal(note.created_at, user.timezone ?? config.defaultTimezone);
         const title = note.title && note.title.trim().length > 0 ? note.title : t('screens.notes.untitled');
         await renderScreen(ctx, {
@@ -5660,21 +5809,7 @@ bot.callbackQuery(/^[A-Za-z0-9_-]{8,12}$/, async (ctx) => {
           await renderNoteDetails(ctx, note.id, { noteDate: data.noteDate, page: data.page, historyPage: data.historyPage });
           return;
         }
-        for (const attachment of attachments) {
-          const archiveChatId = attachment.archive_chat_id ?? getNotesArchiveChatId();
-          if (!archiveChatId || !attachment.archive_message_id) {
-            continue;
-          }
-          if (attachment.caption && attachment.caption.trim().length > 0) {
-            await ctx.api.sendMessage(targetId, attachment.caption);
-          }
-          await deliverCopyToUser(ctx, {
-            userChatId: targetId,
-            archiveChatId,
-            archiveMessageId: attachment.archive_message_id
-          });
-        }
-        await renderNoteDetails(ctx, note.id, { noteDate: data.noteDate, page: data.page, historyPage: data.historyPage });
+        await sendNoteEverything(ctx, { noteId: note.id, noteDate: data.noteDate, page: data.page, historyPage: data.historyPage });
         return;
       }
       case 'notes.body_view': {
@@ -6045,8 +6180,12 @@ bot.callbackQuery(/^[A-Za-z0-9_-]{8,12}$/, async (ctx) => {
           await renderReminders(ctx);
           return;
         }
+        const reminderId = getReminderIdFromFlow(flow);
+        if (reminderId) {
+          await updateReminder(reminderId, { description: null });
+        }
         setReminderFlow(stateKey, { ...flow, draft: { ...flow.draft, description: null } });
-        await renderReminderScheduleTypePrompt(ctx, flow.mode, getReminderIdFromFlow(flow));
+        await renderReminderScheduleTypePrompt(ctx, flow.mode, reminderId);
         return;
       }
       case 'reminders.description_done': {
@@ -6064,56 +6203,7 @@ bot.callbackQuery(/^[A-Za-z0-9_-]{8,12}$/, async (ctx) => {
         }
         const description = flow.draft.description ?? null;
         await updateReminder(reminderId, { description });
-        if (description && description.length > ARCHIVE_DESCRIPTION_LIMIT) {
-          const archiveChatId = getRemindersArchiveChatId();
-          if (archiveChatId) {
-            const reminder = await getReminderById(reminderId);
-            if (reminder) {
-              const existingItem = await getArchiveItemByEntity({ kind: 'reminder', entityId: reminderId });
-              if (!existingItem) {
-                const { user } = await ensureUserAndSettings(ctx);
-                const telegramMeta = resolveTelegramUserMeta(ctx, user);
-                const timeLabel = buildArchiveTimeLabel(reminder.created_at, user.timezone ?? config.defaultTimezone);
-                const archiveResult = await sendArchiveItemToChannel(ctx.api, {
-                  archiveChatId,
-                  user: {
-                    firstName: telegramMeta.firstName,
-                    lastName: telegramMeta.lastName,
-                    username: telegramMeta.username,
-                    telegramId: telegramMeta.telegramId,
-                    appUserId: user.id
-                  },
-                  timeLabel,
-                  kindLabel: 'Reminder',
-                  title: reminder.title ?? null,
-                  description,
-                  attachments: []
-                });
-                const updatedItem = await upsertArchiveItem({
-                  existing: existingItem,
-                  ownerUserId: user.id,
-                  kind: 'reminder',
-                  entityId: reminderId,
-                  channelId: archiveChatId,
-                  title: reminder.title ?? null,
-                  description,
-                  summary: emptyArchiveSummary(),
-                  messageIds: archiveResult.messageIds,
-                  messageMeta: archiveResult.messageMeta,
-                  meta: {
-                    username: telegramMeta.username ?? null,
-                    first_name: telegramMeta.firstName ?? null,
-                    last_name: telegramMeta.lastName ?? null,
-                    telegram_id: telegramMeta.telegramId ?? null,
-                    created_at: reminder.created_at,
-                    summary_line: buildCaptionSummaryLine(emptyArchiveSummary())
-                  }
-                });
-                await updateReminder(reminderId, { archiveItemId: updatedItem.id });
-              }
-            }
-          }
-        }
+        await maybeArchiveReminderDescription(ctx, reminderId, description);
         setReminderFlow(stateKey, { ...flow, step: 'schedule_type', draft: { ...flow.draft, description } });
         await renderReminderScheduleTypePrompt(ctx, flow.mode, reminderId);
         return;
@@ -8678,11 +8768,21 @@ bot.on('message:text', async (ctx: Context) => {
       }
       if (flow.step === 'caption_all') {
         const caption = text.length > 0 ? rawText : null;
-        await updateNoteAttachmentsCaptionByKinds({
-          noteId: flow.noteId,
-          kinds: [...NOTE_ATTACHMENT_KINDS],
-          caption
-        });
+        const pending = await listPendingNoteAttachments({ noteId: flow.noteId });
+        const categories = buildNoteCaptionCategories(pending);
+        if (categories.length > 0) {
+          const captionPatch: {
+            notePhotoCaption?: string | null;
+            noteVideoCaption?: string | null;
+            noteVoiceCaption?: string | null;
+            noteVideoNoteCaption?: string | null;
+            noteFileCaption?: string | null;
+          } = {};
+          for (const category of categories) {
+            Object.assign(captionPatch, buildNoteCaptionPatch(category, caption));
+          }
+          await updateNote({ userId: user.id, id: flow.noteId, ...captionPatch });
+        }
         await clearPendingNoteAttachments({ noteId: flow.noteId });
         clearNotesFlow(stateKey);
         await finalizeNoteArchive(ctx, flow.noteId, flow.viewContext ?? {});
@@ -8695,7 +8795,8 @@ bot.on('message:text', async (ctx: Context) => {
           category === 'files'
             ? (['document', 'audio'] as NoteAttachmentKind[])
             : ([category] as NoteAttachmentKind[]);
-        await updateNoteAttachmentsCaptionByKinds({ noteId: flow.noteId, kinds, caption });
+        await updateNote({ userId: user.id, id: flow.noteId, ...buildNoteCaptionPatch(category, caption) });
+        await clearPendingNoteAttachmentsByKinds({ noteId: flow.noteId, kinds });
         const remaining = (flow.captionCategories ?? []).filter((item) => item !== category);
         if (remaining.length === 0) {
           await clearPendingNoteAttachments({ noteId: flow.noteId });
@@ -8899,61 +9000,18 @@ bot.on('message:text', async (ctx: Context) => {
       const description = raw === '-' || raw.length === 0 ? null : raw;
       if (flow.mode === 'edit') {
         await updateReminder(flow.reminderId, { description });
-        if (description && description.length > ARCHIVE_DESCRIPTION_LIMIT) {
-          const archiveChatId = getRemindersArchiveChatId();
-          if (archiveChatId) {
-            const reminder = await getReminderById(flow.reminderId);
-            if (reminder) {
-              const existingItem = await getArchiveItemByEntity({ kind: 'reminder', entityId: reminder.id });
-              if (!existingItem) {
-                const telegramMeta = resolveTelegramUserMeta(ctx, user);
-                const timeLabel = buildArchiveTimeLabel(reminder.created_at, user.timezone ?? config.defaultTimezone);
-                const archiveResult = await sendArchiveItemToChannel(ctx.api, {
-                  archiveChatId,
-                  user: {
-                    firstName: telegramMeta.firstName,
-                    lastName: telegramMeta.lastName,
-                    username: telegramMeta.username,
-                    telegramId: telegramMeta.telegramId,
-                    appUserId: user.id
-                  },
-                  timeLabel,
-                  kindLabel: 'Reminder',
-                  title: reminder.title ?? null,
-                  description,
-                  attachments: []
-                });
-                const updatedItem = await upsertArchiveItem({
-                  existing: null,
-                  ownerUserId: user.id,
-                  kind: 'reminder',
-                  entityId: reminder.id,
-                  channelId: archiveChatId,
-                  title: reminder.title ?? null,
-                  description,
-                  summary: emptyArchiveSummary(),
-                  messageIds: archiveResult.messageIds,
-                  messageMeta: archiveResult.messageMeta,
-                  meta: {
-                    username: telegramMeta.username ?? null,
-                    first_name: telegramMeta.firstName ?? null,
-                    last_name: telegramMeta.lastName ?? null,
-                    telegram_id: telegramMeta.telegramId ?? null,
-                    created_at: reminder.created_at,
-                    summary_line: buildCaptionSummaryLine(emptyArchiveSummary())
-                  }
-                });
-                await updateReminder(reminder.id, { archiveItemId: updatedItem.id });
-              }
-            }
-          }
-        }
+        await maybeArchiveReminderDescription(ctx, flow.reminderId, description);
         clearReminderFlow(stateKey);
         await renderReminderDetails(ctx, flow.reminderId, t('screens.reminders.edit_saved'));
         return;
       }
-      setReminderFlow(stateKey, { ...flow, draft: { ...flow.draft, description } });
-      await renderReminderDescriptionPrompt(ctx, flow.mode, getReminderIdFromFlow(flow));
+      const reminderId = getReminderIdFromFlow(flow);
+      if (reminderId) {
+        await updateReminder(reminderId, { description });
+        await maybeArchiveReminderDescription(ctx, reminderId, description);
+      }
+      setReminderFlow(stateKey, { ...flow, step: 'schedule_type', draft: { ...flow.draft, description } });
+      await renderReminderScheduleTypePrompt(ctx, flow.mode, reminderId);
       return;
     }
 
