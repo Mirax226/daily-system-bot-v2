@@ -1,7 +1,7 @@
 /* eslint-disable no-console */
 import { Bot, InlineKeyboard, GrammyError } from 'grammy';
 import type { BotError, Context } from 'grammy';
-import type { InputMedia } from '@grammyjs/types';
+import type { InputMedia } from 'grammy/types';
 
 import { config } from './config';
 
