@@ -16,12 +16,19 @@ import {
 import { getArchiveItemByEntity, markArchiveItemStatus } from './archive';
 import { parseTelegramError } from './telegramSend';
 import { logError, logInfo, logWarn } from '../utils/logger';
+import { getLogReporter } from './log_reporter';
 
 const REMINDERS_TABLE = 'reminders';
 const REMINDER_DELIVERIES_TABLE = 'reminder_deliveries';
 const CRON_RUNS_TABLE = 'cron_runs';
 
 const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
+
+const reportCronError = async (message: string, context: Record<string, unknown>): Promise<void> => {
+  const reporter = getLogReporter();
+  if (!reporter) return;
+  await reporter.report('error', message, { context });
+};
 
 type CronTickSummary = {
   ok: boolean;
@@ -432,6 +439,13 @@ export const runCronTick = async (params: {
           scheduleType: reminder.schedule_type,
           error: errorMessage
         });
+        await reportCronError('Cron reminder send failed', {
+          tickId,
+          reminderId: reminder.id,
+          userId: reminder.user_id,
+          scheduleType: reminder.schedule_type,
+          error: errorMessage
+        });
 
         if (parsed.kind === 'rate_limit') {
           break;
@@ -441,6 +455,7 @@ export const runCronTick = async (params: {
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     logError('Cron tick failed', { scope: 'cron', tickId, error: message });
+    await reportCronError('Cron tick failed', { tickId, error: message });
     await updateCronRunFinish(tickId, {
       finished_at: asIsoString(new Date()),
       claimed: counts.claimed,
