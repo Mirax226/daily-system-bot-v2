@@ -6,9 +6,11 @@ import { getSupabaseClient } from './db';
 import { runMigrations } from './db/migrations';
 import { resolveArchiveChatId, setArchiveRuntimeStatus, validateArchiveChannel } from './services/archive';
 import { getCronHealth, isCronAuthorized, runCronTick } from './services/cron.service';
+import { initLogReporter } from './services/log_reporter';
 import { logError } from './utils/logger';
 
 const server = Fastify({ logger: true });
+const logReporter = initLogReporter();
 
 server.setErrorHandler((err, request, reply) => {
   try {
@@ -26,12 +28,32 @@ server.setErrorHandler((err, request, reply) => {
   reply.status(500).send({ ok: false });
 });
 
+server.addHook('onError', async (request, reply, error) => {
+  await logReporter.report('error', 'Fastify request error', {
+    stack: error instanceof Error ? error.stack : undefined,
+    context: {
+      reqId: request.id,
+      route: request.routerPath ?? request.url,
+      method: request.method,
+      statusCode: reply.statusCode
+    }
+  });
+});
+
 process.on('unhandledRejection', (reason) => {
   logError('Unhandled promise rejection', { reason });
+  void logReporter.report('error', 'Unhandled promise rejection', {
+    context: { reason: reason instanceof Error ? reason.message : String(reason) },
+    stack: reason instanceof Error ? reason.stack : undefined
+  });
 });
 
 process.on('uncaughtException', (err) => {
   logError('Uncaught exception', { error: err.message, stack: err.stack });
+  void logReporter.report('error', 'Uncaught exception', {
+    context: { error: err.message },
+    stack: err.stack
+  });
 });
 
 server.get('/health', async () => {

@@ -39,7 +39,56 @@ const envSchema = z.object({
       const trimmed = value.trim();
       return trimmed.length === 0 ? undefined : trimmed;
     }, z.string().optional()),
-  ARCHIVE_MAX_CHUNK: z.coerce.number().int().positive().default(3500)
+  ARCHIVE_MAX_CHUNK: z.coerce.number().int().positive().default(3500),
+  LOG_REPORTER_ENABLED: z.coerce.boolean().default(true),
+  LOG_LEVELS: z
+    .preprocess((value: unknown) => {
+      if (typeof value !== 'string') return undefined;
+      const trimmed = value.trim();
+      return trimmed.length === 0 ? undefined : trimmed;
+    }, z.string().default('error')),
+  PATH_APPLIER_LOG_INGEST_URL: z
+    .preprocess((value: unknown) => {
+      if (typeof value !== 'string') return undefined;
+      const trimmed = value.trim();
+      return trimmed.length === 0 ? undefined : trimmed;
+    }, z.string().url().optional()),
+  PATH_APPLIER_LOG_INGEST_KEY: z
+    .preprocess((value: unknown) => {
+      if (typeof value !== 'string') return undefined;
+      const trimmed = value.trim();
+      return trimmed.length === 0 ? undefined : trimmed;
+    }, z.string().optional()),
+  PROJECT_ID: z
+    .preprocess((value: unknown) => {
+      if (typeof value !== 'string') return undefined;
+      const trimmed = value.trim();
+      return trimmed.length === 0 ? undefined : trimmed;
+    }, z.string().default('daily-system')),
+  SERVICE_NAME: z
+    .preprocess((value: unknown) => {
+      if (typeof value !== 'string') return undefined;
+      const trimmed = value.trim();
+      return trimmed.length === 0 ? undefined : trimmed;
+    }, z.string().optional()),
+  APP_ENV: z
+    .preprocess((value: unknown) => {
+      if (typeof value !== 'string') return undefined;
+      const trimmed = value.trim();
+      return trimmed.length === 0 ? undefined : trimmed;
+    }, z.string().default('production')),
+  RENDER_SERVICE_NAME: z
+    .preprocess((value: unknown) => {
+      if (typeof value !== 'string') return undefined;
+      const trimmed = value.trim();
+      return trimmed.length === 0 ? undefined : trimmed;
+    }, z.string().optional()),
+  RENDER_SERVICE_ID: z
+    .preprocess((value: unknown) => {
+      if (typeof value !== 'string') return undefined;
+      const trimmed = value.trim();
+      return trimmed.length === 0 ? undefined : trimmed;
+    }, z.string().optional())
 });
 
 const env = envSchema.parse(process.env);
@@ -71,5 +120,19 @@ export const config = {
     mode: env.ARCHIVE_MODE,
     channelId: env.ARCHIVE_CHANNEL_ID ?? env.ARCHIVE_CHAT_ID,
     maxChunk: env.ARCHIVE_MAX_CHUNK
+  },
+  logReporter: {
+    enabled: env.LOG_REPORTER_ENABLED,
+    levels: env.LOG_LEVELS,
+    ingestUrl: env.PATH_APPLIER_LOG_INGEST_URL,
+    ingestKey: env.PATH_APPLIER_LOG_INGEST_KEY,
+    projectId: env.PROJECT_ID,
+    serviceName:
+      env.SERVICE_NAME ??
+      env.RENDER_SERVICE_NAME ??
+      env.RENDER_SERVICE_ID ??
+      process.env.npm_package_name ??
+      'daily-system-bot-v2',
+    env: env.APP_ENV
   }
 };

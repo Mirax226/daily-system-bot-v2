@@ -119,10 +119,12 @@ import { formatInstantToLocal, formatLocalTime, getClockEmojiForTime, localDateT
 import { gregorianToJalali, isValidJalaliDate, jalaliToGregorian } from './utils/jalali';
 import { logError } from './utils/logger';
 import { resolveLocale, t, withLocale, type Locale } from './i18n';
+import { initLogReporter } from './services/log_reporter';
 
 import type { NoteAttachmentRow, NoteRow, ReportItemRow, ReportDayRow, RewardRow, RoutineRow, RoutineTaskRow } from './types/supabase';
 
 export const bot = new Bot<Context>(config.telegram.botToken);
+const logReporter = initLogReporter();
 
 /**
  * Per-user in-memory state (ephemeral).
@@ -786,6 +788,18 @@ const sendErrorNotice = async (ctx: Context, errorCode: string) => {
 
 const handleBotError = async (ctx: Context, error: unknown, traceId: string): Promise<void> => {
   try {
+    const updateType = ctx.update ? Object.keys(ctx.update)[0] : undefined;
+    const chatId = typeof ctx.chat?.id === 'number' ? ctx.chat.id : undefined;
+    await logReporter.report('error', 'Telegram bot middleware error', {
+      stack: error instanceof Error ? error.stack : undefined,
+      context: {
+        traceId,
+        updateId: ctx.update?.update_id,
+        updateType,
+        chatId
+      }
+    });
+
     const { user } = await ensureUserAndSettings(ctx);
     const enabled = telemetryEnabledForUser(user.settings_json as Record<string, unknown>);
     const errorCode = `ERR-${Math.random().toString(36).slice(2, 8)}`.toUpperCase();
@@ -9707,6 +9721,17 @@ bot.on('message:video_note', async (ctx: Context) => {
 bot.catch((err: BotError<Context>) => {
   const { ctx, error } = err;
   const errorMessage = error instanceof Error ? error.message : String(error);
-  const updatePayload = ctx.update ? { updateId: ctx.update.update_id, updateType: Object.keys(ctx.update)[0] } : undefined;
+  const updateType = ctx.update ? Object.keys(ctx.update)[0] : undefined;
+  const chatId = typeof ctx.chat?.id === 'number' ? ctx.chat.id : undefined;
+  const updatePayload = ctx.update ? { updateId: ctx.update.update_id, updateType } : undefined;
   logError('Telegram bot error', { error: errorMessage, update: updatePayload });
+  void logReporter.report('error', 'Telegram bot error', {
+    stack: error instanceof Error ? error.stack : undefined,
+    context: {
+      updateId: ctx.update?.update_id,
+      updateType,
+      chatId,
+      handler: error instanceof GrammyError ? error.method : undefined
+    }
+  });
 });
