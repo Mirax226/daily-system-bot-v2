@@ -117,7 +117,7 @@ import { aiEnabledForUser, sendMainMenu } from './ui/mainMenu';
 import { formatInstantToLocal, formatLocalTime, getClockEmojiForTime, localDateTimeToUtcIso } from './utils/time';
 import { gregorianToJalali, isValidJalaliDate, jalaliToGregorian } from './utils/jalali';
 import { logError } from './utils/logger';
-import { sendAttachmentsAsMedia } from './services/telegram-media';
+import { sendAttachments, type StoredAttachment } from './services/telegram-media';
 import { resolveLocale, t, withLocale, type Locale } from './i18n';
 import { initLogReporter } from './services/log_reporter';
 
@@ -2633,15 +2633,9 @@ const renderNoteAttachmentsList = async (
 const buildNoteCaptionBlock = (
   note: NoteRow,
   category: NoteCaptionCategory,
-  attachments: NoteAttachmentRow[]
+  _attachments: NoteAttachmentRow[]
 ): string | null => {
   const header = NOTE_CAPTION_HEADERS[category];
-  const perItemCaptions = attachments
-    .map((attachment, index) => ({ caption: attachment.caption?.trim() ?? '', index: index + 1 }))
-    .filter((entry) => entry.caption.length > 0);
-  if (perItemCaptions.length > 0) {
-    return [header, ...perItemCaptions.map((entry) => `${entry.index}. ${entry.caption}`)].join('\n');
-  }
   const singleCaption = resolveNoteCaptionForCategory(note, category)?.trim();
   if (singleCaption) {
     return `${header}\n${singleCaption}`;
@@ -2656,12 +2650,12 @@ const sendNoteAttachmentsToUser = async (
   attachments: NoteAttachmentRow[]
 ): Promise<void> => {
   if (attachments.length === 0) return;
-  const items = attachments.map((attachment) => ({
-    kind: attachment.kind,
-    file: attachment.file_id,
+  const items: StoredAttachment[] = attachments.map((attachment) => ({
+    kind: attachment.kind as StoredAttachment['kind'],
+    fileId: attachment.file_id,
     caption: attachment.caption ?? undefined
   }));
-  await sendAttachmentsAsMedia(ctx.api, targetId, items);
+  await sendAttachments(ctx, targetId, items);
 };
 
 const sendNoteAttachmentsByKind = async (

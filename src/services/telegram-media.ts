@@ -1,146 +1,136 @@
-import type { Api, InputFile } from 'grammy';
-import type { InputMediaAudio, InputMediaDocument, InputMediaPhoto, InputMediaVideo } from 'grammy/types';
+import { InputFile, type Context } from 'grammy';
+import type { InputMediaPhoto, InputMediaVideo } from 'grammy/types';
 
+import { safePlain, truncateTelegram } from '../ui/text';
 import { logWarn } from '../utils/logger';
 
-type AllowedMedia = InputMediaPhoto | InputMediaVideo | InputMediaAudio | InputMediaDocument;
-type MediaSource = string | InputFile;
+export type MediaKind = 'photo' | 'video' | 'voice' | 'document' | 'video_note' | 'animation' | 'audio';
 
-type AttachmentItem = {
-  kind: string;
-  file: MediaSource;
-  caption?: string;
+export type StoredAttachment = {
+  kind: MediaKind;
+  fileId: string;
+  caption?: string | null;
 };
 
-type SendAttachmentsSummary = {
-  mediaGroupBatches: number;
-  mediaGroupItems: number;
-  unsupportedItems: number;
-  failures: Array<{ kind: string; file: MediaSource; error: string }>;
+export type SendResult = {
+  sentMessageIds: number[];
+  groups: { kind: 'album' | 'single'; count: number }[];
 };
 
-const applyCaptionOnlyOnFirst = (media: AllowedMedia[], caption?: string): AllowedMedia[] => {
-  if (!caption) return media;
-  return media.map((item, index) =>
-    index === 0
-      ? {
-          ...item,
-          caption
-        }
-      : {
-          ...item,
-          caption: undefined
-        }
-  );
+type AlbumMedia = InputMediaPhoto<InputFile> | InputMediaVideo<InputFile>;
+
+type AlbumCandidate = StoredAttachment & { kind: 'photo' | 'video' };
+
+const MAX_CAPTION_LENGTH = 900;
+
+const normalizeCaption = (caption?: string | null): string | undefined => {
+  if (!caption) return undefined;
+  const trimmed = truncateTelegram(safePlain(caption), MAX_CAPTION_LENGTH).trim();
+  return trimmed.length > 0 ? trimmed : undefined;
 };
 
-export async function sendAttachmentsAsMedia(
-  api: Api,
-  chatId: number | string,
-  items: AttachmentItem[],
-  opts?: { groupCaption?: string }
-): Promise<SendAttachmentsSummary> {
-  const media: AllowedMedia[] = [];
-  const animations: AttachmentItem[] = [];
-  const voices: AttachmentItem[] = [];
-  const videoNotes: AttachmentItem[] = [];
-  const unsupported: AttachmentItem[] = [];
-  const failures: Array<{ kind: string; file: MediaSource; error: string }> = [];
+const isAlbumCandidate = (attachment: StoredAttachment): attachment is AlbumCandidate =>
+  attachment.kind === 'photo' || attachment.kind === 'video';
 
-  for (const item of items) {
-    switch (item.kind) {
-      case 'photo':
-        media.push({
-          type: 'photo',
-          media: item.file
-        } satisfies InputMediaPhoto);
-        break;
-      case 'video':
-        media.push({
-          type: 'video',
-          media: item.file
-        } satisfies InputMediaVideo);
-        break;
-      case 'audio':
-        media.push({
-          type: 'audio',
-          media: item.file
-        } satisfies InputMediaAudio);
-        break;
-      case 'document':
-        media.push({
-          type: 'document',
-          media: item.file
-        } satisfies InputMediaDocument);
-        break;
-      case 'animation':
-        animations.push(item);
-        break;
-      case 'voice':
-        voices.push(item);
-        break;
-      case 'video_note':
-        videoNotes.push(item);
-        break;
-      default:
-        unsupported.push(item);
-        break;
-    }
-  }
+export function buildAlbumMedia(items: StoredAttachment[], caption?: string): ReadonlyArray<AlbumMedia> {
+  const candidates = items.filter(isAlbumCandidate);
+  if (candidates.length === 0) return [];
+  const albumCaption = normalizeCaption(caption);
 
-  const mediaWithCaption = applyCaptionOnlyOnFirst(media, opts?.groupCaption);
-  for (let i = 0; i < mediaWithCaption.length; i += 10) {
-    const chunk = mediaWithCaption.slice(i, i + 10);
-    try {
-      await api.sendMediaGroup(chatId, chunk);
-    } catch (err) {
-      const errorMessage = err instanceof Error ? err.message : String(err);
-      for (const entry of chunk) {
-        failures.push({ kind: entry.type, file: entry.media, error: errorMessage });
+  return candidates.map((attachment, index) => {
+    if (attachment.kind === 'photo') {
+      const media: InputMediaPhoto<InputFile> = {
+        type: 'photo',
+        media: attachment.fileId
+      };
+      if (index === 0 && albumCaption) {
+        media.caption = albumCaption;
       }
-      logWarn('Failed to send media group batch', { chatId, error: errorMessage });
+      return media;
     }
-  }
 
-  for (const item of animations) {
+    const media: InputMediaVideo<InputFile> = {
+      type: 'video',
+      media: attachment.fileId
+    };
+    if (index === 0 && albumCaption) {
+      media.caption = albumCaption;
+    }
+    return media;
+  });
+}
+
+export async function sendAttachments(
+  ctx: Context,
+  chatId: number,
+  attachments: StoredAttachment[],
+  options?: { captionBlock?: string }
+): Promise<SendResult> {
+  const sentMessageIds: number[] = [];
+  const groups: { kind: 'album' | 'single'; count: number }[] = [];
+
+  const albumCandidates = attachments.filter(isAlbumCandidate);
+  const remaining = attachments.filter((attachment) => !isAlbumCandidate(attachment));
+  const albumCaption = normalizeCaption(options?.captionBlock);
+
+  const albumMedia = buildAlbumMedia(albumCandidates, albumCaption);
+  for (let i = 0; i < albumMedia.length; i += 10) {
+    const chunk = albumMedia.slice(i, i + 10) as ReadonlyArray<AlbumMedia>;
     try {
-      await api.sendAnimation(chatId, item.file);
-    } catch (err) {
-      const errorMessage = err instanceof Error ? err.message : String(err);
-      failures.push({ kind: item.kind, file: item.file, error: errorMessage });
-      logWarn('Failed to send animation attachment', { chatId, error: errorMessage });
+      const messages = await ctx.api.sendMediaGroup(chatId, chunk);
+      messages.forEach((message) => sentMessageIds.push(message.message_id));
+      groups.push({ kind: 'album', count: chunk.length });
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : String(error);
+      logWarn('Failed to send media group', { chatId, error: errorMessage });
     }
   }
 
-  for (const item of voices) {
+  for (const attachment of remaining) {
+    const caption = normalizeCaption(attachment.caption ?? options?.captionBlock);
     try {
-      await api.sendVoice(chatId, item.file);
-    } catch (err) {
-      const errorMessage = err instanceof Error ? err.message : String(err);
-      failures.push({ kind: item.kind, file: item.file, error: errorMessage });
-      logWarn('Failed to send voice attachment', { chatId, error: errorMessage });
+      if (attachment.kind === 'voice') {
+        const message = await ctx.api.sendVoice(chatId, attachment.fileId, caption ? { caption } : undefined);
+        sentMessageIds.push(message.message_id);
+        groups.push({ kind: 'single', count: 1 });
+        continue;
+      }
+      if (attachment.kind === 'video_note') {
+        const message = await ctx.api.sendVideoNote(chatId, attachment.fileId);
+        sentMessageIds.push(message.message_id);
+        groups.push({ kind: 'single', count: 1 });
+        if (caption) {
+          const captionMessage = await ctx.api.sendMessage(chatId, caption);
+          sentMessageIds.push(captionMessage.message_id);
+        }
+        continue;
+      }
+      if (attachment.kind === 'document') {
+        const message = await ctx.api.sendDocument(chatId, attachment.fileId, caption ? { caption } : undefined);
+        sentMessageIds.push(message.message_id);
+        groups.push({ kind: 'single', count: 1 });
+        continue;
+      }
+      if (attachment.kind === 'audio') {
+        const message = await ctx.api.sendAudio(chatId, attachment.fileId, caption ? { caption } : undefined);
+        sentMessageIds.push(message.message_id);
+        groups.push({ kind: 'single', count: 1 });
+        continue;
+      }
+      if (attachment.kind === 'animation') {
+        const message = await ctx.api.sendAnimation(chatId, attachment.fileId, caption ? { caption } : undefined);
+        sentMessageIds.push(message.message_id);
+        groups.push({ kind: 'single', count: 1 });
+        continue;
+      }
+      const message = await ctx.api.sendDocument(chatId, attachment.fileId, caption ? { caption } : undefined);
+      sentMessageIds.push(message.message_id);
+      groups.push({ kind: 'single', count: 1 });
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : String(error);
+      logWarn('Failed to send attachment', { chatId, kind: attachment.kind, error: errorMessage });
     }
   }
 
-  for (const item of videoNotes) {
-    try {
-      await api.sendVideoNote(chatId, item.file);
-    } catch (err) {
-      const errorMessage = err instanceof Error ? err.message : String(err);
-      failures.push({ kind: item.kind, file: item.file, error: errorMessage });
-      logWarn('Failed to send video note attachment', { chatId, error: errorMessage });
-    }
-  }
-
-  for (const item of unsupported) {
-    failures.push({ kind: item.kind, file: item.file, error: 'Unsupported media kind' });
-    logWarn('Skipping unsupported attachment kind', { chatId, kind: item.kind });
-  }
-
-  return {
-    mediaGroupBatches: Math.ceil(mediaWithCaption.length / 10),
-    mediaGroupItems: mediaWithCaption.length,
-    unsupportedItems: animations.length + voices.length + videoNotes.length + unsupported.length,
-    failures
-  };
+  return { sentMessageIds, groups };
 }
