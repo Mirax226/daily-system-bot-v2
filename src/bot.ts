@@ -1,7 +1,6 @@
 /* eslint-disable no-console */
 import { Bot, InlineKeyboard, GrammyError } from 'grammy';
 import type { BotError, Context } from 'grammy';
-import type { InputMedia } from 'grammy/types';
 
 import { config } from './config';
 
@@ -118,6 +117,7 @@ import { aiEnabledForUser, sendMainMenu } from './ui/mainMenu';
 import { formatInstantToLocal, formatLocalTime, getClockEmojiForTime, localDateTimeToUtcIso } from './utils/time';
 import { gregorianToJalali, isValidJalaliDate, jalaliToGregorian } from './utils/jalali';
 import { logError } from './utils/logger';
+import { sendAttachmentsAsMedia } from './services/telegram-media';
 import { resolveLocale, t, withLocale, type Locale } from './i18n';
 import { initLogReporter } from './services/log_reporter';
 
@@ -2649,44 +2649,19 @@ const buildNoteCaptionBlock = (
   return null;
 };
 
-const sendNoteMediaGroup = async (
-  ctx: Context,
-  targetId: number,
-  kind: 'photo' | 'video',
-  attachments: NoteAttachmentRow[]
-): Promise<void> => {
-  const media: InputMedia[] = attachments.map((attachment) => ({ type: kind, media: attachment.file_id }));
-  for (const chunk of chunkItems(media, 10)) {
-    await ctx.replyWithMediaGroup(chunk);
-  }
-};
-
 const sendNoteAttachmentsToUser = async (
   ctx: Context,
   targetId: number,
-  category: NoteCaptionCategory,
+  _category: NoteCaptionCategory,
   attachments: NoteAttachmentRow[]
 ): Promise<void> => {
   if (attachments.length === 0) return;
-  if (category === 'photo' || category === 'video') {
-    await sendNoteMediaGroup(ctx, targetId, category, attachments);
-    return;
-  }
-  for (const attachment of attachments) {
-    if (attachment.kind === 'voice') {
-      await ctx.api.sendVoice(targetId, attachment.file_id);
-      continue;
-    }
-    if (attachment.kind === 'video_note') {
-      await ctx.api.sendVideoNote(targetId, attachment.file_id);
-      continue;
-    }
-    if (attachment.kind === 'audio') {
-      await ctx.api.sendAudio(targetId, attachment.file_id);
-      continue;
-    }
-    await ctx.api.sendDocument(targetId, attachment.file_id);
-  }
+  const items = attachments.map((attachment) => ({
+    kind: attachment.kind,
+    fileId: attachment.file_id,
+    caption: attachment.caption ?? undefined
+  }));
+  await sendAttachmentsAsMedia(ctx.api, targetId, items);
 };
 
 const sendNoteAttachmentsByKind = async (
