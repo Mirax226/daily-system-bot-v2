@@ -2658,7 +2658,7 @@ const sendNoteAttachmentsToUser = async (
   if (attachments.length === 0) return;
   const items = attachments.map((attachment) => ({
     kind: attachment.kind,
-    fileId: attachment.file_id,
+    file: attachment.file_id,
     caption: attachment.caption ?? undefined
   }));
   await sendAttachmentsAsMedia(ctx.api, targetId, items);

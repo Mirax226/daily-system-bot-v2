@@ -1,0 +1,14 @@
+export const BTN_BACK = '⬅️ Back';
+export const BTN_DELETE = '🗑️ Delete';
+export const BTN_EDIT = '✏️ Edit';
+export const BTN_ATTACH = '📎 Attach';
+export const BTN_CONFIRM = '✅ Confirm';
+export const BTN_CANCEL = '❌ Cancel';
+export const BTN_MENU = '📋 Menu';
+export const BTN_ADD = '➕ Add';
+export const BTN_NEW = '➕ New';
+export const BTN_NEXT = '➡️ Next';
+export const BTN_PREV = '⬅️ Prev';
+export const BTN_VIEW = '👀 View';
+export const BTN_DONE = '✅ Done';
+export const BTN_SKIP = '⏭️ Skip';
