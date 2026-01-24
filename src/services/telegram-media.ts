@@ -1,7 +1,5 @@
-import { InputFile, type Api, type Context } from 'grammy';
+import { type Api, type Context } from 'grammy';
 import type { InputMediaPhoto, InputMediaVideo } from 'grammy/types';
-
-import { safePlain, truncateTelegram } from '../ui/text';
 import { logWarn } from '../utils/logger';
 
 export type MediaKind = 'photo' | 'video' | 'voice' | 'document' | 'video_note' | 'animation' | 'audio';
@@ -17,7 +15,7 @@ export type SendResult = {
   groups: { kind: 'album' | 'single'; count: number }[];
 };
 
-type AlbumMedia = InputMediaPhoto<InputFile> | InputMediaVideo<InputFile>;
+type AlbumMedia = InputMediaPhoto | InputMediaVideo;
 
 type AlbumCandidate = StoredAttachment & { kind: 'photo' | 'video' };
 
@@ -25,7 +23,7 @@ const MAX_CAPTION_LENGTH = 900;
 
 const normalizeCaption = (caption?: string | null): string | undefined => {
   if (!caption) return undefined;
-  const trimmed = truncateTelegram(safePlain(caption), MAX_CAPTION_LENGTH).trim();
+  const trimmed = safeCaption(caption, MAX_CAPTION_LENGTH).trim();
   return trimmed.length > 0 ? trimmed : undefined;
 };
 
@@ -39,7 +37,7 @@ export function buildAlbumMedia(items: StoredAttachment[], caption?: string): Re
 
   return candidates.map((attachment, index) => {
     if (attachment.kind === 'photo') {
-      const media: InputMediaPhoto<InputFile> = {
+      const media: InputMediaPhoto = {
         type: 'photo',
         media: attachment.fileId
       };
@@ -49,7 +47,7 @@ export function buildAlbumMedia(items: StoredAttachment[], caption?: string): Re
       return media;
     }
 
-    const media: InputMediaVideo<InputFile> = {
+    const media: InputMediaVideo = {
       type: 'video',
       media: attachment.fileId
     };
@@ -142,4 +140,10 @@ export async function sendAttachmentsWithApi(
   }
 
   return { sentMessageIds, groups };
+}
+
+function safeCaption(text: string, max = 900): string {
+  if (!text) return '';
+  const cleaned = text.replace(/\u0000/g, '');
+  return cleaned.length > max ? `${cleaned.slice(0, max - 1)}…` : cleaned;
 }
