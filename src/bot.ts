@@ -2533,6 +2533,7 @@ const finalizeReminderArchive = async (
       archiveChatId,
       archiveMessageId: messageId,
       kind: attachment.kind,
+      fileId: attachment.fileId,
       caption: attachment.caption ?? null,
       fileUniqueId: attachment.fileUniqueId ?? null,
       mimeType: attachment.mimeType ?? null

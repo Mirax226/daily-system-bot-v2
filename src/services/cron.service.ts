@@ -15,6 +15,7 @@ import {
 } from './reminders';
 import { getArchiveItemByEntity, markArchiveItemStatus } from './archive';
 import { parseTelegramError } from './telegramSend';
+import { sendAttachmentsWithApi } from './telegram-media';
 import { logError, logInfo, logWarn } from '../utils/logger';
 import { getLogReporter } from './log_reporter';
 
@@ -293,17 +294,27 @@ const sendReminderWithAttachments = async (reminder: ReminderRow, botClient: Bot
   await sendReminderMessage({ reminder, user, botClient });
 
   const attachments = await listReminderAttachments({ reminderId: reminder.id });
-  const archiveItem = await getArchiveItemByEntity({ kind: 'reminder', entityId: reminder.id });
-  const attachmentIds = attachments.map((attachment) => attachment.archive_message_id);
-  const orderedMessageIds = archiveItem
-    ? (archiveItem.message_ids as number[]).filter((messageId) => attachmentIds.includes(messageId))
-    : attachmentIds;
-  const archiveChatId = archiveItem?.channel_id ?? attachments[0]?.archive_chat_id;
-  if (!archiveChatId) return;
-  const targetChatId = Number(user.telegram_id);
-  for (const messageId of orderedMessageIds) {
-    await botClient.api.copyMessage(targetChatId, archiveChatId, messageId);
+  if (!attachments.length) return;
+  const stored = attachments
+    .filter((attachment) => Boolean(attachment.file_id))
+    .map((attachment) => ({
+      kind: attachment.kind as 'photo' | 'video' | 'voice' | 'document' | 'video_note' | 'audio',
+      fileId: attachment.file_id as string,
+      caption: attachment.caption ?? undefined
+    }));
+  if (stored.length === 0) {
+    logWarn('Reminder attachments missing file_id; skipping resend', { scope: 'cron', reminderId: reminder.id });
+    return;
   }
+  if (stored.length !== attachments.length) {
+    logWarn('Reminder attachments missing file_id; sending available only', {
+      scope: 'cron',
+      reminderId: reminder.id,
+      total: attachments.length,
+      available: stored.length
+    });
+  }
+  await sendAttachmentsWithApi(botClient.api, Number(user.telegram_id), stored);
 };
 
 const markReminderArchiveRinged = async (reminder: ReminderRow, botClient: Bot): Promise<void> => {

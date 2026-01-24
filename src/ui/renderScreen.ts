@@ -5,6 +5,8 @@ import { getOrCreateUserSettings } from '../services/userSettings';
 import { resolveLocale, t, type Locale } from '../i18n';
 import type { UserRecord } from '../services/users';
 import type { UserSettingsRow } from '../types/supabase';
+import { safeTruncate } from '../utils/safe_truncate';
+import { safePlain } from './text';
 
 export type RenderScreenParams = {
   titleKey?: string;
@@ -45,6 +47,7 @@ export const ensureUserAndSettings = async (ctx: Context) => {
 
 export const renderScreen = async (ctx: Context, params: RenderScreenParams): Promise<void> => {
   await ensureUserAndSettings(ctx);
+  const maxLength = 3500;
 
   const resolvedTitle =
     params.title ??
@@ -61,7 +64,7 @@ export const renderScreen = async (ctx: Context, params: RenderScreenParams): Pr
       return line;
     }) ?? [];
 
-  const text = [resolvedTitle, '', ...resolvedLines].join('\n');
+  const text = safeTruncate(safePlain([resolvedTitle, '', ...resolvedLines].join('\n')), maxLength);
   const replyMarkup = params.inlineKeyboard;
 
   if (ctx.callbackQuery?.message) {

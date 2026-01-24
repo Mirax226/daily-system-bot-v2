@@ -78,20 +78,9 @@ server.get(
     }
 
     const time = new Date().toISOString();
-    reply.code(200).send({ ok: true, started: true, time });
-
-    setImmediate(() => {
-      void (async () => {
-        try {
-          await runCronTick({ key: request.query.key, botClient: bot });
-        } catch (error) {
-          const message = error instanceof Error ? error.message : String(error);
-          logError('Cron tick background task failed', { scope: 'cron', error: message });
-        }
-      })();
-    });
-
-    return reply;
+    const result = await runCronTick({ key: request.query.key, botClient: bot });
+    reply.code(result.ok ? 200 : 500);
+    return { ...result, time };
   }
 );
 
