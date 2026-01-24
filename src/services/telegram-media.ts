@@ -1,13 +1,14 @@
-import type { Api } from 'grammy';
+import type { Api, InputFile } from 'grammy';
 import type { InputMediaAudio, InputMediaDocument, InputMediaPhoto, InputMediaVideo } from 'grammy/types';
 
 import { logWarn } from '../utils/logger';
 
 type AllowedMedia = InputMediaPhoto | InputMediaVideo | InputMediaAudio | InputMediaDocument;
+type MediaSource = string | InputFile;
 
 type AttachmentItem = {
   kind: string;
-  fileId: string;
+  file: MediaSource;
   caption?: string;
 };
 
@@ -15,7 +16,7 @@ type SendAttachmentsSummary = {
   mediaGroupBatches: number;
   mediaGroupItems: number;
   unsupportedItems: number;
-  failures: Array<{ kind: string; fileId: string; error: string }>;
+  failures: Array<{ kind: string; file: MediaSource; error: string }>;
 };
 
 const applyCaptionOnlyOnFirst = (media: AllowedMedia[], caption?: string): AllowedMedia[] => {
@@ -44,32 +45,32 @@ export async function sendAttachmentsAsMedia(
   const voices: AttachmentItem[] = [];
   const videoNotes: AttachmentItem[] = [];
   const unsupported: AttachmentItem[] = [];
-  const failures: Array<{ kind: string; fileId: string; error: string }> = [];
+  const failures: Array<{ kind: string; file: MediaSource; error: string }> = [];
 
   for (const item of items) {
     switch (item.kind) {
       case 'photo':
         media.push({
           type: 'photo',
-          media: item.fileId
+          media: item.file
         } satisfies InputMediaPhoto);
         break;
       case 'video':
         media.push({
           type: 'video',
-          media: item.fileId
+          media: item.file
         } satisfies InputMediaVideo);
         break;
       case 'audio':
         media.push({
           type: 'audio',
-          media: item.fileId
+          media: item.file
         } satisfies InputMediaAudio);
         break;
       case 'document':
         media.push({
           type: 'document',
-          media: item.fileId
+          media: item.file
         } satisfies InputMediaDocument);
         break;
       case 'animation':
@@ -95,7 +96,7 @@ export async function sendAttachmentsAsMedia(
     } catch (err) {
       const errorMessage = err instanceof Error ? err.message : String(err);
       for (const entry of chunk) {
-        failures.push({ kind: entry.type, fileId: entry.media, error: errorMessage });
+        failures.push({ kind: entry.type, file: entry.media, error: errorMessage });
       }
       logWarn('Failed to send media group batch', { chatId, error: errorMessage });
     }
@@ -103,36 +104,36 @@ export async function sendAttachmentsAsMedia(
 
   for (const item of animations) {
     try {
-      await api.sendAnimation(chatId, item.fileId);
+      await api.sendAnimation(chatId, item.file);
     } catch (err) {
       const errorMessage = err instanceof Error ? err.message : String(err);
-      failures.push({ kind: item.kind, fileId: item.fileId, error: errorMessage });
+      failures.push({ kind: item.kind, file: item.file, error: errorMessage });
       logWarn('Failed to send animation attachment', { chatId, error: errorMessage });
     }
   }
 
   for (const item of voices) {
     try {
-      await api.sendVoice(chatId, item.fileId);
+      await api.sendVoice(chatId, item.file);
     } catch (err) {
       const errorMessage = err instanceof Error ? err.message : String(err);
-      failures.push({ kind: item.kind, fileId: item.fileId, error: errorMessage });
+      failures.push({ kind: item.kind, file: item.file, error: errorMessage });
       logWarn('Failed to send voice attachment', { chatId, error: errorMessage });
     }
   }
 
   for (const item of videoNotes) {
     try {
-      await api.sendVideoNote(chatId, item.fileId);
+      await api.sendVideoNote(chatId, item.file);
     } catch (err) {
       const errorMessage = err instanceof Error ? err.message : String(err);
-      failures.push({ kind: item.kind, fileId: item.fileId, error: errorMessage });
+      failures.push({ kind: item.kind, file: item.file, error: errorMessage });
       logWarn('Failed to send video note attachment', { chatId, error: errorMessage });
     }
   }
 
   for (const item of unsupported) {
-    failures.push({ kind: item.kind, fileId: item.fileId, error: 'Unsupported media kind' });
+    failures.push({ kind: item.kind, file: item.file, error: 'Unsupported media kind' });
     logWarn('Skipping unsupported attachment kind', { chatId, kind: item.kind });
   }
 
