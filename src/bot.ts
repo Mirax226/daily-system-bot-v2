@@ -113,8 +113,10 @@ import {
 import { makeActionButton } from './ui/inlineButtons';
 import { renderScreen, ensureUserAndSettings as renderEnsureUserAndSettings, updateCachedUserContext } from './ui/renderScreen';
 import { aiEnabledForUser, sendMainMenu } from './ui/mainMenu';
+import { labels } from './ui/labels';
+import { emoji, isEmojiEnabled } from './ui/emoji';
 
-import { formatInstantToLocal, formatLocalTime, getClockEmojiForTime, localDateTimeToUtcIso } from './utils/time';
+import { formatInstantToLocal, formatLocalTime, localDateTimeToUtcIso } from './utils/time';
 import { gregorianToJalali, isValidJalaliDate, jalaliToGregorian } from './utils/jalali';
 import { logError } from './utils/logger';
 import { sendAttachments, type StoredAttachment } from './services/telegram-media';
@@ -1648,12 +1650,12 @@ type ArchiveAttachmentDraft = {
 };
 
 const getNoteAttachmentKindEmoji = (kind: NoteAttachmentKind): string => {
-  if (kind === 'photo') return '🖼';
-  if (kind === 'video') return '🎥';
-  if (kind === 'voice') return '🎙';
-  if (kind === 'video_note') return '📹';
-  if (kind === 'audio') return '🎵';
-  return '📄';
+  if (!isEmojiEnabled) return '';
+  if (kind === 'photo') return emoji('photo');
+  if (kind === 'video') return emoji('video');
+  if (kind === 'voice') return emoji('voice');
+  if (kind === 'video_note') return emoji('video_note');
+  return emoji('file');
 };
 
 const getNotesArchiveChatId = (): number | null => resolveArchiveChatId('notes');
@@ -1668,19 +1670,13 @@ const buildUserStatusLine = (ctx: Context): string => {
 const buildReminderDeleteStatusLine = (ctx: Context): string => {
   const username = ctx.from?.username ? `@${ctx.from.username}` : '@unknown';
   const userId = ctx.from?.id ?? 'unknown';
-  return `🗑️ Deleted by user: ${username} (id:${userId})`;
+  return labels.archive.deletedBy({ user: `${username} (id:${userId})` });
 };
 
 const isReminderActive = (reminder: { enabled: boolean | null; next_run_at: string | null }): boolean =>
   Boolean(reminder.enabled) && Boolean(reminder.next_run_at);
 
-const NOTE_CAPTION_HEADERS: Record<NoteCaptionCategory, string> = {
-  photo: '🖼️ Photo captions',
-  video: '🎥 Video captions',
-  voice: '🎙️ Voice captions',
-  video_note: '🎞️ Video note captions',
-  files: '📎 File captions'
-};
+const getNoteCaptionHeader = (category: NoteCaptionCategory): string => labels.notes.captionHeader(category);
 
 const buildNoteCaptionPatch = (category: NoteCaptionCategory, caption: string | null) => {
   if (category === 'photo') return { notePhotoCaption: caption };
@@ -1717,11 +1713,11 @@ const chunkItems = <T,>(items: T[], size: number): T[][] => {
 const markNoteArchiveDeleted = async (ctx: Context, noteId: string): Promise<void> => {
   const archiveItem = await getArchiveItemByEntity({ kind: 'note', entityId: noteId });
   if (!archiveItem) return;
-  const statusLine = `🗑️ Deleted by ${buildUserStatusLine(ctx)}`;
+  const statusLine = labels.archive.deletedBy({ user: buildUserStatusLine(ctx) });
   await markArchiveItemStatus(ctx.api, {
     item: archiveItem,
     status: 'deleted',
-    statusNote: `Deleted by ${buildUserStatusLine(ctx)}`,
+    statusNote: statusLine,
     statusLine
   });
 };
@@ -1759,7 +1755,7 @@ const maybeArchiveReminderDescription = async (ctx: Context, reminderId: string,
       appUserId: user.id
     },
     timeLabel,
-    kindLabel: 'Reminder',
+    kindLabel: labels.archive.kindReminder(),
     title: reminder.title ?? null,
     description,
     attachments: []
@@ -1822,7 +1818,13 @@ const emptyArchiveSummary = (): ArchiveMediaSummary => ({
 });
 
 const buildCaptionSummaryLine = (summary: ArchiveMediaSummary): string =>
-  `Photos(${summary.photos}), Videos(${summary.videos}), Voices(${summary.voices}), Files(${summary.documents + summary.audios}), VideoNotes(${summary.video_notes})`;
+  labels.archive.summaryLine({
+    photos: summary.photos,
+    videos: summary.videos,
+    voices: summary.voices,
+    files: summary.documents + summary.audios,
+    videoNotes: summary.video_notes
+  });
 
 const buildSummaryFromNoteAttachments = (attachments: Array<{ kind: NoteAttachmentKind | string }>): ArchiveMediaSummary => {
   const summary = emptyArchiveSummary();
@@ -1855,31 +1857,31 @@ const renderNotesToday = async (ctx: Context): Promise<void> => {
 
   const lines: string[] = [];
   if (!notes.length) {
-    lines.push(t('screens.notes.today_empty'));
+    lines.push(labels.notes.todayEmpty());
   } else {
-    lines.push(t('screens.notes.today_header'), '');
+    lines.push(labels.notes.todayHeader(), '');
     for (const note of notes) {
       const local = formatInstantToLocal(note.created_at, user.timezone ?? config.defaultTimezone);
-      const title = note.title && note.title.trim().length > 0 ? note.title : t('screens.notes.untitled');
-      lines.push(t('screens.notes.today_item_line', { time: local.time, title }));
+      const title = note.title && note.title.trim().length > 0 ? note.title : labels.notes.untitled();
+      lines.push(labels.notes.todayItemLine({ time: local.time, title }));
     }
   }
 
   const kb = new InlineKeyboard();
-  const addBtn = await makeActionButton(ctx, { label: t('buttons.notes_add'), action: 'notes.add' });
-  const historyBtn = await makeActionButton(ctx, { label: t('buttons.notes_history'), action: 'notes.history' });
-  const backBtn = await makeActionButton(ctx, { label: t('buttons.notes_back'), action: 'nav.dashboard' });
+  const addBtn = await makeActionButton(ctx, { label: labels.notesButtons.add(), action: 'notes.add' });
+  const historyBtn = await makeActionButton(ctx, { label: labels.notesButtons.history(), action: 'notes.history' });
+  const backBtn = await makeActionButton(ctx, { label: labels.notesButtons.back(), action: 'nav.dashboard' });
 
   kb.text(addBtn.text, addBtn.callback_data).row();
   kb.text(historyBtn.text, historyBtn.callback_data).row();
   if (notes.length > 0) {
-    const clearBtn = await makeActionButton(ctx, { label: t('buttons.notes_clear_today'), action: 'notes.clear_today' });
+    const clearBtn = await makeActionButton(ctx, { label: labels.notesButtons.clearToday(), action: 'notes.clear_today' });
     kb.text(clearBtn.text, clearBtn.callback_data).row();
   }
   kb.text(backBtn.text, backBtn.callback_data);
 
   await renderScreen(ctx, {
-    titleKey: t('screens.notes.title'),
+    title: labels.notes.title(),
     bodyLines: lines,
     inlineKeyboard: kb
   });
@@ -1892,35 +1894,35 @@ const renderNotesHistory = async (ctx: Context, page = 0): Promise<void> => {
 
   const lines: string[] = [];
   if (entries.length === 0) {
-    lines.push(t('screens.notes.history_empty'));
+    lines.push(labels.notes.historyEmpty());
   } else {
     for (const entry of entries) {
-      lines.push(t('screens.notes.history_item_line', { date: entry.date, count: String(entry.count) }));
+      lines.push(labels.notes.historyItemLine({ date: entry.date, count: String(entry.count) }));
     }
-    lines.push('', t('screens.notes.history_open_hint'));
+    lines.push('', labels.notes.historyOpenHint());
   }
 
   const kb = new InlineKeyboard();
   for (const entry of entries) {
     const btn = await makeActionButton(ctx, {
-      label: `📅 ${entry.date} (${entry.count})`,
+      label: labels.notes.historyItemLine({ date: entry.date, count: String(entry.count) }),
       action: 'notes.history_date',
       data: { date: entry.date, historyPage: page }
     });
     kb.text(btn.text, btn.callback_data).row();
   }
   if (page > 0 || hasMore) {
-    const prevBtn = page > 0 ? await makeActionButton(ctx, { label: t('buttons.notes_prev'), action: 'notes.history_page', data: { page: page - 1 } }) : null;
-    const nextBtn = hasMore ? await makeActionButton(ctx, { label: t('buttons.notes_next'), action: 'notes.history_page', data: { page: page + 1 } }) : null;
+    const prevBtn = page > 0 ? await makeActionButton(ctx, { label: labels.notesButtons.prev(), action: 'notes.history_page', data: { page: page - 1 } }) : null;
+    const nextBtn = hasMore ? await makeActionButton(ctx, { label: labels.notesButtons.next(), action: 'notes.history_page', data: { page: page + 1 } }) : null;
     if (prevBtn) kb.text(prevBtn.text, prevBtn.callback_data);
     if (nextBtn) kb.text(nextBtn.text, nextBtn.callback_data);
     kb.row();
   }
-  const backBtn = await makeActionButton(ctx, { label: t('buttons.notes_back'), action: 'nav.free_text' });
+  const backBtn = await makeActionButton(ctx, { label: labels.notesButtons.back(), action: 'nav.free_text' });
   kb.text(backBtn.text, backBtn.callback_data);
 
   await renderScreen(ctx, {
-    titleKey: t('screens.notes.history_title'),
+    title: labels.notes.historyTitle(),
     bodyLines: lines,
     inlineKeyboard: kb
   });
@@ -1933,21 +1935,21 @@ const renderNotesDate = async (ctx: Context, noteDate: string, page = 0, history
 
   const lines: string[] = [];
   if (!notes.length) {
-    lines.push(t('screens.notes.view_empty'));
+    lines.push(labels.notes.viewEmpty());
   } else {
     for (const note of notes) {
       const local = formatInstantToLocal(note.created_at, user.timezone ?? config.defaultTimezone);
-      const title = note.title && note.title.trim().length > 0 ? note.title : t('screens.notes.untitled');
-      lines.push(t('screens.notes.date_item_line', { time: local.time, title }));
+      const title = note.title && note.title.trim().length > 0 ? note.title : labels.notes.untitled();
+      lines.push(labels.notes.dateItemLine({ time: local.time, title }));
     }
   }
 
   const kb = new InlineKeyboard();
   for (const note of notes) {
-    const title = note.title && note.title.trim().length > 0 ? note.title : t('screens.notes.untitled');
+    const title = note.title && note.title.trim().length > 0 ? note.title : labels.notes.untitled();
     const local = formatInstantToLocal(note.created_at, user.timezone ?? config.defaultTimezone);
     const btn = await makeActionButton(ctx, {
-      label: `🕒 ${local.time} — 🗂 ${title}`,
+      label: labels.notes.dateItemLine({ time: local.time, title }),
       action: 'notes.view_note',
       data: { noteId: note.id, noteDate, page, historyPage }
     });
@@ -1957,20 +1959,20 @@ const renderNotesDate = async (ctx: Context, noteDate: string, page = 0, history
   const hasNext = offset + notes.length < total;
   if (hasPrev || hasNext) {
     const prevBtn = hasPrev
-      ? await makeActionButton(ctx, { label: t('buttons.notes_prev'), action: 'notes.history_date_page', data: { date: noteDate, page: page - 1, historyPage } })
+      ? await makeActionButton(ctx, { label: labels.notesButtons.prev(), action: 'notes.history_date_page', data: { date: noteDate, page: page - 1, historyPage } })
       : null;
     const nextBtn = hasNext
-      ? await makeActionButton(ctx, { label: t('buttons.notes_next'), action: 'notes.history_date_page', data: { date: noteDate, page: page + 1, historyPage } })
+      ? await makeActionButton(ctx, { label: labels.notesButtons.next(), action: 'notes.history_date_page', data: { date: noteDate, page: page + 1, historyPage } })
       : null;
     if (prevBtn) kb.text(prevBtn.text, prevBtn.callback_data);
     if (nextBtn) kb.text(nextBtn.text, nextBtn.callback_data);
     kb.row();
   }
-  const backBtn = await makeActionButton(ctx, { label: t('buttons.notes_back'), action: 'notes.history_page', data: { page: historyPage } });
+  const backBtn = await makeActionButton(ctx, { label: labels.notesButtons.back(), action: 'notes.history_page', data: { page: historyPage } });
   kb.text(backBtn.text, backBtn.callback_data);
 
   await renderScreen(ctx, {
-    titleKey: t('screens.notes.date_title', { date: noteDate }),
+    title: labels.notes.dateTitle({ date: noteDate }),
     bodyLines: lines,
     inlineKeyboard: kb
   });
@@ -1992,23 +1994,23 @@ const renderNoteDetails = async (
   const historyPage = viewContext.historyPage ?? 0;
   const attachmentSummary = await listNoteAttachmentKinds({ noteId: note.id });
   const local = formatInstantToLocal(note.created_at, user.timezone ?? config.defaultTimezone);
-  const title = note.title && note.title.trim().length > 0 ? note.title : t('screens.notes.untitled');
-  const bodyNotice = t('screens.notes.detail_archived_notice');
+  const title = note.title && note.title.trim().length > 0 ? note.title : labels.notes.untitled();
+  const bodyNotice = labels.notes.detailArchivedNotice();
   const rawBody = (note.description ?? note.body ?? '').trim();
   const hasArchivedBody = Boolean(note.archive_item_id || note.content_group_key);
   const buildNoteLines = (limit: number): string[] => {
     const showNotice = hasArchivedBody || rawBody.length > limit;
     const bodyPreview = rawBody.length
       ? buildArchivedPreview(rawBody, limit, showNotice, bodyNotice)
-      : t('screens.notes.view_empty');
+      : labels.notes.viewEmpty();
     const lines = [
-      t('screens.notes.detail_date', { date: note.note_date }),
-      t('screens.notes.detail_time', { time: local.time }),
-      t('screens.notes.detail_title', { title }),
+      labels.notes.detailDate({ date: note.note_date }),
+      labels.notes.detailTime({ time: local.time }),
+      labels.notes.detailTitle({ title }),
       '',
       bodyPreview
     ];
-    lines.push('', t('screens.notes.attachments_summary', { count: String(attachmentSummary.total) }));
+    lines.push('', labels.notes.attachmentsSummary({ count: String(attachmentSummary.total) }));
     return lines;
   };
   let lines = buildNoteLines(NOTE_BODY_PREVIEW_LIMIT);
@@ -2022,34 +2024,35 @@ const renderNoteDetails = async (
   const kb = new InlineKeyboard();
   if (hasArchivedBody || rawBody.length > NOTE_BODY_PREVIEW_LIMIT) {
     const viewBtn = await makeActionButton(ctx, {
-      label: t('buttons.notes_view_full'),
+      label: labels.notesButtons.viewFull(),
       action: 'notes.body_view',
       data: { noteId: note.id, noteDate, page, historyPage }
     });
     kb.text(viewBtn.text, viewBtn.callback_data).row();
   }
-  const editBtn = await makeActionButton(ctx, { label: t('buttons.notes_edit'), action: 'notes.edit_menu', data: { noteId: note.id, noteDate, page, historyPage } });
-  const attachBtn = await makeActionButton(ctx, { label: t('buttons.notes_attach'), action: 'notes.attach_more', data: { noteId: note.id, noteDate, page, historyPage } });
-  const deleteBtn = await makeActionButton(ctx, { label: t('buttons.notes_delete'), action: 'notes.delete_note', data: { noteId: note.id, noteDate, page, historyPage } });
-  const sendAllBtn = await makeActionButton(ctx, { label: t('buttons.notes_send_all'), action: 'notes.send_all', data: { noteId: note.id, noteDate, page, historyPage } });
-  const backBtn = await makeActionButton(ctx, { label: t('buttons.notes_back'), action: 'notes.history_date', data: { date: noteDate, page, historyPage } });
+  const editBtn = await makeActionButton(ctx, { label: labels.notesButtons.edit(), action: 'notes.edit_menu', data: { noteId: note.id, noteDate, page, historyPage } });
+  const attachBtn = await makeActionButton(ctx, { label: labels.notesButtons.attach(), action: 'notes.attach_more', data: { noteId: note.id, noteDate, page, historyPage } });
+  const deleteBtn = await makeActionButton(ctx, { label: labels.notesButtons.delete(), action: 'notes.delete_note', data: { noteId: note.id, noteDate, page, historyPage } });
+  const viewAllBtn = await makeActionButton(ctx, { label: labels.notesButtons.viewAllItems(), action: 'notes.view_all', data: { noteId: note.id, noteDate, page, historyPage } });
+  const backBtn = await makeActionButton(ctx, { label: labels.notesButtons.back(), action: 'notes.history_date', data: { date: noteDate, page, historyPage } });
   kb.text(editBtn.text, editBtn.callback_data).row();
   kb.text(attachBtn.text, attachBtn.callback_data).row();
   kb.text(deleteBtn.text, deleteBtn.callback_data).row();
-  kb.text(sendAllBtn.text, sendAllBtn.callback_data).row();
+  kb.text(viewAllBtn.text, viewAllBtn.callback_data).row();
   if (attachmentSummary.total > 0) {
     const { counts } = attachmentSummary;
     if (counts.photo > 0) {
       const photoBtn = await makeActionButton(ctx, {
-        label: t('buttons.notes_photo', { count: String(counts.photo) }),
+        label: labels.notesButtons.photo({ count: String(counts.photo) }),
         action: 'notes.attachments_kind',
         data: { noteId: note.id, kind: 'photo', noteDate, page, historyPage }
       });
       kb.text(photoBtn.text, photoBtn.callback_data).row();
     }
-    if (counts.video > 0) {
+    const videoCount = (counts.video ?? 0) + (counts.video_note ?? 0);
+    if (videoCount > 0) {
       const videoBtn = await makeActionButton(ctx, {
-        label: t('buttons.notes_video', { count: String(counts.video) }),
+        label: labels.notesButtons.video({ count: String(videoCount) }),
         action: 'notes.attachments_kind',
         data: { noteId: note.id, kind: 'video', noteDate, page, historyPage }
       });
@@ -2057,24 +2060,16 @@ const renderNoteDetails = async (
     }
     if (counts.voice > 0) {
       const voiceBtn = await makeActionButton(ctx, {
-        label: t('buttons.notes_voice', { count: String(counts.voice) }),
+        label: labels.notesButtons.voice({ count: String(counts.voice) }),
         action: 'notes.attachments_kind',
         data: { noteId: note.id, kind: 'voice', noteDate, page, historyPage }
       });
       kb.text(voiceBtn.text, voiceBtn.callback_data).row();
     }
-    if (counts.video_note > 0) {
-      const videoNoteBtn = await makeActionButton(ctx, {
-        label: t('buttons.notes_video_note', { count: String(counts.video_note) }),
-        action: 'notes.attachments_kind',
-        data: { noteId: note.id, kind: 'video_note', noteDate, page, historyPage }
-      });
-      kb.text(videoNoteBtn.text, videoNoteBtn.callback_data).row();
-    }
     const fileCount = (counts.document ?? 0) + (counts.audio ?? 0);
     if (fileCount > 0) {
       const docBtn = await makeActionButton(ctx, {
-        label: t('buttons.notes_document', { count: String(fileCount) }),
+        label: labels.notesButtons.document({ count: String(fileCount) }),
         action: 'notes.attachments_kind',
         data: { noteId: note.id, kind: 'document', noteDate, page, historyPage }
       });
@@ -2084,7 +2079,7 @@ const renderNoteDetails = async (
   kb.text(backBtn.text, backBtn.callback_data);
 
   await renderScreen(ctx, {
-    titleKey: t('screens.notes.detail_title_label'),
+    title: labels.notes.detailTitleLabel(),
     bodyLines: lines,
     inlineKeyboard: kb
   });
@@ -2101,28 +2096,28 @@ const renderNoteEditMenu = async (
     await renderNotesHistory(ctx);
     return;
   }
-  const title = note.title && note.title.trim().length > 0 ? note.title : t('screens.notes.untitled');
-  const lines = [t('screens.notes.editing', { title })];
+  const title = note.title && note.title.trim().length > 0 ? note.title : labels.notes.untitled();
+  const lines = [labels.notes.editing({ title })];
 
   const titleBtn = await makeActionButton(ctx, {
-    label: t('buttons.notes_edit_title'),
+    label: labels.notesButtons.editTitle(),
     action: 'notes.edit_title',
     data: { noteId: note.id, noteDate: viewContext.noteDate ?? note.note_date, page: viewContext.page ?? 0, historyPage: viewContext.historyPage ?? 0 }
   });
   const bodyBtn = await makeActionButton(ctx, {
-    label: t('buttons.notes_edit_body'),
+    label: labels.notesButtons.editBody(),
     action: 'notes.edit_body',
     data: { noteId: note.id, noteDate: viewContext.noteDate ?? note.note_date, page: viewContext.page ?? 0, historyPage: viewContext.historyPage ?? 0 }
   });
   const backBtn = await makeActionButton(ctx, {
-    label: t('buttons.notes_back'),
+    label: labels.notesButtons.back(),
     action: 'notes.view_note',
     data: { noteId: note.id, noteDate: viewContext.noteDate ?? note.note_date, page: viewContext.page ?? 0, historyPage: viewContext.historyPage ?? 0 }
   });
 
   const kb = new InlineKeyboard().text(titleBtn.text, titleBtn.callback_data).row().text(bodyBtn.text, bodyBtn.callback_data).row().text(backBtn.text, backBtn.callback_data);
 
-  await renderScreen(ctx, { titleKey: t('screens.notes.edit_menu_title'), bodyLines: lines, inlineKeyboard: kb });
+  await renderScreen(ctx, { title: labels.notes.editMenuTitle(), bodyLines: lines, inlineKeyboard: kb });
 };
 
 const renderNoteAttachmentPrompt = async (
@@ -2131,18 +2126,18 @@ const renderNoteAttachmentPrompt = async (
   viewContext: { noteDate?: string; page?: number; historyPage?: number } = {}
 ): Promise<void> => {
   const doneBtn = await makeActionButton(ctx, {
-    label: t('buttons.notes_attach_done'),
+    label: labels.notesButtons.attachDone(),
     action: 'notes.attach_done',
     data: { noteId, ...viewContext }
   });
   const cancelBtn = await makeActionButton(ctx, {
-    label: t('buttons.notes_attach_cancel'),
+    label: labels.notesButtons.attachCancel(),
     action: 'notes.attach_cancel',
     data: { noteId, ...viewContext }
   });
   const kb = new InlineKeyboard().text(doneBtn.text, doneBtn.callback_data).row().text(cancelBtn.text, cancelBtn.callback_data);
 
-  await renderScreen(ctx, { titleKey: t('screens.notes.title'), bodyLines: [t('screens.notes.attachments_prompt')], inlineKeyboard: kb });
+  await renderScreen(ctx, { title: labels.notes.title(), bodyLines: [labels.notes.attachmentsPrompt()], inlineKeyboard: kb });
 };
 
 const buildNoteCaptionCategories = (attachments: NoteAttachmentRow[]): NoteCaptionCategory[] => {
@@ -2165,17 +2160,17 @@ const renderNoteCaptionChoice = async (
 ): Promise<void> => {
   if (!ctx.from) return;
   const allBtn = await makeActionButton(ctx, {
-    label: t('buttons.notes_caption_all'),
+    label: labels.notesButtons.captionAll(),
     action: 'notes.caption_all',
     data: { noteId, ...viewContext }
   });
   const byCategoryBtn = await makeActionButton(ctx, {
-    label: t('buttons.notes_caption_by_category'),
+    label: labels.notesButtons.captionByCategory(),
     action: 'notes.caption_by_category',
     data: { noteId, ...viewContext }
   });
   const skipBtn = await makeActionButton(ctx, {
-    label: t('buttons.notes_caption_skip'),
+    label: labels.notesButtons.captionSkip(),
     action: 'notes.caption_skip',
     data: { noteId, ...viewContext }
   });
@@ -2195,8 +2190,8 @@ const renderNoteCaptionChoice = async (
   });
 
   await renderScreen(ctx, {
-    titleKey: t('screens.notes.title'),
-    bodyLines: [t('screens.notes.captions_summary', { summary: summaryLine }), t('screens.notes.captions_prompt')],
+    title: labels.notes.title(),
+    bodyLines: [labels.notes.captionsSummary({ summary: summaryLine }), labels.notes.captionsPrompt()],
     inlineKeyboard: kb
   });
 };
@@ -2210,7 +2205,7 @@ const promptNoteCaptionCategory = async (
 ): Promise<void> => {
   if (!ctx.from) return;
   const skipBtn = await makeActionButton(ctx, {
-    label: t('buttons.notes_skip'),
+    label: labels.notesButtons.skip(),
     action: 'notes.caption_category_skip',
     data: { noteId, ...viewContext }
   });
@@ -2223,8 +2218,8 @@ const promptNoteCaptionCategory = async (
     captionCategories: categories,
     viewContext
   });
-  const label = t(`screens.notes.caption_${category}`);
-  await renderScreen(ctx, { titleKey: t('screens.notes.title'), bodyLines: [t('screens.notes.caption_category_prompt', { category: label })], inlineKeyboard: kb });
+  const label = labels.notes.captionLabel(category);
+  await renderScreen(ctx, { title: labels.notes.title(), bodyLines: [labels.notes.captionCategoryPrompt({ category: label })], inlineKeyboard: kb });
 };
 
 const startNoteCaptionFlow = async (
@@ -2275,14 +2270,14 @@ const finalizeNoteArchive = async (
   }
   const archiveChatId = getNotesArchiveChatId();
   if (!archiveChatId) {
-    await renderScreen(ctx, { titleKey: t('screens.notes.title'), bodyLines: [t('screens.notes.attachments_failed')] });
+    await renderScreen(ctx, { title: labels.notes.title(), bodyLines: [labels.notes.attachmentsFailed()] });
     return;
   }
   const telegramMeta = resolveTelegramUserMeta(ctx, user);
 
   const targetId = ctx.chat?.id ?? ctx.from?.id ?? Number(user.telegram_id);
   const savingMessage = targetId
-    ? await ctx.api.sendMessage(targetId, t('screens.notes.saving'))
+    ? await ctx.api.sendMessage(targetId, labels.notes.saving())
     : null;
 
   const summary = buildSummaryFromNoteAttachments(pendingAttachments);
@@ -2303,7 +2298,7 @@ const finalizeNoteArchive = async (
       appUserId: user.id
     },
     timeLabel,
-    kindLabel: 'Note',
+    kindLabel: labels.archive.kindNote(),
     title: note.title ?? null,
     description: note.description ?? note.body ?? null,
     attachments
@@ -2348,9 +2343,9 @@ const finalizeNoteArchive = async (
 
   if (savingMessage && targetId) {
     try {
-      await ctx.api.editMessageText(targetId, savingMessage.message_id, t('screens.notes.saved'));
+      await ctx.api.editMessageText(targetId, savingMessage.message_id, labels.notes.saved());
     } catch {
-      await ctx.api.sendMessage(targetId, t('screens.notes.saved'));
+      await ctx.api.sendMessage(targetId, labels.notes.saved());
     }
   }
 
@@ -2378,17 +2373,17 @@ const renderReminderCaptionChoice = async (
   const currentFlow = userStates.get(String(ctx.from.id))?.reminderFlow;
   if (!currentFlow) return;
   const allBtn = await makeActionButton(ctx, {
-    label: t('buttons.notes_caption_all'),
+    label: labels.notesButtons.captionAll(),
     action: 'reminders.caption_all',
     data: { reminderId }
   });
   const byCategoryBtn = await makeActionButton(ctx, {
-    label: t('buttons.notes_caption_by_category'),
+    label: labels.notesButtons.captionByCategory(),
     action: 'reminders.caption_by_category',
     data: { reminderId }
   });
   const skipBtn = await makeActionButton(ctx, {
-    label: t('buttons.notes_caption_skip'),
+    label: labels.notesButtons.captionSkip(),
     action: 'reminders.caption_skip',
     data: { reminderId }
   });
@@ -2407,8 +2402,8 @@ const renderReminderCaptionChoice = async (
   });
 
   await renderScreen(ctx, {
-    titleKey: t('screens.reminders.new_title'),
-    bodyLines: [t('screens.notes.captions_summary', { summary: summaryLine }), t('screens.notes.captions_prompt')],
+    title: labels.reminders.newTitle(),
+    bodyLines: [labels.notes.captionsSummary({ summary: summaryLine }), labels.notes.captionsPrompt()],
     inlineKeyboard: kb
   });
 };
@@ -2422,7 +2417,7 @@ const promptReminderCaptionCategory = async (
   if (!ctx.from) return;
   const currentFlow = userStates.get(String(ctx.from.id))?.reminderFlow;
   if (!currentFlow) return;
-  const skipBtn = await makeActionButton(ctx, { label: t('buttons.notes_skip'), action: 'reminders.caption_category_skip', data: { reminderId } });
+  const skipBtn = await makeActionButton(ctx, { label: labels.notesButtons.skip(), action: 'reminders.caption_category_skip', data: { reminderId } });
   const kb = new InlineKeyboard().text(skipBtn.text, skipBtn.callback_data);
   setReminderFlow(String(ctx.from.id), {
     ...currentFlow,
@@ -2431,8 +2426,8 @@ const promptReminderCaptionCategory = async (
     currentCategory: category,
     captionCategories: categories
   });
-  const label = t(`screens.notes.caption_${category}`);
-  await renderScreen(ctx, { titleKey: t('screens.reminders.new_title'), bodyLines: [t('screens.notes.caption_category_prompt', { category: label })], inlineKeyboard: kb });
+  const label = labels.notes.captionLabel(category);
+  await renderScreen(ctx, { title: labels.reminders.newTitle(), bodyLines: [labels.notes.captionCategoryPrompt({ category: label })], inlineKeyboard: kb });
 };
 
 const applyCaptionToReminderAttachments = (
@@ -2495,13 +2490,13 @@ const finalizeReminderArchive = async (
 
   const archiveChatId = getRemindersArchiveChatId();
   if (!archiveChatId) {
-    await renderScreen(ctx, { titleKey: t('screens.reminders.new_title'), bodyLines: [t('screens.reminders.attachments_failed')] });
+    await renderScreen(ctx, { title: labels.reminders.newTitle(), bodyLines: [labels.reminders.attachmentsFailed()] });
     return;
   }
 
   const telegramMeta = resolveTelegramUserMeta(ctx, user);
   const targetId = ctx.chat?.id ?? ctx.from?.id ?? Number(user.telegram_id);
-  const savingMessage = targetId ? await ctx.api.sendMessage(targetId, t('screens.reminders.saving')) : null;
+  const savingMessage = targetId ? await ctx.api.sendMessage(targetId, labels.reminders.saving()) : null;
 
   const summary = buildSummaryFromNoteAttachments(attachments);
   const archiveResult = await sendArchiveItemToChannel(ctx.api, {
@@ -2514,7 +2509,7 @@ const finalizeReminderArchive = async (
       appUserId: user.id
     },
     timeLabel: buildArchiveTimeLabel(reminder.created_at, user.timezone ?? config.defaultTimezone),
-    kindLabel: 'Reminder',
+    kindLabel: labels.archive.kindReminder(),
     title: reminder.title ?? null,
     description: reminder.description ?? null,
     attachments: attachments.map((attachment, index) => ({
@@ -2568,9 +2563,9 @@ const finalizeReminderArchive = async (
 
   if (savingMessage && targetId) {
     try {
-      await ctx.api.editMessageText(targetId, savingMessage.message_id, t('screens.reminders.saved'));
+      await ctx.api.editMessageText(targetId, savingMessage.message_id, labels.reminders.saved());
     } catch {
-      await ctx.api.sendMessage(targetId, t('screens.reminders.saved'));
+      await ctx.api.sendMessage(targetId, labels.reminders.saved());
     }
   }
 
@@ -2595,40 +2590,46 @@ const renderNoteAttachmentsList = async (
     return;
   }
 
-  const kinds = params.kind === 'document' ? (['document', 'audio'] as NoteAttachmentKind[]) : [params.kind];
+  const kinds =
+    params.kind === 'document'
+      ? (['document', 'audio'] as NoteAttachmentKind[])
+      : params.kind === 'video'
+        ? (['video', 'video_note'] as NoteAttachmentKind[])
+        : [params.kind];
   const attachments = await listNoteAttachmentsByKinds({ noteId: params.noteId, kinds });
-  const kindLabel = params.kind === 'document' ? t('screens.notes.kind_files') : t(`screens.notes.kind_${params.kind}`);
+  const kindLabel = labels.notes.kindLabel(params.kind);
   const noteDate = params.noteDate || note.note_date;
   const lines: string[] = [];
   if (!attachments.length) {
-    lines.push(t('screens.notes.attachments_empty', { kind: kindLabel }));
+    lines.push(labels.notes.attachmentsEmpty({ kind: kindLabel }));
   } else {
-    lines.push(t('screens.notes.attachments_header', { kind: kindLabel }), '');
+    lines.push(labels.notes.attachmentsHeader({ kind: kindLabel }), '');
     attachments.forEach((attachment, index) => {
       const local = formatInstantToLocal(attachment.created_at, user.timezone ?? config.defaultTimezone);
-      const caption = attachment.caption && attachment.caption.trim().length > 0 ? attachment.caption : t('screens.notes.attachment_no_caption');
-      lines.push(t('screens.notes.attachment_line', { index: String(index + 1), time: local.time, caption }));
+      const caption = attachment.caption && attachment.caption.trim().length > 0 ? attachment.caption : labels.notes.attachmentNoCaption();
+      lines.push(labels.notes.attachmentLine({ index: String(index + 1), time: local.time, caption }));
     });
   }
 
   const kb = new InlineKeyboard();
   for (let index = 0; index < attachments.length; index += 1) {
     const attachment = attachments[index];
+    const kindEmoji = getNoteAttachmentKindEmoji(params.kind);
     const btn = await makeActionButton(ctx, {
-      label: `${getNoteAttachmentKindEmoji(params.kind)} ${index + 1}`,
+      label: kindEmoji ? `${kindEmoji} ${index + 1}` : `${index + 1}`,
       action: 'notes.attachment_open',
       data: { noteId: params.noteId, attachmentId: attachment.id, kind: params.kind, noteDate, page: params.page, historyPage: params.historyPage }
     });
     kb.text(btn.text, btn.callback_data).row();
   }
   const backBtn = await makeActionButton(ctx, {
-    label: t('buttons.notes_back'),
+    label: labels.notesButtons.back(),
     action: 'notes.view_note',
     data: { noteId: params.noteId, noteDate, page: params.page, historyPage: params.historyPage }
   });
   kb.text(backBtn.text, backBtn.callback_data);
 
-  await renderScreen(ctx, { titleKey: t('screens.notes.attachments_title', { kind: kindLabel }), bodyLines: lines, inlineKeyboard: kb });
+  await renderScreen(ctx, { title: labels.notes.attachmentsTitle({ kind: kindLabel }), bodyLines: lines, inlineKeyboard: kb });
 };
 
 const buildNoteCaptionBlock = (
@@ -2636,7 +2637,7 @@ const buildNoteCaptionBlock = (
   category: NoteCaptionCategory,
   _attachments: NoteAttachmentRow[]
 ): string | null => {
-  const header = NOTE_CAPTION_HEADERS[category];
+  const header = getNoteCaptionHeader(category);
   const singleCaption = resolveNoteCaptionForCategory(note, category)?.trim();
   if (singleCaption) {
     return `${header}\n${singleCaption}`;
@@ -2669,7 +2670,12 @@ const sendNoteAttachmentsByKind = async (
     await renderNotesHistory(ctx);
     return;
   }
-  const kinds = params.kind === 'document' ? (['document', 'audio'] as NoteAttachmentKind[]) : [params.kind];
+  const kinds =
+    params.kind === 'document'
+      ? (['document', 'audio'] as NoteAttachmentKind[])
+      : params.kind === 'video'
+        ? (['video', 'video_note'] as NoteAttachmentKind[])
+        : [params.kind];
   const attachments = await listNoteAttachmentsByKinds({ noteId: params.noteId, kinds });
   const targetId = ctx.chat?.id ?? ctx.from?.id ?? Number(user.telegram_id);
   if (!targetId) {
@@ -2704,16 +2710,14 @@ const sendNoteEverything = async (
   }
   const attachments = await listNoteAttachments({ noteId: note.id });
   const photos = attachments.filter((attachment) => attachment.kind === 'photo');
-  const videos = attachments.filter((attachment) => attachment.kind === 'video');
+  const videos = attachments.filter((attachment) => attachment.kind === 'video' || attachment.kind === 'video_note');
   const voices = attachments.filter((attachment) => attachment.kind === 'voice');
-  const videoNotes = attachments.filter((attachment) => attachment.kind === 'video_note');
   const files = attachments.filter((attachment) => attachment.kind === 'document' || attachment.kind === 'audio');
 
   const batches: Array<{ category: NoteCaptionCategory; items: NoteAttachmentRow[] }> = [
     { category: 'photo', items: photos },
     { category: 'video', items: videos },
     { category: 'voice', items: voices },
-    { category: 'video_note', items: videoNotes },
     { category: 'files', items: files }
   ];
   for (const batch of batches) {
@@ -2725,9 +2729,13 @@ const sendNoteEverything = async (
     }
   }
 
-  const title = note.title && note.title.trim().length > 0 ? note.title : t('screens.notes.untitled');
+  const title = note.title && note.title.trim().length > 0 ? note.title : labels.notes.untitled();
   const description = note.description ?? note.body ?? '';
-  const detailLines = [`🏷️ Title: ${title}`, '📝 Description:', description.length > 0 ? description : '—'];
+  const detailLines = [
+    labels.notes.detailTitle({ title }),
+    labels.notes.descriptionLabel(),
+    description.length > 0 ? description : '—'
+  ];
   const chunks = splitTextForTelegram(detailLines.join('\n'));
   for (const chunk of chunks) {
     await ctx.api.sendMessage(targetId, chunk);
@@ -2775,18 +2783,18 @@ const handleNoteAttachmentMessage = async (
       const idleFor = Date.now() - session.lastReceivedAt;
       if (idleFor < NOTE_UPLOAD_IDLE_MS) return;
       const saveBtn = await makeActionButton(ctx, {
-        label: t('buttons.notes_save_now'),
+        label: labels.notesButtons.saveNow(),
         action: 'notes.attachments_save',
         data: { noteId: session.noteId, ...(session.viewContext ?? {}) }
       });
       const continueBtn = await makeActionButton(ctx, {
-        label: t('buttons.notes_continue'),
+        label: labels.notesButtons.continue(),
         action: 'notes.attachments_continue',
         data: { noteId: session.noteId, ...(session.viewContext ?? {}) }
       });
       const kb = new InlineKeyboard().text(saveBtn.text, saveBtn.callback_data).row().text(continueBtn.text, continueBtn.callback_data);
       setNoteUploadSession(stateKey, { ...session, prompted: true });
-      await renderScreen(ctx, { titleKey: t('screens.notes.title'), bodyLines: [t('screens.notes.attachments_idle_prompt')], inlineKeyboard: kb });
+      await renderScreen(ctx, { title: labels.notes.title(), bodyLines: [labels.notes.attachmentsIdlePrompt()], inlineKeyboard: kb });
     }, NOTE_UPLOAD_IDLE_MS);
 
     setNoteUploadSession(stateKey, {
@@ -2799,7 +2807,7 @@ const handleNoteAttachmentMessage = async (
     });
   } catch (error) {
     console.error({ scope: 'notes', event: 'attachment_save_failed', error, kind: params.kind });
-    await renderScreen(ctx, { titleKey: t('screens.notes.title'), bodyLines: [t('screens.notes.attachments_failed')] });
+    await renderScreen(ctx, { title: labels.notes.title(), bodyLines: [labels.notes.attachmentsFailed()] });
   }
 };
 
@@ -2845,18 +2853,18 @@ const handleReminderAttachmentMessage = async (
     const idleFor = Date.now() - session.lastReceivedAt;
     if (idleFor < REMINDER_UPLOAD_IDLE_MS) return;
     const saveBtn = await makeActionButton(ctx, {
-      label: t('buttons.notes_save_now'),
+      label: labels.notesButtons.saveNow(),
       action: 'reminders.attachments_save',
       data: { reminderId }
     });
     const continueBtn = await makeActionButton(ctx, {
-      label: t('buttons.notes_continue'),
+      label: labels.notesButtons.continue(),
       action: 'reminders.attachments_continue',
       data: { reminderId }
     });
     const kb = new InlineKeyboard().text(saveBtn.text, saveBtn.callback_data).row().text(continueBtn.text, continueBtn.callback_data);
     setReminderUploadSession(stateKey, { ...session, prompted: true });
-    await renderScreen(ctx, { titleKey: t('screens.reminders.new_title'), bodyLines: [t('screens.reminders.attachments_idle_prompt')], inlineKeyboard: kb });
+    await renderScreen(ctx, { title: labels.reminders.newTitle(), bodyLines: [labels.reminders.attachmentsIdlePrompt()], inlineKeyboard: kb });
   }, REMINDER_UPLOAD_IDLE_MS);
 
   setReminderFlow(stateKey, { ...flow, step: 'attachments', draft: { ...flow.draft, attachments } });
@@ -3146,17 +3154,17 @@ const renderReminders = async (ctx: Context): Promise<void> => {
   const lines: string[] = [];
 
   if (reminders.length === 0) {
-    lines.push(t('screens.reminders.empty'));
+    lines.push(labels.reminders.empty());
   } else {
-    lines.push(t('screens.reminders.list_header'), '');
+    lines.push(labels.reminders.listHeader(), '');
     for (const r of reminders) {
-      const status = isReminderActive(r) ? t('screens.reminders.status_on') : t('screens.reminders.status_off');
+      const status = isReminderActive(r) ? labels.reminders.statusOnLabel() : labels.reminders.statusOffLabel();
       const local = r.next_run_at ? formatInstantToLocal(r.next_run_at, user.timezone ?? config.defaultTimezone) : null;
-      const timePart = local ? `${local.date} ${local.time}` : t('screens.reminders.no_time');
+      const timePart = local ? `${local.date} ${local.time}` : labels.reminders.noTime();
       const attachments = attachmentCounts[r.id] ?? 0;
-      const title = r.title && r.title.trim().length > 0 ? r.title : t('screens.reminders.untitled');
+      const title = r.title && r.title.trim().length > 0 ? r.title : labels.reminders.untitled();
       lines.push(
-        t('screens.reminders.item_line', {
+        labels.reminders.itemLine({
           status,
           time: timePart,
           title,
@@ -3166,33 +3174,33 @@ const renderReminders = async (ctx: Context): Promise<void> => {
     }
   }
 
-  lines.push('', t('screens.reminders.actions_hint'));
+  lines.push('', labels.reminders.actionsHint());
 
   const kb = new InlineKeyboard();
 
-  const newBtn = await makeActionButton(ctx, { label: t('buttons.reminders_new') ?? '➕ New', action: 'reminders.new' });
+  const newBtn = await makeActionButton(ctx, { label: labels.remindersButtons.new(), action: 'reminders.new' });
   kb.text(newBtn.text, newBtn.callback_data).row();
 
   for (const r of reminders) {
-    const editBtn = await makeActionButton(ctx, { label: t('buttons.reminders_edit') ?? '✏️ Edit', action: 'reminders.edit_open', data: { reminderId: r.id } });
+    const editBtn = await makeActionButton(ctx, { label: labels.remindersButtons.edit(), action: 'reminders.edit_open', data: { reminderId: r.id } });
     const toggleBtn = await makeActionButton(ctx, {
-      label: isReminderActive(r) ? (t('buttons.reminders_toggle_off') ?? '⛔ Deactivate') : (t('buttons.reminders_toggle_on') ?? '✅ Activate'),
+      label: isReminderActive(r) ? labels.remindersButtons.toggleOff() : labels.remindersButtons.toggleOn(),
       action: 'reminders.toggle',
       data: { reminderId: r.id }
     });
     const deleteBtn = await makeActionButton(ctx, {
-      label: t('buttons.reminders_delete') ?? '🗑️ Delete',
+      label: labels.remindersButtons.delete(),
       action: 'reminders.delete',
       data: { reminderId: r.id }
     });
     kb.text(editBtn.text, editBtn.callback_data).text(toggleBtn.text, toggleBtn.callback_data).text(deleteBtn.text, deleteBtn.callback_data).row();
   }
 
-  const back = await makeActionButton(ctx, { label: t('buttons.reminders_back') ?? '🔙 Back', action: 'nav.dashboard' });
+  const back = await makeActionButton(ctx, { label: labels.remindersButtons.back(), action: 'nav.dashboard' });
   kb.text(back.text, back.callback_data);
 
   await renderScreen(ctx, {
-    titleKey: t('screens.reminders.title'),
+    title: labels.reminders.title(),
     bodyLines: lines,
     inlineKeyboard: kb
   });
@@ -3208,28 +3216,27 @@ const renderReminderDetails = async (ctx: Context, reminderId: string, flash?: s
 
   const timezone = user.timezone ?? config.defaultTimezone;
   const local = reminder.next_run_at ? formatInstantToLocal(reminder.next_run_at, timezone) : null;
-  const clockEmoji = getClockEmojiForTime(local?.time ?? reminder.at_time ?? null);
-  const statusLabel = isReminderActive(reminder) ? t('screens.reminders.status_on') : t('screens.reminders.status_off');
+  const statusLabel = isReminderActive(reminder) ? labels.reminders.statusOn() : labels.reminders.statusOff();
   const attachments = await listReminderAttachments({ reminderId: reminder.id });
-  const scheduleLabel = t(`screens.reminders.schedule_type_${reminder.schedule_type}` as const);
+  const scheduleLabel = labels.reminders.scheduleTypeLabel(reminder.schedule_type);
 
   const rawDescription = reminder.description?.trim() ?? '';
   const hasArchivedDescription = Boolean(reminder.archive_item_id || reminder.desc_group_key);
-  const descriptionNotice = t('screens.reminders.details_archived_notice');
+  const descriptionNotice = labels.reminders.detailsArchivedNotice();
   const buildReminderLines = (limit: number): string[] => {
     const showNotice = hasArchivedDescription || rawDescription.length > limit;
     const detail = rawDescription.length
       ? buildArchivedPreview(rawDescription, limit, showNotice, descriptionNotice)
-      : t('screens.reminders.details_empty');
-    const title = reminder.title && reminder.title.trim().length > 0 ? reminder.title : t('screens.reminders.untitled');
+      : labels.reminders.detailsEmpty();
+    const title = reminder.title && reminder.title.trim().length > 0 ? reminder.title : labels.reminders.untitled();
     return [
       flash,
-      t('screens.reminders.details_title_line', { title }),
-      t('screens.reminders.details_detail_line', { detail }),
-      t('screens.reminders.details_schedule_line', { schedule: scheduleLabel }),
-      t('screens.reminders.details_scheduled_line', { scheduled: local ? `${local.date} ${local.time}` : t('screens.reminders.no_time') }),
-      t('screens.reminders.details_status_line', { status: statusLabel }),
-      t('screens.reminders.details_attachments_line', { count: String(attachments.length) })
+      labels.reminders.detailsTitleLine({ title }),
+      labels.reminders.detailsDetailLine({ detail }),
+      labels.reminders.detailsScheduleLine({ schedule: scheduleLabel }),
+      labels.reminders.detailsScheduledLine({ scheduled: local ? `${local.date} ${local.time}` : labels.reminders.noTime() }),
+      labels.reminders.detailsStatusLine({ status: statusLabel, enabled: isReminderActive(reminder) }),
+      labels.reminders.detailsAttachmentsLine({ count: String(attachments.length) })
     ].filter(Boolean) as string[];
   };
   let lines = buildReminderLines(REMINDER_DESC_PREVIEW_LIMIT);
@@ -3243,23 +3250,23 @@ const renderReminderDetails = async (ctx: Context, reminderId: string, flash?: s
   const kb = new InlineKeyboard();
   if (hasArchivedDescription || rawDescription.length > REMINDER_DESC_PREVIEW_LIMIT) {
     const viewBtn = await makeActionButton(ctx, {
-      label: t('buttons.reminders_view_full'),
+      label: labels.remindersButtons.viewFull(),
       action: 'reminders.desc_view',
       data: { reminderId }
     });
     kb.text(viewBtn.text, viewBtn.callback_data).row();
   }
-  const editTitleBtn = await makeActionButton(ctx, { label: t('buttons.reminders_edit_title'), action: 'reminders.edit_title', data: { reminderId } });
-  const editDetailBtn = await makeActionButton(ctx, { label: t('buttons.reminders_edit_detail'), action: 'reminders.edit_detail', data: { reminderId } });
-  const editScheduleBtn = await makeActionButton(ctx, { label: t('buttons.reminders_edit_schedule'), action: 'reminders.edit_schedule', data: { reminderId } });
-  const attachBtn = await makeActionButton(ctx, { label: t('buttons.reminders_attach'), action: 'reminders.attach', data: { reminderId } });
+  const editTitleBtn = await makeActionButton(ctx, { label: labels.remindersButtons.editTitle(), action: 'reminders.edit_title', data: { reminderId } });
+  const editDetailBtn = await makeActionButton(ctx, { label: labels.remindersButtons.editDetail(), action: 'reminders.edit_detail', data: { reminderId } });
+  const editScheduleBtn = await makeActionButton(ctx, { label: labels.remindersButtons.editSchedule(), action: 'reminders.edit_schedule', data: { reminderId } });
+  const attachBtn = await makeActionButton(ctx, { label: labels.remindersButtons.attach(), action: 'reminders.attach', data: { reminderId } });
   const toggleBtn = await makeActionButton(ctx, {
-    label: isReminderActive(reminder) ? t('buttons.reminders_toggle_off') : t('buttons.reminders_toggle_on'),
+    label: isReminderActive(reminder) ? labels.remindersButtons.toggleOff() : labels.remindersButtons.toggleOn(),
     action: 'reminders.toggle',
     data: { reminderId }
   });
-  const deleteBtn = await makeActionButton(ctx, { label: t('buttons.reminders_delete'), action: 'reminders.delete', data: { reminderId } });
-  const backBtn = await makeActionButton(ctx, { label: t('buttons.reminders_back'), action: 'nav.reminders' });
+  const deleteBtn = await makeActionButton(ctx, { label: labels.remindersButtons.delete(), action: 'reminders.delete', data: { reminderId } });
+  const backBtn = await makeActionButton(ctx, { label: labels.remindersButtons.back(), action: 'nav.reminders' });
 
   kb.text(editTitleBtn.text, editTitleBtn.callback_data).row();
   kb.text(editDetailBtn.text, editDetailBtn.callback_data).row();
@@ -3270,7 +3277,7 @@ const renderReminderDetails = async (ctx: Context, reminderId: string, flash?: s
   kb.text(backBtn.text, backBtn.callback_data);
 
   await renderScreen(ctx, {
-    title: `${clockEmoji} ${t('screens.reminders.details_title')}`,
+    title: labels.reminders.detailsTitle({ time: local?.time ?? reminder.at_time }),
     bodyLines: lines,
     inlineKeyboard: kb
   });
@@ -3279,13 +3286,13 @@ const renderReminderDetails = async (ctx: Context, reminderId: string, flash?: s
 const renderReminderTitlePrompt = async (ctx: Context, mode: ReminderFlow['mode'], reminderId?: string): Promise<void> => {
   const kb = new InlineKeyboard();
   if (mode === 'create') {
-    const skipBtn = await makeActionButton(ctx, { label: t('buttons.notes_skip'), action: 'reminders.skip_title' });
+    const skipBtn = await makeActionButton(ctx, { label: labels.notesButtons.skip(), action: 'reminders.skip_title' });
     kb.text(skipBtn.text, skipBtn.callback_data).row();
   }
   const backAction = mode === 'edit' ? 'reminders.edit_open' : 'nav.reminders';
-  const backBtn = await makeActionButton(ctx, { label: t('buttons.reminders_back'), action: backAction, data: reminderId ? { reminderId } : undefined });
+  const backBtn = await makeActionButton(ctx, { label: labels.remindersButtons.back(), action: backAction, data: reminderId ? { reminderId } : undefined });
   kb.text(backBtn.text, backBtn.callback_data);
-  await renderScreen(ctx, { titleKey: t('screens.reminders.new_title'), bodyLines: [t('screens.reminders.new_enter_title')], inlineKeyboard: kb });
+  await renderScreen(ctx, { title: labels.reminders.newTitle(), bodyLines: [labels.reminders.newEnterTitle()], inlineKeyboard: kb });
 };
 
 const renderReminderDescriptionPrompt = async (
@@ -3295,17 +3302,17 @@ const renderReminderDescriptionPrompt = async (
 ): Promise<void> => {
   const kb = new InlineKeyboard();
   if (mode === 'create') {
-    const skipBtn = await makeActionButton(ctx, { label: t('buttons.notes_skip'), action: 'reminders.skip_description', data: reminderId ? { reminderId } : undefined });
+    const skipBtn = await makeActionButton(ctx, { label: labels.notesButtons.skip(), action: 'reminders.skip_description', data: reminderId ? { reminderId } : undefined });
     kb.text(skipBtn.text, skipBtn.callback_data).row();
   }
-  const doneBtn = await makeActionButton(ctx, { label: t('buttons.reminders_description_done'), action: 'reminders.description_done', data: reminderId ? { reminderId } : undefined });
-  const attachBtn = await makeActionButton(ctx, { label: t('buttons.reminders_attach'), action: 'reminders.attach', data: reminderId ? { reminderId } : undefined });
+  const doneBtn = await makeActionButton(ctx, { label: labels.remindersButtons.descriptionDone(), action: 'reminders.description_done', data: reminderId ? { reminderId } : undefined });
+  const attachBtn = await makeActionButton(ctx, { label: labels.remindersButtons.attach(), action: 'reminders.attach', data: reminderId ? { reminderId } : undefined });
   const backAction = mode === 'edit' ? 'reminders.edit_open' : 'nav.reminders';
-  const backBtn = await makeActionButton(ctx, { label: t('buttons.reminders_back'), action: backAction, data: reminderId ? { reminderId } : undefined });
+  const backBtn = await makeActionButton(ctx, { label: labels.remindersButtons.back(), action: backAction, data: reminderId ? { reminderId } : undefined });
   kb.text(doneBtn.text, doneBtn.callback_data).row();
   kb.text(attachBtn.text, attachBtn.callback_data).row();
   kb.text(backBtn.text, backBtn.callback_data);
-  await renderScreen(ctx, { titleKey: t('screens.reminders.new_title'), bodyLines: [t('screens.reminders.description_prompt')], inlineKeyboard: kb });
+  await renderScreen(ctx, { title: labels.reminders.newTitle(), bodyLines: [labels.reminders.descriptionPrompt()], inlineKeyboard: kb });
 };
 
 const renderReminderScheduleTypePrompt = async (
@@ -3315,41 +3322,41 @@ const renderReminderScheduleTypePrompt = async (
 ): Promise<void> => {
   const kb = new InlineKeyboard();
   const types: Array<{ key: ReminderScheduleType; label: string }> = [
-    { key: 'once', label: t('screens.reminders.schedule_once') },
-    { key: 'hourly', label: t('screens.reminders.schedule_hourly') },
-    { key: 'daily', label: t('screens.reminders.schedule_daily') },
-    { key: 'weekly', label: t('screens.reminders.schedule_weekly') },
-    { key: 'monthly', label: t('screens.reminders.schedule_monthly') },
-    { key: 'yearly', label: t('screens.reminders.schedule_yearly') }
+    { key: 'once', label: labels.reminders.scheduleOnce() },
+    { key: 'hourly', label: labels.reminders.scheduleHourly() },
+    { key: 'daily', label: labels.reminders.scheduleDaily() },
+    { key: 'weekly', label: labels.reminders.scheduleWeekly() },
+    { key: 'monthly', label: labels.reminders.scheduleMonthly() },
+    { key: 'yearly', label: labels.reminders.scheduleYearly() }
   ];
   for (const entry of types) {
     const btn = await makeActionButton(ctx, { label: entry.label, action: 'reminders.schedule_type', data: { scheduleType: entry.key, mode, reminderId } });
     kb.text(btn.text, btn.callback_data).row();
   }
   const backAction = mode === 'edit' ? 'reminders.edit_open' : 'nav.reminders';
-  const backBtn = await makeActionButton(ctx, { label: t('buttons.reminders_back'), action: backAction, data: reminderId ? { reminderId } : undefined });
+  const backBtn = await makeActionButton(ctx, { label: labels.remindersButtons.back(), action: backAction, data: reminderId ? { reminderId } : undefined });
   kb.text(backBtn.text, backBtn.callback_data);
-  await renderScreen(ctx, { titleKey: t('screens.reminders.new_title'), bodyLines: [t('screens.reminders.schedule_type_prompt')], inlineKeyboard: kb });
+  await renderScreen(ctx, { title: labels.reminders.newTitle(), bodyLines: [labels.reminders.scheduleTypePrompt()], inlineKeyboard: kb });
 };
 
 const renderReminderAttachmentPrompt = async (
   ctx: Context,
   params: { mode: ReminderFlow['mode']; reminderId?: string }
 ): Promise<void> => {
-  const doneBtn = await makeActionButton(ctx, { label: t('buttons.notes_attach_done'), action: 'reminders.attach_done', data: params.reminderId ? { reminderId: params.reminderId } : undefined });
+  const doneBtn = await makeActionButton(ctx, { label: labels.notesButtons.attachDone(), action: 'reminders.attach_done', data: params.reminderId ? { reminderId: params.reminderId } : undefined });
   const backAction = params.mode === 'edit' ? 'reminders.edit_open' : 'reminders.schedule_back';
   const backData = params.mode === 'edit' ? { reminderId: params.reminderId } : undefined;
-  const backBtn = await makeActionButton(ctx, { label: t('buttons.reminders_back'), action: backAction, data: backData });
+  const backBtn = await makeActionButton(ctx, { label: labels.remindersButtons.back(), action: backAction, data: backData });
   const kb = new InlineKeyboard().text(doneBtn.text, doneBtn.callback_data).row().text(backBtn.text, backBtn.callback_data);
-  await renderScreen(ctx, { titleKey: t('screens.reminders.new_title'), bodyLines: [t('screens.reminders.attachments_prompt')], inlineKeyboard: kb });
+  await renderScreen(ctx, { title: labels.reminders.newTitle(), bodyLines: [labels.reminders.attachmentsPrompt()], inlineKeyboard: kb });
 };
 
 const renderReminderIntervalPrompt = async (ctx: Context): Promise<void> => {
-  await renderScreen(ctx, { titleKey: t('screens.reminders.new_title'), bodyLines: [t('screens.reminders.interval_prompt')] });
+  await renderScreen(ctx, { title: labels.reminders.newTitle(), bodyLines: [labels.reminders.intervalPrompt()] });
 };
 
 const renderReminderDailyTimePrompt = async (ctx: Context): Promise<void> => {
-  await renderScreen(ctx, { titleKey: t('screens.reminders.new_title'), bodyLines: [t('screens.reminders.daily_time_prompt')] });
+  await renderScreen(ctx, { title: labels.reminders.newTitle(), bodyLines: [labels.reminders.dailyTimePrompt()] });
 };
 
 const renderReminderWeeklyDayPrompt = async (
@@ -3364,13 +3371,13 @@ const renderReminderWeeklyDayPrompt = async (
   }
   const backAction = params.mode === 'edit' ? 'reminders.edit_open' : 'reminders.schedule_back';
   const backData = params.mode === 'edit' ? { reminderId: params.reminderId } : undefined;
-  const backBtn = await makeActionButton(ctx, { label: t('buttons.reminders_back'), action: backAction, data: backData });
+  const backBtn = await makeActionButton(ctx, { label: labels.remindersButtons.back(), action: backAction, data: backData });
   kb.text(backBtn.text, backBtn.callback_data);
-  await renderScreen(ctx, { titleKey: t('screens.reminders.new_title'), bodyLines: [t('screens.reminders.weekly_day_prompt')], inlineKeyboard: kb });
+  await renderScreen(ctx, { title: labels.reminders.newTitle(), bodyLines: [labels.reminders.weeklyDayPrompt()], inlineKeyboard: kb });
 };
 
 const renderReminderMonthlyDayPrompt = async (ctx: Context): Promise<void> => {
-  await renderScreen(ctx, { titleKey: t('screens.reminders.new_title'), bodyLines: [t('screens.reminders.monthly_day_prompt')] });
+  await renderScreen(ctx, { title: labels.reminders.newTitle(), bodyLines: [labels.reminders.monthlyDayPrompt()] });
 };
 
 const renderReminderYearlyMonthPrompt = async (ctx: Context): Promise<void> => {
@@ -3380,7 +3387,7 @@ const renderReminderYearlyMonthPrompt = async (ctx: Context): Promise<void> => {
     kb.text(btn.text, btn.callback_data);
     if (month % 4 === 0) kb.row();
   }
-  await renderScreen(ctx, { titleKey: t('screens.reminders.new_title'), bodyLines: [t('screens.reminders.yearly_month_prompt')], inlineKeyboard: kb });
+  await renderScreen(ctx, { title: labels.reminders.newTitle(), bodyLines: [labels.reminders.yearlyMonthPrompt()], inlineKeyboard: kb });
 };
 
 const getReminderIdFromFlow = (flow: ReminderFlow): string | undefined => {
@@ -3417,7 +3424,7 @@ const persistReminderSchedule = async (ctx: Context, flow: ReminderFlow): Promis
 
   if (flow.mode === 'create') {
     const reminderId = getReminderIdFromFlow(flow);
-    const title = flow.draft.title && flow.draft.title.trim().length > 0 ? flow.draft.title : t('screens.reminders.untitled');
+    const title = flow.draft.title && flow.draft.title.trim().length > 0 ? flow.draft.title : labels.reminders.untitled();
     if (reminderId) {
       await updateReminder(reminderId, {
         title,
@@ -3431,8 +3438,8 @@ const persistReminderSchedule = async (ctx: Context, flow: ReminderFlow): Promis
       clearReminderFlow(String(ctx.from?.id ?? ''));
       const local = nextRunAt ? formatInstantToLocal(nextRunAt.toISOString(), timezone) : null;
       await renderScreen(ctx, {
-        titleKey: t('screens.reminders.new_title'),
-        bodyLines: [t('screens.reminders.new_created', { local_date: local?.date ?? '-', local_time: local?.time ?? '-' })]
+        title: labels.reminders.newTitle(),
+        bodyLines: [labels.reminders.newCreated({ local_date: local?.date ?? '-', local_time: local?.time ?? '-' })]
       });
       await renderReminders(ctx);
       return;
@@ -3451,8 +3458,8 @@ const persistReminderSchedule = async (ctx: Context, flow: ReminderFlow): Promis
     clearReminderFlow(String(ctx.from?.id ?? ''));
     const local = nextRunAt ? formatInstantToLocal(nextRunAt.toISOString(), timezone) : null;
     await renderScreen(ctx, {
-      titleKey: t('screens.reminders.new_title'),
-      bodyLines: [t('screens.reminders.new_created', { local_date: local?.date ?? '-', local_time: local?.time ?? '-' })]
+      title: labels.reminders.newTitle(),
+      bodyLines: [labels.reminders.newCreated({ local_date: local?.date ?? '-', local_time: local?.time ?? '-' })]
     });
     await renderReminders(ctx);
     return;
@@ -3464,7 +3471,7 @@ const persistReminderSchedule = async (ctx: Context, flow: ReminderFlow): Promis
     const isActive = Boolean(enabled) && Boolean(nextRunAt);
     await updateReminder(flow.reminderId, { schedule, nextRunAt, enabled, isActive, status: isActive ? 'active' : 'inactive' });
     clearReminderFlow(String(ctx.from?.id ?? ''));
-    await renderReminderDetails(ctx, flow.reminderId, t('screens.reminders.edit_saved'));
+    await renderReminderDetails(ctx, flow.reminderId, labels.reminders.editSaved());
   }
 };
 
@@ -3476,12 +3483,12 @@ const renderReminderDateSelect = async (
   const weekendDay = getWeekendDay(settings.settings_json as Record<string, unknown>);
   const weekendLabel = getWeekdayLabel(weekendDay);
 
-  const todayBtn = await makeActionButton(ctx, { label: t('buttons.reminders_today'), action: 'reminders.date_select', data: { ...params, choice: 'today' } });
-  const tomorrowBtn = await makeActionButton(ctx, { label: t('buttons.reminders_tomorrow'), action: 'reminders.date_select', data: { ...params, choice: 'tomorrow' } });
-  const weekendBtn = await makeActionButton(ctx, { label: t('buttons.reminders_weekend'), action: 'reminders.date_select', data: { ...params, choice: 'weekend' } });
-  const customBtn = await makeActionButton(ctx, { label: t('buttons.reminders_custom_date'), action: 'reminders.date_select', data: { ...params, choice: 'custom' } });
+  const todayBtn = await makeActionButton(ctx, { label: labels.remindersButtons.today(), action: 'reminders.date_select', data: { ...params, choice: 'today' } });
+  const tomorrowBtn = await makeActionButton(ctx, { label: labels.remindersButtons.tomorrow(), action: 'reminders.date_select', data: { ...params, choice: 'tomorrow' } });
+  const weekendBtn = await makeActionButton(ctx, { label: labels.remindersButtons.weekend(), action: 'reminders.date_select', data: { ...params, choice: 'weekend' } });
+  const customBtn = await makeActionButton(ctx, { label: labels.remindersButtons.customDate(), action: 'reminders.date_select', data: { ...params, choice: 'custom' } });
   const weekendDayBtn = await makeActionButton(ctx, {
-    label: t('buttons.reminders_weekend_day', { day: weekendLabel }),
+    label: labels.remindersButtons.weekendDay({ day: weekendLabel }),
     action: 'reminders.weekend_day',
     data: params
   });
@@ -3497,12 +3504,12 @@ const renderReminderDateSelect = async (
 
   const backAction = params.mode === 'edit' ? 'reminders.edit_open' : 'reminders.schedule_back';
   const backData = params.mode === 'edit' ? { reminderId: params.reminderId } : undefined;
-  const backBtn = await makeActionButton(ctx, { label: t('buttons.reminders_back'), action: backAction, data: backData });
+  const backBtn = await makeActionButton(ctx, { label: labels.remindersButtons.back(), action: backAction, data: backData });
   kb.row().text(backBtn.text, backBtn.callback_data);
 
   await renderScreen(ctx, {
-    titleKey: t('screens.reminders.new_title'),
-    bodyLines: [t('screens.reminders.new_choose_date')],
+    title: labels.reminders.newTitle(),
+    bodyLines: [labels.reminders.newChooseDate()],
     inlineKeyboard: kb
   });
 };
@@ -3519,9 +3526,9 @@ const renderReminderCustomDatePicker = async (
   const formatted = dateMode === 'jalali' ? `J${year}-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}` : `${year}-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
 
   const lines = [
-    t('screens.reminders.custom_date_title', { mode: dateMode === 'jalali' ? t('screens.reminders.custom_date_mode_jalali') : t('screens.reminders.custom_date_mode_gregorian') }),
-    t('screens.reminders.custom_date_current', { date: formatted }),
-    t('screens.reminders.custom_date_hint')
+    labels.reminders.customDateTitle({ mode: dateMode === 'jalali' ? t('screens.reminders.custom_date_mode_jalali') : t('screens.reminders.custom_date_mode_gregorian') }),
+    labels.reminders.customDateCurrent({ date: formatted }),
+    labels.reminders.customDateHint()
   ];
 
   const kb = new InlineKeyboard();
@@ -3560,23 +3567,22 @@ const renderReminderCustomDatePicker = async (
   kb.text(dayMinusBtn.text, dayMinusBtn.callback_data).text(dayPlusBtn.text, dayPlusBtn.callback_data).row();
 
   const toggleBtn = await makeActionButton(ctx, {
-    label:
-      dateMode === 'jalali' ? t('buttons.reminders_use_gregorian') : t('buttons.reminders_use_jalali'),
+    label: dateMode === 'jalali' ? labels.remindersButtons.useGregorian() : labels.remindersButtons.useJalali(),
     action: 'reminders.date_toggle',
     data: params
   });
-  const manualBtn = await makeActionButton(ctx, { label: t('buttons.reminders_type_date'), action: 'reminders.date_manual', data: params });
-  const confirmBtn = await makeActionButton(ctx, { label: t('buttons.reminders_date_confirm'), action: 'reminders.date_confirm', data: params });
+  const manualBtn = await makeActionButton(ctx, { label: labels.remindersButtons.typeDate(), action: 'reminders.date_manual', data: params });
+  const confirmBtn = await makeActionButton(ctx, { label: labels.remindersButtons.dateConfirm(), action: 'reminders.date_confirm', data: params });
   kb.text(toggleBtn.text, toggleBtn.callback_data).row();
   kb.text(manualBtn.text, manualBtn.callback_data).row();
   kb.text(confirmBtn.text, confirmBtn.callback_data).row();
 
   const backAction = params.mode === 'edit' ? 'reminders.edit_open' : 'nav.reminders';
-  const backBtn = await makeActionButton(ctx, { label: t('buttons.reminders_back'), action: backAction, data: params.reminderId ? { reminderId: params.reminderId } : undefined });
+  const backBtn = await makeActionButton(ctx, { label: labels.remindersButtons.back(), action: backAction, data: params.reminderId ? { reminderId: params.reminderId } : undefined });
   kb.text(backBtn.text, backBtn.callback_data);
 
   await renderScreen(ctx, {
-    titleKey: t('screens.reminders.new_title'),
+    title: labels.reminders.newTitle(),
     bodyLines: lines,
     inlineKeyboard: kb
   });
@@ -3591,7 +3597,7 @@ const renderReminderTimePicker = async (
   const draft = ensureReminderTimeDraft(params.draft, timezone);
   const timeLabel = minutesToHhmm(draft.timeMinutes ?? getDefaultReminderTimeMinutes(timezone));
 
-  const lines = [t('screens.reminders.time_title'), t('screens.reminders.time_current', { time: timeLabel })];
+  const lines = [labels.reminders.timeTitle(), labels.reminders.timeCurrent({ time: timeLabel })];
 
   const kb = new InlineKeyboard();
   const minusHourBtn = await makeActionButton(ctx, { label: '−1h', action: 'reminders.time_adjust', data: { ...params, delta: -60 } });
@@ -3608,17 +3614,17 @@ const renderReminderTimePicker = async (
   }
   kb.row();
 
-  const manualBtn = await makeActionButton(ctx, { label: t('buttons.reminders_type_time'), action: 'reminders.time_manual', data: params });
-  const confirmBtn = await makeActionButton(ctx, { label: t('buttons.reminders_time_confirm'), action: 'reminders.time_confirm', data: params });
+  const manualBtn = await makeActionButton(ctx, { label: labels.remindersButtons.typeTime(), action: 'reminders.time_manual', data: params });
+  const confirmBtn = await makeActionButton(ctx, { label: labels.remindersButtons.timeConfirm(), action: 'reminders.time_confirm', data: params });
   kb.text(manualBtn.text, manualBtn.callback_data).row();
   kb.text(confirmBtn.text, confirmBtn.callback_data).row();
 
   const backAction = params.mode === 'edit' ? 'reminders.edit_open' : 'nav.reminders';
-  const backBtn = await makeActionButton(ctx, { label: t('buttons.reminders_back'), action: backAction, data: params.reminderId ? { reminderId: params.reminderId } : undefined });
+  const backBtn = await makeActionButton(ctx, { label: labels.remindersButtons.back(), action: backAction, data: params.reminderId ? { reminderId: params.reminderId } : undefined });
   kb.text(backBtn.text, backBtn.callback_data);
 
   await renderScreen(ctx, {
-    titleKey: t('screens.reminders.new_title'),
+    title: labels.reminders.newTitle(),
     bodyLines: lines,
     inlineKeyboard: kb
   });
@@ -5201,24 +5207,26 @@ bot.callbackQuery('dbg:test', async (ctx) => {
   await safeAnswerCallback(ctx, { text: t('screens.debug_inline.success') });
 });
 
-[
+const navButtons: Array<{ key: string; handler: (ctx: Context) => Promise<void> | void; label?: (locale: Locale) => string }> = [
   { key: 'buttons.nav_dashboard', handler: renderDashboard },
   { key: 'buttons.nav_daily_report', handler: async (ctx: Context) => renderDailyReportRoot(ctx) },
-  { key: 'buttons.notes', handler: renderNotesToday },
+  { key: 'buttons.notes', handler: renderNotesToday, label: () => labels.nav.notes() },
   { key: 'buttons.nav_reportcar', handler: renderReportcar },
   { key: 'buttons.nav_tasks', handler: renderTasks },
   { key: 'buttons.nav_todo', handler: renderTodo },
   { key: 'buttons.nav_planning', handler: renderPlanning },
   { key: 'buttons.nav_my_day', handler: renderMyDay },
-  { key: 'buttons.nav_free_text', handler: renderNotesToday },
-  { key: 'buttons.nav_reminders', handler: renderReminders },
+  { key: 'buttons.nav_free_text', handler: renderNotesToday, label: () => labels.nav.freeText() },
+  { key: 'buttons.nav_reminders', handler: renderReminders, label: () => labels.nav.reminders() },
   { key: 'buttons.nav_rewards', handler: renderRewardCenter },
   { key: 'buttons.nav_reports', handler: renderReportsMenu },
   { key: 'buttons.nav_calendar', handler: renderCalendarEvents },
   { key: 'buttons.nav_settings', handler: renderSettingsRoot },
   { key: 'buttons.nav_ai', handler: renderAI }
-].forEach(({ key, handler }) => {
-  bot.hears([t(key, undefined, 'en'), t(key, undefined, 'fa')], handler);
+];
+navButtons.forEach(({ key, handler, label }) => {
+  const resolveLabel = (locale: Locale) => (label ? label(locale) : t(key, undefined, locale));
+  bot.hears([resolveLabel('en'), resolveLabel('fa')], handler);
 });
 
 /**
@@ -5295,13 +5303,13 @@ bot.callbackQuery(/^[A-Za-z0-9_-]{8,12}$/, async (ctx) => {
         const { date } = getTodayDateString(user.timezone ?? config.defaultTimezone);
         setNotesFlow(String(ctx.from.id), { mode: 'create', step: 'title', draft: { noteDate: date } });
 
-        const skipBtn = await makeActionButton(ctx, { label: t('buttons.notes_skip'), action: 'notes.skip_title' });
-        const cancelBtn = await makeActionButton(ctx, { label: t('buttons.notes_cancel'), action: 'notes.cancel_add' });
+        const skipBtn = await makeActionButton(ctx, { label: labels.notesButtons.skip(), action: 'notes.skip_title' });
+        const cancelBtn = await makeActionButton(ctx, { label: labels.notesButtons.cancel(), action: 'notes.cancel_add' });
         const kb = new InlineKeyboard().text(skipBtn.text, skipBtn.callback_data).row().text(cancelBtn.text, cancelBtn.callback_data);
 
         await renderScreen(ctx, {
-          titleKey: t('screens.notes.title'),
-          bodyLines: [t('screens.notes.ask_title')],
+          title: labels.notes.title(),
+          bodyLines: [labels.notes.askTitle()],
           inlineKeyboard: kb
         });
         return;
@@ -5313,7 +5321,7 @@ bot.callbackQuery(/^[A-Za-z0-9_-]{8,12}$/, async (ctx) => {
         if (state?.notesFlow && state.notesFlow.mode === 'create' && state.notesFlow.step === 'title') {
           setNotesFlow(stateKey, { mode: 'create', step: 'body', draft: { ...state.notesFlow.draft, title: null } });
         }
-        await renderScreen(ctx, { titleKey: t('screens.notes.title'), bodyLines: [t('screens.notes.ask_body')] });
+        await renderScreen(ctx, { title: labels.notes.title(), bodyLines: [labels.notes.askBody()] });
         return;
       }
       case 'notes.cancel_add': {
@@ -5334,10 +5342,10 @@ bot.callbackQuery(/^[A-Za-z0-9_-]{8,12}$/, async (ctx) => {
         const { user } = await ensureUserAndSettings(ctx);
         const { date } = getTodayDateString(user.timezone ?? config.defaultTimezone);
         setNotesFlow(String(ctx.from.id), { mode: 'clear_date', noteDate: date });
-        const confirmBtn = await makeActionButton(ctx, { label: t('buttons.notes_confirm_clear'), action: 'notes.clear_confirm' });
-        const cancelBtn = await makeActionButton(ctx, { label: t('buttons.notes_cancel'), action: 'notes.clear_cancel' });
+        const confirmBtn = await makeActionButton(ctx, { label: labels.notesButtons.confirmClear(), action: 'notes.clear_confirm' });
+        const cancelBtn = await makeActionButton(ctx, { label: labels.notesButtons.cancel(), action: 'notes.clear_cancel' });
         const kb = new InlineKeyboard().text(confirmBtn.text, confirmBtn.callback_data).text(cancelBtn.text, cancelBtn.callback_data);
-        await renderScreen(ctx, { titleKey: t('screens.notes.title'), bodyLines: [t('screens.notes.clear_confirm')], inlineKeyboard: kb });
+        await renderScreen(ctx, { title: labels.notes.title(), bodyLines: [labels.notes.clearConfirm()], inlineKeyboard: kb });
         return;
       }
       case 'notes.clear_confirm': {
@@ -5421,8 +5429,14 @@ bot.callbackQuery(/^[A-Za-z0-9_-]{8,12}$/, async (ctx) => {
           await markNoteArchiveDeleted(ctx, noteId);
           const archiveChatId = getNotesArchiveChatId();
           if (archiveChatId) {
-            const title = note.title && note.title.trim().length > 0 ? note.title : t('screens.notes.untitled');
-            const marker = `🗑 Deleted by user\nNote: ${note.id}\nDate: ${note.note_date}\nTitle: ${title}`;
+            const title = note.title && note.title.trim().length > 0 ? note.title : labels.notes.untitled();
+            const marker = [
+              labels.archive.deletedBy({ user: buildUserStatusLine(ctx) }),
+              labels.archive.typeLine({ type: 'note' }),
+              labels.archive.titleLine({ title }),
+              labels.archive.timeLine({ time: note.note_date }),
+              labels.archive.appUserLine({ id: note.id })
+            ].join('\n');
             try {
               await ctx.api.sendMessage(archiveChatId, marker, { disable_notification: true });
             } catch (error) {
@@ -5470,13 +5484,13 @@ bot.callbackQuery(/^[A-Za-z0-9_-]{8,12}$/, async (ctx) => {
         };
         setNotesFlow(stateKey, { mode: 'edit', noteId, step: 'title', viewContext });
         const skipBtn = await makeActionButton(ctx, {
-          label: t('buttons.notes_skip'),
+          label: labels.notesButtons.skip(),
           action: 'notes.edit_title_skip',
           data: { noteId, ...viewContext }
         });
-        const backBtn = await makeActionButton(ctx, { label: t('buttons.notes_back'), action: 'notes.edit_menu', data: { noteId, ...viewContext } });
+        const backBtn = await makeActionButton(ctx, { label: labels.notesButtons.back(), action: 'notes.edit_menu', data: { noteId, ...viewContext } });
         const kb = new InlineKeyboard().text(skipBtn.text, skipBtn.callback_data).row().text(backBtn.text, backBtn.callback_data);
-        await renderScreen(ctx, { titleKey: t('screens.notes.edit_menu_title'), bodyLines: [t('screens.notes.edit_title_prompt')], inlineKeyboard: kb });
+        await renderScreen(ctx, { title: labels.notes.editMenuTitle(), bodyLines: [labels.notes.editTitlePrompt()], inlineKeyboard: kb });
         return;
       }
       case 'notes.edit_title_skip': {
@@ -5512,9 +5526,9 @@ bot.callbackQuery(/^[A-Za-z0-9_-]{8,12}$/, async (ctx) => {
           historyPage: Number.isFinite(Number(data?.historyPage)) ? Number(data?.historyPage) : 0
         };
         setNotesFlow(stateKey, { mode: 'edit', noteId, step: 'body', viewContext });
-        const backBtn = await makeActionButton(ctx, { label: t('buttons.notes_back'), action: 'notes.edit_menu', data: { noteId, ...viewContext } });
+        const backBtn = await makeActionButton(ctx, { label: labels.notesButtons.back(), action: 'notes.edit_menu', data: { noteId, ...viewContext } });
         const kb = new InlineKeyboard().text(backBtn.text, backBtn.callback_data);
-        await renderScreen(ctx, { titleKey: t('screens.notes.edit_menu_title'), bodyLines: [t('screens.notes.edit_body_prompt')], inlineKeyboard: kb });
+        await renderScreen(ctx, { title: labels.notes.editMenuTitle(), bodyLines: [labels.notes.editBodyPrompt()], inlineKeyboard: kb });
         return;
       }
       case 'notes.attach_done': {
@@ -5586,18 +5600,18 @@ bot.callbackQuery(/^[A-Za-z0-9_-]{8,12}$/, async (ctx) => {
           const idleFor = Date.now() - currentSession.lastReceivedAt;
           if (idleFor < NOTE_UPLOAD_IDLE_MS) return;
           const saveBtn = await makeActionButton(ctx, {
-            label: t('buttons.notes_save_now'),
+            label: labels.notesButtons.saveNow(),
             action: 'notes.attachments_save',
             data: { noteId: data.noteId, noteDate: data.noteDate, page: data.page, historyPage: data.historyPage }
           });
           const continueBtn = await makeActionButton(ctx, {
-            label: t('buttons.notes_continue'),
+            label: labels.notesButtons.continue(),
             action: 'notes.attachments_continue',
             data: { noteId: data.noteId, noteDate: data.noteDate, page: data.page, historyPage: data.historyPage }
           });
           const kb = new InlineKeyboard().text(saveBtn.text, saveBtn.callback_data).row().text(continueBtn.text, continueBtn.callback_data);
           setNoteUploadSession(stateKey, { ...currentSession, prompted: true });
-          await renderScreen(ctx, { titleKey: t('screens.notes.title'), bodyLines: [t('screens.notes.attachments_idle_prompt')], inlineKeyboard: kb });
+          await renderScreen(ctx, { title: labels.notes.title(), bodyLines: [labels.notes.attachmentsIdlePrompt()], inlineKeyboard: kb });
         }, NOTE_UPLOAD_IDLE_MS);
         setNoteUploadSession(stateKey, {
           ...(session ?? { noteId: data.noteId, pendingKinds: {}, lastReceivedAt: Date.now() }),
@@ -5645,12 +5659,12 @@ bot.callbackQuery(/^[A-Za-z0-9_-]{8,12}$/, async (ctx) => {
           viewContext: { noteDate: data.noteDate, page: data.page, historyPage: data.historyPage }
         });
         const skipBtn = await makeActionButton(ctx, {
-          label: t('buttons.notes_skip'),
+          label: labels.notesButtons.skip(),
           action: 'notes.caption_skip',
           data: { noteId: data.noteId, noteDate: data.noteDate, page: data.page, historyPage: data.historyPage }
         });
         const kb = new InlineKeyboard().text(skipBtn.text, skipBtn.callback_data);
-        await renderScreen(ctx, { titleKey: t('screens.notes.title'), bodyLines: [t('screens.notes.caption_all_prompt')], inlineKeyboard: kb });
+        await renderScreen(ctx, { title: labels.notes.title(), bodyLines: [labels.notes.captionAllPrompt()], inlineKeyboard: kb });
         return;
       }
       case 'notes.caption_by_category': {
@@ -5748,14 +5762,14 @@ bot.callbackQuery(/^[A-Za-z0-9_-]{8,12}$/, async (ctx) => {
         try {
           const targetId = ctx.chat?.id ?? ctx.from?.id;
           if (!targetId) {
-            await renderScreen(ctx, { titleKey: t('screens.notes.detail_title_label'), bodyLines: [t('screens.notes.attachment_send_failed')] });
+            await renderScreen(ctx, { title: labels.notes.detailTitleLabel(), bodyLines: [labels.notes.attachmentSendFailed()] });
             return;
           }
           const category = resolveNoteCaptionCategory(attachment.kind);
           await sendNoteAttachmentsToUser(ctx, targetId, category, [attachment]);
         } catch (error) {
           console.error({ scope: 'notes', event: 'attachment_send_failed', error, attachmentId: attachment.id });
-          await renderScreen(ctx, { titleKey: t('screens.notes.detail_title_label'), bodyLines: [t('screens.notes.attachment_send_failed')] });
+          await renderScreen(ctx, { title: labels.notes.detailTitleLabel(), bodyLines: [labels.notes.attachmentSendFailed()] });
         }
         const page = Number(data.page ?? 0);
         const historyPage = Number(data.historyPage ?? 0);
@@ -5780,13 +5794,13 @@ bot.callbackQuery(/^[A-Za-z0-9_-]{8,12}$/, async (ctx) => {
           return;
         }
         const local = formatInstantToLocal(note.created_at, user.timezone ?? config.defaultTimezone);
-        const title = note.title && note.title.trim().length > 0 ? note.title : t('screens.notes.untitled');
+        const title = note.title && note.title.trim().length > 0 ? note.title : labels.notes.untitled();
         await renderScreen(ctx, {
-          titleKey: t('screens.notes.detail_title_label'),
+          title: labels.notes.detailTitleLabel(),
           bodyLines: [
-            t('screens.notes.detail_date', { date: note.note_date }),
-            t('screens.notes.detail_time', { time: local.time }),
-            t('screens.notes.detail_title', { title })
+            labels.notes.detailDate({ date: note.note_date }),
+            labels.notes.detailTime({ time: local.time }),
+            labels.notes.detailTitle({ title })
           ]
         });
         const targetId = ctx.chat?.id ?? ctx.from?.id ?? Number(user.telegram_id);
@@ -6045,11 +6059,11 @@ bot.callbackQuery(/^[A-Za-z0-9_-]{8,12}$/, async (ctx) => {
           if (!currentSession || currentSession.reminderId !== reminderId) return;
           const idleFor = Date.now() - currentSession.lastReceivedAt;
           if (idleFor < REMINDER_UPLOAD_IDLE_MS) return;
-          const saveBtn = await makeActionButton(ctx, { label: t('buttons.notes_save_now'), action: 'reminders.attachments_save', data: { reminderId } });
-          const continueBtn = await makeActionButton(ctx, { label: t('buttons.notes_continue'), action: 'reminders.attachments_continue', data: { reminderId } });
+          const saveBtn = await makeActionButton(ctx, { label: labels.notesButtons.saveNow(), action: 'reminders.attachments_save', data: { reminderId } });
+          const continueBtn = await makeActionButton(ctx, { label: labels.notesButtons.continue(), action: 'reminders.attachments_continue', data: { reminderId } });
           const kb = new InlineKeyboard().text(saveBtn.text, saveBtn.callback_data).row().text(continueBtn.text, continueBtn.callback_data);
           setReminderUploadSession(stateKey, { ...currentSession, prompted: true });
-          await renderScreen(ctx, { titleKey: t('screens.reminders.new_title'), bodyLines: [t('screens.reminders.attachments_idle_prompt')], inlineKeyboard: kb });
+          await renderScreen(ctx, { title: labels.reminders.newTitle(), bodyLines: [labels.reminders.attachmentsIdlePrompt()], inlineKeyboard: kb });
         }, REMINDER_UPLOAD_IDLE_MS);
         setReminderUploadSession(stateKey, {
           ...(session ?? { reminderId, pendingKinds: {}, lastReceivedAt: Date.now() }),
@@ -6075,9 +6089,9 @@ bot.callbackQuery(/^[A-Za-z0-9_-]{8,12}$/, async (ctx) => {
           return;
         }
         setReminderFlow(stateKey, { ...flow, step: 'caption_all' });
-        const skipBtn = await makeActionButton(ctx, { label: t('buttons.notes_skip'), action: 'reminders.caption_skip', data: { reminderId: data.reminderId } });
+        const skipBtn = await makeActionButton(ctx, { label: labels.notesButtons.skip(), action: 'reminders.caption_skip', data: { reminderId: data.reminderId } });
         const kb = new InlineKeyboard().text(skipBtn.text, skipBtn.callback_data);
-        await renderScreen(ctx, { titleKey: t('screens.reminders.new_title'), bodyLines: [t('screens.notes.caption_all_prompt')], inlineKeyboard: kb });
+        await renderScreen(ctx, { title: labels.reminders.newTitle(), bodyLines: [labels.notes.captionAllPrompt()], inlineKeyboard: kb });
         return;
       }
       case 'reminders.caption_by_category': {
@@ -6356,12 +6370,12 @@ bot.callbackQuery(/^[A-Za-z0-9_-]{8,12}$/, async (ctx) => {
         }
         const backBtn =
           mode === 'edit'
-            ? await makeActionButton(ctx, { label: t('buttons.reminders_back'), action: 'reminders.edit_date', data: { reminderId } })
-            : await makeActionButton(ctx, { label: t('buttons.reminders_back'), action: 'reminders.new' });
+            ? await makeActionButton(ctx, { label: labels.remindersButtons.back(), action: 'reminders.edit_date', data: { reminderId } })
+            : await makeActionButton(ctx, { label: labels.remindersButtons.back(), action: 'reminders.new' });
         kb.row().text(backBtn.text, backBtn.callback_data);
         await renderScreen(ctx, {
-          titleKey: t('screens.reminders.new_title'),
-          bodyLines: [t('screens.reminders.weekend_day_prompt')],
+          title: labels.reminders.newTitle(),
+          bodyLines: [labels.reminders.weekendDayPrompt()],
           inlineKeyboard: kb
         });
         return;
@@ -6427,8 +6441,8 @@ bot.callbackQuery(/^[A-Za-z0-9_-]{8,12}$/, async (ctx) => {
       }
       case 'reminders.date_manual': {
         await renderScreen(ctx, {
-          titleKey: t('screens.reminders.new_title'),
-          bodyLines: [t('screens.reminders.custom_date_manual_prompt')]
+          title: labels.reminders.newTitle(),
+          bodyLines: [labels.reminders.customDateManualPrompt()]
         });
         return;
       }
@@ -6505,7 +6519,7 @@ bot.callbackQuery(/^[A-Za-z0-9_-]{8,12}$/, async (ctx) => {
           return;
         }
         setReminderFlow(stateKey, { ...flow, step: 'time_manual' });
-        await renderScreen(ctx, { titleKey: t('screens.reminders.new_title'), bodyLines: [t('screens.reminders.time_manual_prompt')] });
+        await renderScreen(ctx, { title: labels.reminders.newTitle(), bodyLines: [labels.reminders.timeManualPrompt()] });
         return;
       }
       case 'reminders.time_confirm': {
@@ -6562,8 +6576,8 @@ bot.callbackQuery(/^[A-Za-z0-9_-]{8,12}$/, async (ctx) => {
         const kb = new InlineKeyboard().text(confirmBtn.text, confirmBtn.callback_data).text(cancelBtn.text, cancelBtn.callback_data);
 
         await renderScreen(ctx, {
-          titleKey: t('screens.reminders.title'),
-          bodyLines: [t('screens.reminders.delete_confirm')],
+          title: labels.reminders.title(),
+          bodyLines: [labels.reminders.deleteConfirm()],
           inlineKeyboard: kb
         });
         return;
@@ -8664,12 +8678,12 @@ bot.on('message:text', async (ctx: Context) => {
       if (flow.step === 'title') {
         const title = text.length > 0 ? text : null;
         setNotesFlow(stateKey, { mode: 'create', step: 'body', draft: { ...flow.draft, title } });
-        await renderScreen(ctx, { titleKey: t('screens.notes.title'), bodyLines: [t('screens.notes.ask_body')] });
+        await renderScreen(ctx, { title: labels.notes.title(), bodyLines: [labels.notes.askBody()] });
         return;
       }
       if (flow.step === 'body') {
         if (!text) {
-          await renderScreen(ctx, { titleKey: t('screens.notes.title'), bodyLines: [t('screens.notes.ask_body')] });
+          await renderScreen(ctx, { title: labels.notes.title(), bodyLines: [labels.notes.askBody()] });
           return;
         }
         const note = await createNote({
@@ -8679,7 +8693,7 @@ bot.on('message:text', async (ctx: Context) => {
           body: rawText
         });
         setNotesFlow(stateKey, { mode: 'create', step: 'attachments', noteId: note.id, viewContext: { noteDate: note.note_date } });
-        const title = note.title && note.title.trim().length > 0 ? note.title : t('screens.notes.untitled');
+        const title = note.title && note.title.trim().length > 0 ? note.title : labels.notes.untitled();
         const preview = buildPreviewText(note.body, 120);
         if (rawText.length > ARCHIVE_DESCRIPTION_LIMIT) {
           const archiveChatId = getNotesArchiveChatId();
@@ -8695,7 +8709,7 @@ bot.on('message:text', async (ctx: Context) => {
                 appUserId: user.id
               },
               timeLabel: buildArchiveTimeLabel(note.created_at, user.timezone ?? config.defaultTimezone),
-              kindLabel: 'Note',
+              kindLabel: labels.archive.kindNote(),
               title: note.title ?? null,
               description: rawText,
               attachments: []
@@ -8724,19 +8738,27 @@ bot.on('message:text', async (ctx: Context) => {
           }
         }
         const doneBtn = await makeActionButton(ctx, {
-          label: t('buttons.notes_attach_done'),
+          label: labels.notesButtons.attachDone(),
           action: 'notes.attach_done',
           data: { noteId: note.id, noteDate: note.note_date }
         });
         const cancelBtn = await makeActionButton(ctx, {
-          label: t('buttons.notes_attach_cancel'),
+          label: labels.notesButtons.attachCancel(),
           action: 'notes.attach_cancel',
           data: { noteId: note.id, noteDate: note.note_date }
         });
         const kb = new InlineKeyboard().text(doneBtn.text, doneBtn.callback_data).row().text(cancelBtn.text, cancelBtn.callback_data);
         await renderScreen(ctx, {
-          titleKey: t('screens.notes.title'),
-          bodyLines: [t('screens.notes.saved'), '', t('screens.notes.preview', { date: note.note_date, title, preview }), '', t('screens.notes.attachments_prompt')],
+          title: labels.notes.title(),
+          bodyLines: [
+            labels.notes.saved(),
+            '',
+            labels.notes.previewDate({ date: note.note_date }),
+            labels.notes.previewTitle({ title }),
+            labels.notes.previewBody({ preview }),
+            '',
+            labels.notes.attachmentsPrompt()
+          ],
           inlineKeyboard: kb
         });
         return;
@@ -8802,7 +8824,7 @@ bot.on('message:text', async (ctx: Context) => {
       }
       if (flow.step === 'body') {
         if (!text) {
-          await renderScreen(ctx, { titleKey: t('screens.notes.edit_menu_title'), bodyLines: [t('screens.notes.edit_body_prompt')] });
+          await renderScreen(ctx, { title: labels.notes.editMenuTitle(), bodyLines: [labels.notes.editBodyPrompt()] });
           return;
         }
         await updateNote({ userId: user.id, id: flow.noteId, body: rawText });
@@ -8823,7 +8845,7 @@ bot.on('message:text', async (ctx: Context) => {
                 appUserId: user.id
               },
               timeLabel: buildArchiveTimeLabel(createdAt, user.timezone ?? config.defaultTimezone),
-              kindLabel: 'Note',
+              kindLabel: labels.archive.kindNote(),
               title: noteTitle,
               description: rawText,
               attachments: []
@@ -8917,7 +8939,7 @@ bot.on('message:text', async (ctx: Context) => {
         const month = Number(jalaliMatch[2]);
         const day = Number(jalaliMatch[3]);
         if (!isValidJalaliDate(year, month, day)) {
-          await renderScreen(ctx, { titleKey: t('screens.reminders.new_title'), bodyLines: [t('screens.reminders.new_invalid_date'), t('screens.reminders.custom_date_hint')] });
+          await renderScreen(ctx, { title: labels.reminders.newTitle(), bodyLines: [labels.reminders.newInvalidDate(), labels.reminders.customDateHint()] });
           return;
         }
         const greg = jalaliToGregorian(year, month, day);
@@ -8930,8 +8952,8 @@ bot.on('message:text', async (ctx: Context) => {
 
       if (!isValidLocalDate(raw)) {
         await renderScreen(ctx, {
-          titleKey: t('screens.reminders.new_title'),
-          bodyLines: [t('screens.reminders.new_invalid_date'), t('screens.reminders.custom_date_hint')]
+          title: labels.reminders.newTitle(),
+          bodyLines: [labels.reminders.newInvalidDate(), labels.reminders.customDateHint()]
         });
         return;
       }
@@ -8945,8 +8967,8 @@ bot.on('message:text', async (ctx: Context) => {
       const parsed = parseTimeHhmm(raw);
       if (!parsed) {
         await renderScreen(ctx, {
-          titleKey: t('screens.reminders.new_title'),
-          bodyLines: [t('screens.reminders.new_invalid_time'), t('screens.reminders.time_manual_prompt')]
+          title: labels.reminders.newTitle(),
+          bodyLines: [labels.reminders.newInvalidTime(), labels.reminders.timeManualPrompt()]
         });
         return;
       }
@@ -8966,14 +8988,14 @@ bot.on('message:text', async (ctx: Context) => {
       if (flow.mode === 'edit') {
         await updateReminder(flow.reminderId, { title });
         clearReminderFlow(stateKey);
-        await renderReminderDetails(ctx, flow.reminderId, t('screens.reminders.edit_saved'));
+        await renderReminderDetails(ctx, flow.reminderId, labels.reminders.editSaved());
         return;
       }
       const timezone = user.timezone ?? config.defaultTimezone;
       const draft = flow.draft;
       const reminder = await createReminderDraft({ userId: user.id, title, timezone });
       if (title && reminder.title !== title) {
-        await renderScreen(ctx, { titleKey: t('screens.reminders.new_title'), bodyLines: [t('screens.reminders.title_save_failed')] });
+        await renderScreen(ctx, { title: labels.reminders.newTitle(), bodyLines: [labels.reminders.titleSaveFailed()] });
         return;
       }
       setReminderFlow(stateKey, { ...flow, reminderId: reminder.id, step: 'description', draft: { ...draft, title } });
@@ -8987,7 +9009,7 @@ bot.on('message:text', async (ctx: Context) => {
         await updateReminder(flow.reminderId, { description });
         await maybeArchiveReminderDescription(ctx, flow.reminderId, description);
         clearReminderFlow(stateKey);
-        await renderReminderDetails(ctx, flow.reminderId, t('screens.reminders.edit_saved'));
+        await renderReminderDetails(ctx, flow.reminderId, labels.reminders.editSaved());
         return;
       }
       const reminderId = getReminderIdFromFlow(flow);
@@ -9046,7 +9068,7 @@ bot.on('message:text', async (ctx: Context) => {
     if (flow.step === 'interval_minutes') {
       const interval = Number(raw);
       if (!Number.isInteger(interval) || interval <= 0) {
-        await renderScreen(ctx, { titleKey: t('screens.reminders.new_title'), bodyLines: [t('screens.reminders.interval_invalid')] });
+        await renderScreen(ctx, { title: labels.reminders.newTitle(), bodyLines: [labels.reminders.intervalInvalid()] });
         return;
       }
       const nextDraft = { ...flow.draft, intervalMinutes: interval };
@@ -9058,7 +9080,7 @@ bot.on('message:text', async (ctx: Context) => {
     if (flow.step === 'daily_time' || flow.step === 'weekly_time' || flow.step === 'monthly_time' || flow.step === 'yearly_time') {
       const parsed = parseTimeHhmm(raw);
       if (!parsed) {
-        await renderScreen(ctx, { titleKey: t('screens.reminders.new_title'), bodyLines: [t('screens.reminders.new_invalid_time')] });
+        await renderScreen(ctx, { title: labels.reminders.newTitle(), bodyLines: [labels.reminders.newInvalidTime()] });
         return;
       }
       const nextDraft = { ...flow.draft, atTime: parsed.hhmm };
@@ -9070,7 +9092,7 @@ bot.on('message:text', async (ctx: Context) => {
     if (flow.step === 'monthly_day') {
       const day = Number(raw);
       if (!Number.isInteger(day) || day < 1 || day > 31) {
-        await renderScreen(ctx, { titleKey: t('screens.reminders.new_title'), bodyLines: [t('screens.reminders.monthly_day_invalid')] });
+        await renderScreen(ctx, { title: labels.reminders.newTitle(), bodyLines: [labels.reminders.monthlyDayInvalid()] });
         return;
       }
       const nextDraft = { ...flow.draft, byMonthday: day };
@@ -9082,7 +9104,7 @@ bot.on('message:text', async (ctx: Context) => {
     if (flow.step === 'yearly_day') {
       const day = Number(raw);
       if (!Number.isInteger(day) || day < 1 || day > 31) {
-        await renderScreen(ctx, { titleKey: t('screens.reminders.new_title'), bodyLines: [t('screens.reminders.monthly_day_invalid')] });
+        await renderScreen(ctx, { title: labels.reminders.newTitle(), bodyLines: [labels.reminders.monthlyDayInvalid()] });
         return;
       }
       const nextDraft = { ...flow.draft, byMonthday: day };

@@ -2,6 +2,7 @@ import { Keyboard } from 'grammy';
 import type { Context } from 'grammy';
 import type { ReplyKeyboardMarkup } from 'grammy/types';
 import { t } from '../i18n';
+import { labels } from './labels';
 
 export const buildMainMenuKeyboard = (options: { aiEnabled: boolean }): ReplyKeyboardMarkup => {
   const kb = new Keyboard()
@@ -10,7 +11,7 @@ export const buildMainMenuKeyboard = (options: { aiEnabled: boolean }): ReplyKey
     .text(t('buttons.nav_daily_report'))
     .text(t('buttons.nav_reportcar'))
     .row()
-    .text(t('buttons.notes'))
+    .text(labels.nav.notes())
     .row()
     .text(t('buttons.nav_tasks'))
     .text(t('buttons.nav_todo'))
@@ -18,8 +19,8 @@ export const buildMainMenuKeyboard = (options: { aiEnabled: boolean }): ReplyKey
     .text(t('buttons.nav_planning'))
     .text(t('buttons.nav_my_day'))
     .row()
-    .text(t('buttons.nav_free_text'))
-    .text(t('buttons.nav_reminders'))
+    .text(labels.nav.freeText())
+    .text(labels.nav.reminders())
     .row()
     .text(t('buttons.nav_rewards'))
     .text(t('buttons.nav_reports'))

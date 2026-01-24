@@ -3,6 +3,7 @@ import type { Api } from 'grammy';
 import { randomUUID } from 'crypto';
 
 import { config } from '../config';
+import { labels } from '../ui/labels';
 import { getSupabaseClient } from '../db';
 import type { ArchiveItemRow, ArchiveMessageRow } from '../types/supabase';
 
@@ -32,7 +33,7 @@ const ARCHIVE_TABLE = 'archive_messages';
 const ARCHIVE_ITEMS_TABLE = 'archive_items';
 const ARCHIVE_COPY_DELAY_MS = 200;
 const ARCHIVE_CAPTION_LIMIT = 900;
-const ARCHIVE_SEPARATOR = '➖➖➖➖➖➖➖➖➖➖➖';
+const ARCHIVE_SEPARATOR = labels.archive.separator();
 
 const parseArchiveChatId = (raw?: string | null): number | null => {
   if (!raw) return null;
@@ -102,7 +103,13 @@ const buildArchiveUserLabel = (params: {
 
 const formatArchiveSummaryLine = (summary: ArchiveMediaSummary): string => {
   const filesCount = summary.documents + summary.audios;
-  return `Photos(${summary.photos}), Videos(${summary.videos}), Voices(${summary.voices}), Files(${filesCount}), VideoNotes(${summary.video_notes})`;
+  return labels.archive.summaryLine({
+    photos: summary.photos,
+    videos: summary.videos,
+    voices: summary.voices,
+    files: filesCount,
+    videoNotes: summary.video_notes
+  });
 };
 
 const normalizeSummary = (summary?: Partial<ArchiveMediaSummary>): ArchiveMediaSummary => ({
@@ -129,21 +136,21 @@ const buildArchiveCaption = (params: {
   const title = params.title && params.title.trim().length > 0 ? params.title.trim() : '—';
   const description = params.description && params.description.trim().length > 0 ? params.description.trim() : '—';
   const headerLines = [
-    '🗂️ Archive Item',
-    `👤 User: ${buildArchiveUserLabel(params)}`,
-    `🆔 AppUser: ${params.appUserId}`,
-    `🕒 Time: ${params.timeLabel}`,
-    `🧩 Type: ${params.kindLabel}`,
-    `🏷️ Title: ${title}`,
-    '📝 Description:'
+    labels.archive.header(),
+    labels.archive.userLine({ label: buildArchiveUserLabel(params) }),
+    labels.archive.appUserLine({ id: params.appUserId }),
+    labels.archive.timeLine({ time: params.timeLabel }),
+    labels.archive.typeLine({ type: params.kindLabel }),
+    labels.archive.titleLine({ title }),
+    labels.archive.descriptionLabel()
   ];
-  const itemsLine = `📎 Items: ${formatArchiveSummaryLine(params.summary)}`;
+  const itemsLine = labels.archive.itemsLine({ summary: formatArchiveSummaryLine(params.summary) });
   const baseLength = headerLines.join('\n').length + itemsLine.length + 2;
   const fullCaption = `${headerLines.join('\n')}\n${description}\n${itemsLine}`;
   if (fullCaption.length <= ARCHIVE_CAPTION_LIMIT) {
     return { caption: fullCaption };
   }
-  const notice = '📦 Full description is archived.';
+  const notice = labels.archive.descriptionArchivedNotice();
   const available = Math.max(0, ARCHIVE_CAPTION_LIMIT - baseLength - notice.length - 4);
   const truncated = description.length > available ? `${description.slice(0, Math.max(0, available - 1))}…` : description;
   const caption = `${headerLines.join('\n')}\n${truncated}\n${notice}\n${itemsLine}`;
