@@ -4,6 +4,9 @@ import { config } from '../config';
 import { listArchiveMessagesByGroupKey } from './archive';
 import { getSupabaseClient } from '../db';
 import type { Database, ReminderRow } from '../types/supabase';
+import { sendAttachmentsWithApi } from './telegram-media';
+import { logWarn } from '../utils/logger';
+import { safeTruncate } from '../utils/safe_truncate';
 import { formatInstantToLocal, localDateTimeToUtcIso } from '../utils/time';
 
 const REMINDERS_TABLE = 'reminders';
@@ -367,19 +370,21 @@ export async function createReminderAttachment(
     archiveChatId: number;
     archiveMessageId: number;
     kind: ReminderAttachmentRow['kind'];
+    fileId: string | null;
     caption?: string | null;
     fileUniqueId?: string | null;
     mimeType?: string | null;
   },
   client = getSupabaseClient()
 ): Promise<ReminderAttachmentRow> {
-  const { reminderId, archiveChatId, archiveMessageId, kind, caption, fileUniqueId, mimeType } = params;
+  const { reminderId, archiveChatId, archiveMessageId, kind, fileId, caption, fileUniqueId, mimeType } = params;
   const { data, error } = await client
     .from(REMINDERS_ATTACHMENTS_TABLE)
     .insert({
       reminder_id: reminderId,
       archive_chat_id: archiveChatId,
       archive_message_id: archiveMessageId,
+      file_id: fileId,
       kind,
       caption: caption ?? null,
       file_unique_id: fileUniqueId ?? null,
@@ -469,7 +474,7 @@ export async function sendReminderMessage(params: { reminder: ReminderRow; user:
     }
   }
 
-  const text = lines.join('\n');
+  const text = safeTruncate(lines.join('\n'), 3500);
 
   await botClient.api.sendMessage(chatId, text);
 
@@ -503,8 +508,30 @@ export async function processDueReminders(
       await sendReminderMessage({ reminder, user, botClient });
 
       const attachments = await listReminderAttachments({ reminderId: reminder.id }, client);
-      for (const attachment of attachments) {
-        await botClient.api.copyMessage(user.telegram_id, attachment.archive_chat_id, attachment.archive_message_id);
+      if (attachments.length) {
+        const stored = attachments
+          .filter((attachment) => Boolean(attachment.file_id))
+          .map((attachment) => ({
+            kind: attachment.kind as 'photo' | 'video' | 'voice' | 'document' | 'video_note' | 'audio',
+            fileId: attachment.file_id as string,
+            caption: attachment.caption ?? undefined
+          }));
+        if (stored.length === 0) {
+          logWarn('Reminder attachments missing file_id; skipping resend', {
+            scope: 'reminders',
+            reminderId: reminder.id
+          });
+        } else {
+          if (stored.length !== attachments.length) {
+            logWarn('Reminder attachments missing file_id; sending available only', {
+              scope: 'reminders',
+              reminderId: reminder.id,
+              total: attachments.length,
+              available: stored.length
+            });
+          }
+          await sendAttachmentsWithApi(botClient.api, Number(user.telegram_id), stored);
+        }
       }
 
       const schedule: ReminderSchedule = {

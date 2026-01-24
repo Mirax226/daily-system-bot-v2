@@ -442,6 +442,7 @@ export type Database = {
           reminder_id: string;
           archive_chat_id: number;
           archive_message_id: number;
+          file_id: string | null;
           kind: string;
           caption: string | null;
           file_unique_id: string | null;
@@ -453,6 +454,7 @@ export type Database = {
           reminder_id: string;
           archive_chat_id: number;
           archive_message_id: number;
+          file_id?: string | null;
           kind: string;
           caption?: string | null;
           file_unique_id?: string | null;
@@ -464,6 +466,7 @@ export type Database = {
           reminder_id?: string;
           archive_chat_id?: number;
           archive_message_id?: number;
+          file_id?: string | null;
           kind?: string;
           caption?: string | null;
           file_unique_id?: string | null;

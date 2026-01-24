@@ -1,4 +1,4 @@
-import { InputFile, type Context } from 'grammy';
+import { InputFile, type Api, type Context } from 'grammy';
 import type { InputMediaPhoto, InputMediaVideo } from 'grammy/types';
 
 import { safePlain, truncateTelegram } from '../ui/text';
@@ -66,6 +66,15 @@ export async function sendAttachments(
   attachments: StoredAttachment[],
   options?: { captionBlock?: string }
 ): Promise<SendResult> {
+  return sendAttachmentsWithApi(ctx.api, chatId, attachments, options);
+}
+
+export async function sendAttachmentsWithApi(
+  api: Api,
+  chatId: number,
+  attachments: StoredAttachment[],
+  options?: { captionBlock?: string }
+): Promise<SendResult> {
   const sentMessageIds: number[] = [];
   const groups: { kind: 'album' | 'single'; count: number }[] = [];
 
@@ -77,7 +86,7 @@ export async function sendAttachments(
   for (let i = 0; i < albumMedia.length; i += 10) {
     const chunk = albumMedia.slice(i, i + 10) as ReadonlyArray<AlbumMedia>;
     try {
-      const messages = await ctx.api.sendMediaGroup(chatId, chunk);
+      const messages = await api.sendMediaGroup(chatId, chunk);
       messages.forEach((message) => sentMessageIds.push(message.message_id));
       groups.push({ kind: 'album', count: chunk.length });
     } catch (error) {
@@ -90,40 +99,40 @@ export async function sendAttachments(
     const caption = normalizeCaption(attachment.caption ?? options?.captionBlock);
     try {
       if (attachment.kind === 'voice') {
-        const message = await ctx.api.sendVoice(chatId, attachment.fileId, caption ? { caption } : undefined);
+        const message = await api.sendVoice(chatId, attachment.fileId, caption ? { caption } : undefined);
         sentMessageIds.push(message.message_id);
         groups.push({ kind: 'single', count: 1 });
         continue;
       }
       if (attachment.kind === 'video_note') {
-        const message = await ctx.api.sendVideoNote(chatId, attachment.fileId);
+        const message = await api.sendVideoNote(chatId, attachment.fileId);
         sentMessageIds.push(message.message_id);
         groups.push({ kind: 'single', count: 1 });
         if (caption) {
-          const captionMessage = await ctx.api.sendMessage(chatId, caption);
+          const captionMessage = await api.sendMessage(chatId, caption);
           sentMessageIds.push(captionMessage.message_id);
         }
         continue;
       }
       if (attachment.kind === 'document') {
-        const message = await ctx.api.sendDocument(chatId, attachment.fileId, caption ? { caption } : undefined);
+        const message = await api.sendDocument(chatId, attachment.fileId, caption ? { caption } : undefined);
         sentMessageIds.push(message.message_id);
         groups.push({ kind: 'single', count: 1 });
         continue;
       }
       if (attachment.kind === 'audio') {
-        const message = await ctx.api.sendAudio(chatId, attachment.fileId, caption ? { caption } : undefined);
+        const message = await api.sendAudio(chatId, attachment.fileId, caption ? { caption } : undefined);
         sentMessageIds.push(message.message_id);
         groups.push({ kind: 'single', count: 1 });
         continue;
       }
       if (attachment.kind === 'animation') {
-        const message = await ctx.api.sendAnimation(chatId, attachment.fileId, caption ? { caption } : undefined);
+        const message = await api.sendAnimation(chatId, attachment.fileId, caption ? { caption } : undefined);
         sentMessageIds.push(message.message_id);
         groups.push({ kind: 'single', count: 1 });
         continue;
       }
-      const message = await ctx.api.sendDocument(chatId, attachment.fileId, caption ? { caption } : undefined);
+      const message = await api.sendDocument(chatId, attachment.fileId, caption ? { caption } : undefined);
       sentMessageIds.push(message.message_id);
       groups.push({ kind: 'single', count: 1 });
     } catch (error) {
