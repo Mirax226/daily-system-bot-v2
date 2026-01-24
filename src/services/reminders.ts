@@ -7,6 +7,7 @@ import type { Database, ReminderRow } from '../types/supabase';
 import { sendAttachmentsWithApi } from './telegram-media';
 import { logWarn } from '../utils/logger';
 import { safeTruncate } from '../utils/safe_truncate';
+import { labels } from '../ui/labels';
 import { formatInstantToLocal, localDateTimeToUtcIso } from '../utils/time';
 
 const REMINDERS_TABLE = 'reminders';
@@ -463,14 +464,14 @@ export async function sendReminderMessage(params: { reminder: ReminderRow; user:
     return;
   }
 
-  const title = reminder.title?.trim().length ? reminder.title : 'Reminder';
-  const lines = [`⏰ Reminder: ${title}`];
+  const title = reminder.title?.trim().length ? reminder.title : labels.reminders.untitled();
+  const lines = [labels.reminders.messageTitle({ title })];
   const description = reminder.description?.trim() ?? '';
   if (description.length > 0) {
     const preview = description.length > 600 ? `${description.slice(0, 600)}…` : description;
     lines.push('', preview);
     if (reminder.desc_group_key || description.length > 600) {
-      lines.push('📄 Full description archived');
+      lines.push(labels.reminders.messageArchivedNotice());
     }
   }
 

@@ -88,7 +88,8 @@ const envSchema = z.object({
       if (typeof value !== 'string') return undefined;
       const trimmed = value.trim();
       return trimmed.length === 0 ? undefined : trimmed;
-    }, z.string().optional())
+    }, z.string().optional()),
+  UI_EMOJI_ENABLED: z.coerce.boolean().default(true)
 });
 
 const env = envSchema.parse(process.env);
@@ -134,5 +135,8 @@ export const config = {
       process.env.npm_package_name ??
       'daily-system-bot-v2',
     env: env.APP_ENV
+  },
+  ui: {
+    emojiEnabled: env.UI_EMOJI_ENABLED
   }
 };
