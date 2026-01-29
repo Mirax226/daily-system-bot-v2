@@ -2,11 +2,12 @@ import Fastify, { type FastifyReply, type FastifyRequest } from 'fastify';
 import { GrammyError, webhookCallback } from 'grammy';
 import { bot } from './bot';
 import { config } from './config';
-import { getSupabaseClient } from './db';
-import { runMigrations } from './db/migrations';
+import { getDbPool, getSupabaseClient } from './db';
+import { schemaSync } from './db/schemaSync';
 import { resolveArchiveChatId, setArchiveRuntimeStatus, validateArchiveChannel } from './services/archive';
 import { getCronHealth, isCronAuthorized, runCronTick } from './services/cron.service';
 import { initLogReporter } from './services/log_reporter';
+import { backfillReminderAttachmentFileIds } from './services/reminders';
 import { logError } from './utils/logger';
 
 const server = Fastify({ logger: true });
@@ -78,9 +79,33 @@ server.get(
     }
 
     const time = new Date().toISOString();
-    const result = await runCronTick({ key: request.query.key, botClient: bot });
-    reply.code(result.ok ? 200 : 500);
-    return { ...result, time };
+    try {
+      const result = await runCronTick({ key: request.query.key, botClient: bot });
+      reply.code(result.ok ? 200 : 500);
+      return {
+        ok: result.ok,
+        processed: result.ok ? result.claimed : 0,
+        sent: result.ok ? result.sent : 0,
+        failed: result.ok ? result.failed : 0,
+        duration_ms: result.ok ? result.duration_ms : 0,
+        version: config.build.version,
+        time,
+        error: result.ok ? undefined : result.error
+      };
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      reply.code(500);
+      return {
+        ok: false,
+        processed: 0,
+        sent: 0,
+        failed: 1,
+        duration_ms: 0,
+        version: config.build.version,
+        time,
+        error: message
+      };
+    }
   }
 );
 
@@ -119,58 +144,77 @@ const logArchiveStatus = (logger: typeof server.log): void => {
 
 const start = async () => {
   try {
-    const port = Number(process.env.PORT ?? config.server.port);
-    const host = '0.0.0.0';
+    server.log.info('Init start');
+    getDbPool();
+    getSupabaseClient();
+    const migrationSummary = await schemaSync();
+    server.log.info(
+      {
+        applied: migrationSummary.appliedCount,
+        skipped: migrationSummary.skippedCount,
+        duration_ms: migrationSummary.durationMs
+      },
+      'Schema sync complete'
+    );
+
+    if (config.db.runBackfill) {
+      const summary = await backfillReminderAttachmentFileIds();
+      server.log.info(
+        {
+          updated: summary.updated,
+          skipped: summary.skipped,
+          needs_manual_fix: summary.needsManualFix,
+          duration_ms: summary.durationMs
+        },
+        'Reminder attachment backfill complete'
+      );
+    } else {
+      server.log.info('Reminder attachment backfill skipped (RUN_BACKFILL=false)');
+    }
+
+    logArchiveStatus(server.log);
+    if (config.archive.enabled) {
+      const validation = await validateArchiveChannel(bot.api);
+      if (!validation.ok) {
+        setArchiveRuntimeStatus(false);
+        server.log.warn({ reason: validation.reason }, '[archive] disabled: invalid channel config');
+      }
+    }
+
+    const port = Number(config.server.port);
+    const host = config.server.host;
     await server.listen({ host, port });
     server.log.info({ host, port }, 'HTTP server is listening');
 
-    void (async () => {
-      try {
-        server.log.info('Init start');
-        await runMigrations();
-        getSupabaseClient();
-        logArchiveStatus(server.log);
-        if (config.archive.enabled) {
-          const validation = await validateArchiveChannel(bot.api);
-          if (!validation.ok) {
-            setArchiveRuntimeStatus(false);
-            server.log.warn({ reason: validation.reason }, '[archive] disabled: invalid channel config');
+    if (config.telegram.devPolling) {
+      server.log.info('Running in DEV_POLLING mode: starting bot via long polling.');
+      await bot.start();
+    } else {
+      if (config.telegram.webhookUrl) {
+        try {
+          await bot.api.setWebhook(config.telegram.webhookUrl);
+          server.log.info('Webhook registered with Telegram.');
+        } catch (error) {
+          if (isTelegramTooManyRequests(error)) {
+            server.log.warn(
+              { err: error, scope: 'telegram/webhook' },
+              'Telegram setWebhook rate limited.'
+            );
+          } else {
+            server.log.error(
+              { err: error },
+              'Failed to set Telegram webhook (non-fatal).'
+            );
           }
         }
-
-        if (config.telegram.devPolling) {
-          server.log.info('Running in DEV_POLLING mode: starting bot via long polling.');
-          await bot.start();
-        } else {
-          if (config.telegram.webhookUrl) {
-            try {
-              await bot.api.setWebhook(config.telegram.webhookUrl);
-              server.log.info('Webhook registered with Telegram.');
-            } catch (error) {
-              if (isTelegramTooManyRequests(error)) {
-                server.log.warn(
-                  { err: error, scope: 'telegram/webhook' },
-                  'Telegram setWebhook rate limited.'
-                );
-              } else {
-                server.log.error(
-                  { err: error },
-                  'Failed to set Telegram webhook (non-fatal).'
-                );
-              }
-            }
-          }
-
-          server.log.info(
-            'Running in WEBHOOK mode: NOT calling bot.start(), updates come via /webhook.'
-          );
-        }
-
-        server.log.info('Init done');
-      } catch (err) {
-        server.log.error({ err }, 'Init failed (service stays up, health still OK).');
       }
-    })();
+
+      server.log.info(
+        'Running in WEBHOOK mode: NOT calling bot.start(), updates come via /webhook.'
+      );
+    }
+
+    server.log.info('Init done');
   } catch (error) {
     server.log.error({ err: error }, 'Failed to start application.');
     process.exit(1);

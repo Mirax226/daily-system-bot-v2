@@ -26,8 +26,7 @@ export function getDbPool(): Pool {
     return pgPool;
   }
 
-  const connectionString =
-    process.env.SUPABASE_DB_CONNECTION_STRING ?? process.env.SUPABASE_DSN_DAILY_SYSTEM;
+  const connectionString = config.db.connectionString;
 
   if (!connectionString) {
     throw new Error('Database connection string is missing');

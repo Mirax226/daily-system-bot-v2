@@ -10,7 +10,7 @@
 2) **Wrong key**  
    - `GET /cron/tick?key=wrong` → expect **401**.  
 3) **Correct key**  
-   - `GET /cron/tick?key=<CRON_SECRET>` → expect **200** with `{ ok, tick_id, claimed, sent, failed, skipped, duration_ms, time }`.  
+   - `GET /cron/tick?key=<CRON_SECRET>` → expect **200** with `{ ok, processed, sent, failed, duration_ms, version, time }`.  
 
 ## Notes
 1) **Today screen**  
@@ -38,6 +38,11 @@
 5) **Cron execution**  
    - Due reminders are sent, next_run_at updated for recurring schedules.  
 
+## Settings
+1) **Emoji toggle**  
+   - Open Settings → toggle `Emoji: ON/OFF`.  
+   - UI updates immediately for the current user only.  
+
 ## Archive Channel
 1) **Notes**  
    - Attachments appear in archive with proper summary line.  
@@ -45,4 +50,3 @@
    - Attachments archived on create/edit.  
 3) **Delete/ Ringed**  
    - Archive messages append status line safely (no failures).  
-

@@ -1,3 +1,4 @@
+import { AsyncLocalStorage } from 'node:async_hooks';
 import { config } from '../config';
 
 export const EMOJI = {
@@ -46,14 +47,35 @@ const CLOCK_HALVES = ['🕧', '🕜', '🕝', '🕞', '🕟', '🕠', '🕡', '�
 
 export type EmojiKey = keyof typeof EMOJI;
 
-export const isEmojiEnabled = config.ui?.emojiEnabled !== false;
+type EmojiContext = { enabled: boolean };
+
+const emojiContext = new AsyncLocalStorage<EmojiContext>();
+
+export const runWithEmojiSetting = async (enabled: boolean, handler: () => Promise<void>): Promise<void> => {
+  return await new Promise<void>((resolve, reject) => {
+    emojiContext.run({ enabled }, async () => {
+      try {
+        await handler();
+        resolve();
+      } catch (error) {
+        reject(error);
+      }
+    });
+  });
+};
+
+export const isEmojiEnabled = (): boolean => {
+  const stored = emojiContext.getStore();
+  if (stored) return stored.enabled;
+  return config.ui?.emojiEnabled !== false;
+};
 
 export function emoji(key: EmojiKey): string {
   return EMOJI[key];
 }
 
 export function withEmoji(key: EmojiKey, text: string): string {
-  if (!isEmojiEnabled) return text;
+  if (!isEmojiEnabled()) return text;
   return `${EMOJI[key]} ${text}`.trim();
 }
 
@@ -93,7 +115,7 @@ export function clockEmojiByTime(hh: number, mm: number): string {
 }
 
 export function label(icon: string, text: string): string {
-  if (!isEmojiEnabled) return text;
+  if (!isEmojiEnabled()) return text;
   return `${icon} ${text}`.trim();
 }
 

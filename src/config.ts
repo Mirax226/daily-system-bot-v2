@@ -7,6 +7,7 @@ const envSchema = z.object({
   DEV_POLLING: z.coerce.boolean().default(false),
   TELEGRAM_BOT_TOKEN: z.string().min(1, 'TELEGRAM_BOT_TOKEN is required'),
   TELEGRAM_ADMIN_ID: z.string().optional(),
+  ADMIN_TELEGRAM_ID: z.string().optional(),
   TELEGRAM_WEBHOOK_URL: z
     .preprocess((value: unknown) => {
       if (typeof value !== 'string') return undefined;
@@ -24,6 +25,9 @@ const envSchema = z.object({
   TELEGRAM_SEND_DELAY_MS: z.coerce.number().int().nonnegative().default(0),
   SUPABASE_URL: z.string().url('SUPABASE_URL must be a valid URL'),
   SUPABASE_SERVICE_ROLE_KEY: z.string().min(1, 'SUPABASE_SERVICE_ROLE_KEY is required'),
+  SUPABASE_DB_CONNECTION: z.string().optional(),
+  SUPABASE_DB_CONNECTION_STRING: z.string().optional(),
+  SUPABASE_DSN_DAILY_SYSTEM: z.string().optional(),
   DEFAULT_TIMEZONE: z.string().min(1, 'DEFAULT_TIMEZONE is required'),
   ARCHIVE_ENABLED: z.coerce.boolean().default(true),
   ARCHIVE_MODE: z.string().default('channel'),
@@ -89,7 +93,9 @@ const envSchema = z.object({
       const trimmed = value.trim();
       return trimmed.length === 0 ? undefined : trimmed;
     }, z.string().optional()),
-  UI_EMOJI_ENABLED: z.coerce.boolean().default(true)
+  UI_EMOJI_ENABLED: z.coerce.boolean().default(true),
+  DB_MIGRATIONS_ENABLED: z.coerce.boolean().default(true),
+  RUN_BACKFILL: z.coerce.boolean().default(false)
 });
 
 const env = envSchema.parse(process.env);
@@ -101,7 +107,7 @@ export const config = {
   },
   telegram: {
     botToken: env.TELEGRAM_BOT_TOKEN,
-    adminId: env.TELEGRAM_ADMIN_ID,
+    adminId: env.ADMIN_TELEGRAM_ID ?? env.TELEGRAM_ADMIN_ID,
     webhookUrl: env.TELEGRAM_WEBHOOK_URL,
     devPolling: env.DEV_POLLING
   },
@@ -114,6 +120,12 @@ export const config = {
   supabase: {
     url: env.SUPABASE_URL,
     serviceRoleKey: env.SUPABASE_SERVICE_ROLE_KEY
+  },
+  db: {
+    connectionString:
+      env.SUPABASE_DB_CONNECTION ?? env.SUPABASE_DB_CONNECTION_STRING ?? env.SUPABASE_DSN_DAILY_SYSTEM,
+    migrationsEnabled: env.DB_MIGRATIONS_ENABLED,
+    runBackfill: env.RUN_BACKFILL
   },
   defaultTimezone: env.DEFAULT_TIMEZONE,
   archive: {
@@ -138,5 +150,8 @@ export const config = {
   },
   ui: {
     emojiEnabled: env.UI_EMOJI_ENABLED
+  },
+  build: {
+    version: process.env.npm_package_version ?? 'unknown'
   }
 };

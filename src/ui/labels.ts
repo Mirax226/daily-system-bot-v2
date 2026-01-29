@@ -31,17 +31,17 @@ export const labels = {
     todayEmpty: () => withEmoji('notes', t('screens.notes.today_empty')),
     todayHeader: () => withEmoji('notes', t('screens.notes.today_header')),
     todayItemLine: (params: { time: string; title: string }) =>
-      isEmojiEnabled ? `${emoji('clock')} ${params.time} — ${emoji('noteDetails')} ${params.title}` : `${params.time} — ${params.title}`,
+      isEmojiEnabled() ? `${emoji('clock')} ${params.time} — ${emoji('noteDetails')} ${params.title}` : `${params.time} — ${params.title}`,
     historyTitle: () => withEmoji('history', t('screens.notes.history_title')),
     historyEmpty: () => withEmoji('history', t('screens.notes.history_empty')),
     historyItemLine: (params: { date: string; count: string }) => {
       const line = t('screens.notes.history_item_line', params);
-      return isEmojiEnabled ? `${emoji('calendar')} ${line}` : line;
+      return isEmojiEnabled() ? `${emoji('calendar')} ${line}` : line;
     },
     historyOpenHint: () => withEmoji('info', t('screens.notes.history_open_hint')),
     dateTitle: (params: { date: string }) => withEmoji('calendar', t('screens.notes.date_title', params)),
     dateItemLine: (params: { time: string; title: string }) =>
-      isEmojiEnabled ? `${emoji('clock')} ${params.time} — ${emoji('noteDetails')} ${params.title}` : `${params.time} — ${params.title}`,
+      isEmojiEnabled() ? `${emoji('clock')} ${params.time} — ${emoji('noteDetails')} ${params.title}` : `${params.time} — ${params.title}`,
     viewEmpty: () => withEmoji('notes', t('screens.notes.view_empty')),
     detailTitleLabel: () => withEmoji('noteDetails', t('screens.notes.detail_title_label')),
     detailDate: (params: { date: string }) => withEmoji('calendar', t('screens.notes.detail_date', params)),
@@ -60,7 +60,7 @@ export const labels = {
     attachmentsEmpty: (params: { kind: string }) => withEmoji('attach', t('screens.notes.attachments_empty', params)),
     attachmentLine: (params: { index: string; time: string; caption: string }) => {
       const line = t('screens.notes.attachment_line', params);
-      return isEmojiEnabled ? `${emoji('info')} ${line}` : line;
+      return isEmojiEnabled() ? `${emoji('info')} ${line}` : line;
     },
     attachmentNoCaption: () => t('screens.notes.attachment_no_caption'),
     attachmentSendFailed: () => withEmoji('warning', t('screens.notes.attachment_send_failed')),
@@ -100,10 +100,10 @@ export const labels = {
     attach: () => btn('attach', t('buttons.notes_attach')),
     delete: () => btn('delete', t('buttons.notes_delete')),
     viewAllItems: () => btn('archive', t('buttons.notes_view_all')),
-    photo: (params: { count: string }) => btn('photo', t('buttons.notes_photo', params)),
-    video: (params: { count: string }) => btn('video', t('buttons.notes_video', params)),
-    voice: (params: { count: string }) => btn('voice', t('buttons.notes_voice', params)),
-    document: (params: { count: string }) => btn('file', t('buttons.notes_document', params)),
+    photo: () => btn('photo', t('buttons.notes_photo')),
+    video: () => btn('video', t('buttons.notes_video')),
+    voice: () => btn('voice', t('buttons.notes_voice')),
+    document: () => btn('file', t('buttons.notes_document')),
     editTitle: () => btn('edit', t('buttons.notes_edit_title')),
     editBody: () => btn('description', t('buttons.notes_edit_body')),
     attachDone: () => btn('save', t('buttons.notes_attach_done')),
@@ -123,7 +123,7 @@ export const labels = {
     listHeader: () => withEmoji('reminders', t('screens.reminders.list_header')),
     itemLine: (params: { status: string; time: string; title: string; attachments: string }) => {
       const line = t('screens.reminders.item_line', params);
-      return isEmojiEnabled ? `${emoji('reminders')} ${line}` : line;
+      return isEmojiEnabled() ? `${emoji('reminders')} ${line}` : line;
     },
     statusOn: () => t('screens.reminders.status_on'),
     statusOff: () => t('screens.reminders.status_off'),
@@ -145,7 +145,7 @@ export const labels = {
     deleteConfirm: () => withEmoji('warning', t('screens.reminders.delete_confirm')),
     detailsTitle: (params: { time?: string | null }) => {
       if (!params.time) return withEmoji('reminders', t('screens.reminders.details_title'));
-      if (!isEmojiEnabled) return t('screens.reminders.details_title');
+      if (!isEmojiEnabled()) return t('screens.reminders.details_title');
       return `${clockEmojiFromTime(params.time)} ${t('screens.reminders.details_title')}`;
     },
     detailsTitleLine: (params: { title: string }) => withEmoji('title', t('screens.reminders.details_title_line', params)),
@@ -215,6 +215,16 @@ export const labels = {
     dateConfirm: () => btn('ok', t('buttons.reminders_date_confirm')),
     typeTime: () => btn('edit', t('buttons.reminders_type_time')),
     timeConfirm: () => btn('ok', t('buttons.reminders_time_confirm'))
+  },
+  settings: {
+    title: () => withEmoji('settings', t('screens.settings.title')),
+    emojiToggleLabel: (enabled: boolean) =>
+      t('buttons.settings_emoji_toggle', { state: enabled ? 'ON' : 'OFF' })
+  },
+  settingsButtons: {
+    emojiToggle: (enabled: boolean) =>
+      btn(enabled ? 'toggleOn' : 'toggleOff', t('buttons.settings_emoji_toggle', { state: enabled ? 'ON' : 'OFF' })),
+    back: () => btn('back', t('buttons.notes_back'))
   },
   archive: {
     header: () => withEmoji('archive', t('archive.header')),
