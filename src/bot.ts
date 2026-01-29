@@ -114,7 +114,9 @@ import { makeActionButton } from './ui/inlineButtons';
 import { renderScreen, ensureUserAndSettings as renderEnsureUserAndSettings, updateCachedUserContext } from './ui/renderScreen';
 import { aiEnabledForUser, sendMainMenu } from './ui/mainMenu';
 import { labels } from './ui/labels';
-import { emoji, isEmojiEnabled } from './ui/emoji';
+import { emoji, isEmojiEnabled, runWithEmojiSetting } from './ui/emoji';
+import { getUserBooleanSetting, setUserSetting } from './services/settings';
+import { renderSettingsScreen } from './ui/settingsScreen';
 
 import { formatInstantToLocal, formatLocalTime, localDateTimeToUtcIso } from './utils/time';
 import { gregorianToJalali, isValidJalaliDate, jalaliToGregorian } from './utils/jalali';
@@ -127,6 +129,16 @@ import type { NoteAttachmentRow, NoteRow, ReportItemRow, ReportDayRow, RewardRow
 
 export const bot = new Bot<Context>(config.telegram.botToken);
 const logReporter = initLogReporter();
+
+bot.use(async (ctx: Context, next: () => Promise<void>) => {
+  if (!ctx.from) {
+    await next();
+    return;
+  }
+  const { user } = await ensureUserAndSettings(ctx);
+  const emojiEnabled = await getUserBooleanSetting(user.id, EMOJI_SETTING_KEY, config.ui.emojiEnabled);
+  await runWithEmojiSetting(emojiEnabled, next);
+});
 
 /**
  * Per-user in-memory state (ephemeral).
@@ -1627,6 +1639,7 @@ const NOTE_ATTACHMENT_KINDS = ['photo', 'video', 'voice', 'document', 'video_not
 type NoteAttachmentKind = (typeof NOTE_ATTACHMENT_KINDS)[number];
 type NoteCaptionCategory = 'photo' | 'video' | 'voice' | 'video_note' | 'files';
 type ReminderCaptionCategory = NoteCaptionCategory;
+const EMOJI_SETTING_KEY = 'emoji_enabled';
 const NOTE_UPLOAD_IDLE_MS = 2000;
 const NOTE_DETAIL_MAX_CHARS = 1500;
 const NOTE_BODY_PREVIEW_LIMIT = 600;
@@ -1650,7 +1663,7 @@ type ArchiveAttachmentDraft = {
 };
 
 const getNoteAttachmentKindEmoji = (kind: NoteAttachmentKind): string => {
-  if (!isEmojiEnabled) return '';
+  if (!isEmojiEnabled()) return '';
   if (kind === 'photo') return emoji('photo');
   if (kind === 'video') return emoji('video');
   if (kind === 'voice') return emoji('voice');
@@ -2043,7 +2056,7 @@ const renderNoteDetails = async (
     const { counts } = attachmentSummary;
     if (counts.photo > 0) {
       const photoBtn = await makeActionButton(ctx, {
-        label: labels.notesButtons.photo({ count: String(counts.photo) }),
+        label: labels.notesButtons.photo(),
         action: 'notes.attachments_kind',
         data: { noteId: note.id, kind: 'photo', noteDate, page, historyPage }
       });
@@ -2052,7 +2065,7 @@ const renderNoteDetails = async (
     const videoCount = (counts.video ?? 0) + (counts.video_note ?? 0);
     if (videoCount > 0) {
       const videoBtn = await makeActionButton(ctx, {
-        label: labels.notesButtons.video({ count: String(videoCount) }),
+        label: labels.notesButtons.video(),
         action: 'notes.attachments_kind',
         data: { noteId: note.id, kind: 'video', noteDate, page, historyPage }
       });
@@ -2060,7 +2073,7 @@ const renderNoteDetails = async (
     }
     if (counts.voice > 0) {
       const voiceBtn = await makeActionButton(ctx, {
-        label: labels.notesButtons.voice({ count: String(counts.voice) }),
+        label: labels.notesButtons.voice(),
         action: 'notes.attachments_kind',
         data: { noteId: note.id, kind: 'voice', noteDate, page, historyPage }
       });
@@ -2069,7 +2082,7 @@ const renderNoteDetails = async (
     const fileCount = (counts.document ?? 0) + (counts.audio ?? 0);
     if (fileCount > 0) {
       const docBtn = await makeActionButton(ctx, {
-        label: labels.notesButtons.document({ count: String(fileCount) }),
+        label: labels.notesButtons.document(),
         action: 'notes.attachments_kind',
         data: { noteId: note.id, kind: 'document', noteDate, page, historyPage }
       });
@@ -5170,16 +5183,14 @@ const handleSaveValue = async (ctx: Context, text: string): Promise<void> => {
 };
 
 const renderSettingsRoot = async (ctx: Context): Promise<void> => {
+  const { user } = await ensureUserAndSettings(ctx);
+  const emojiEnabled = await getUserBooleanSetting(user.id, EMOJI_SETTING_KEY, config.ui.emojiEnabled);
   const changeLanguageBtn = await makeActionButton(ctx, { label: t('buttons.change_language'), action: 'settings.language' });
   const speedBtn = await makeActionButton(ctx, { label: t('buttons.settings_speed_test'), action: 'settings.speed_test' });
-  const backBtn = await makeActionButton(ctx, { label: t('buttons.back'), action: 'nav.dashboard' });
-  const kb = new InlineKeyboard()
-    .text(changeLanguageBtn.text, changeLanguageBtn.callback_data)
-    .row()
-    .text(speedBtn.text, speedBtn.callback_data)
-    .row()
-    .text(backBtn.text, backBtn.callback_data);
-  await renderScreen(ctx, { titleKey: 'screens.settings.title', bodyLines: ['screens.settings.choose_option'], inlineKeyboard: kb });
+  await renderSettingsScreen(ctx, {
+    emojiEnabled,
+    extraButtons: [changeLanguageBtn, speedBtn]
+  });
 };
 
 /* ===== Commands ===== */
@@ -5852,6 +5863,16 @@ bot.callbackQuery(/^[A-Za-z0-9_-]{8,12}$/, async (ctx) => {
         await renderLanguageSelection(ctx, {
           origin: 'settings',
           currentLocale: readStoredLanguageCode(settings.settings_json as Record<string, unknown>) ?? locale
+        });
+        return;
+      }
+      case 'settings.emoji_toggle': {
+        const { user } = await ensureUserAndSettings(ctx);
+        const current = await getUserBooleanSetting(user.id, EMOJI_SETTING_KEY, config.ui.emojiEnabled);
+        const next = !current;
+        await setUserSetting(user.id, EMOJI_SETTING_KEY, next ? 'true' : 'false');
+        await runWithEmojiSetting(next, async () => {
+          await renderSettingsRoot(ctx);
         });
         return;
       }

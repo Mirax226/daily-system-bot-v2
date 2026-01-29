@@ -2,7 +2,7 @@ import type { Bot } from 'grammy';
 
 import { config } from '../config';
 import { listArchiveMessagesByGroupKey } from './archive';
-import { getSupabaseClient } from '../db';
+import { getSupabaseClient, queryDb } from '../db';
 import type { Database, ReminderRow } from '../types/supabase';
 import { sendAttachmentsWithApi } from './telegram-media';
 import { logWarn } from '../utils/logger';
@@ -642,4 +642,49 @@ export async function getRemindersCronStatus(
   const processedCount = (countRows as unknown as { length?: number } | null)?.length ?? 0;
 
   return { lastRunUtc, processedCount };
+}
+
+export type ReminderAttachmentBackfillSummary = {
+  updated: number;
+  skipped: number;
+  needsManualFix: number;
+  durationMs: number;
+};
+
+export async function backfillReminderAttachmentFileIds(): Promise<ReminderAttachmentBackfillSummary> {
+  const start = Date.now();
+
+  const { rows } = await queryDb<{
+    with_file: number;
+    manual: number;
+    missing: number;
+  }>(`
+    select
+      sum(case when file_id is not null then 1 else 0 end)::int as with_file,
+      sum(case when file_id is null and coalesce(needs_manual_fix, false) = true then 1 else 0 end)::int as manual,
+      sum(case when file_id is null and coalesce(needs_manual_fix, false) = false then 1 else 0 end)::int as missing
+    from public.reminders_attachments
+  `);
+
+  const withFile = rows?.[0]?.with_file ?? 0;
+  const manual = rows?.[0]?.manual ?? 0;
+  const missing = rows?.[0]?.missing ?? 0;
+
+  if (missing > 0) {
+    await queryDb(
+      `
+        update public.reminders_attachments
+        set needs_manual_fix = true
+        where file_id is null
+          and coalesce(needs_manual_fix, false) = false
+      `
+    );
+  }
+
+  return {
+    updated: 0,
+    skipped: withFile + manual,
+    needsManualFix: missing,
+    durationMs: Date.now() - start
+  };
 }

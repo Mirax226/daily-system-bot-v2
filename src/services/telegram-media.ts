@@ -80,59 +80,93 @@ export async function sendAttachmentsWithApi(
   const remaining = attachments.filter((attachment) => !isAlbumCandidate(attachment));
   const albumCaption = normalizeCaption(options?.captionBlock);
 
-  const albumMedia = buildAlbumMedia(albumCandidates, albumCaption);
-  for (let i = 0; i < albumMedia.length; i += 10) {
-    const chunk = albumMedia.slice(i, i + 10) as ReadonlyArray<AlbumMedia>;
+  const sendSingleAttachment = async (
+    attachment: StoredAttachment,
+    captionOverride?: string | null,
+    index?: number
+  ): Promise<void> => {
+    const caption = normalizeCaption(
+      captionOverride ?? attachment.caption ?? (typeof index === 'number' && index === 0 ? albumCaption : undefined)
+    );
+    if (attachment.kind === 'voice') {
+      const message = await api.sendVoice(chatId, attachment.fileId, caption ? { caption } : undefined);
+      sentMessageIds.push(message.message_id);
+      groups.push({ kind: 'single', count: 1 });
+      return;
+    }
+    if (attachment.kind === 'video_note') {
+      const message = await api.sendVideoNote(chatId, attachment.fileId);
+      sentMessageIds.push(message.message_id);
+      groups.push({ kind: 'single', count: 1 });
+      if (caption) {
+        const captionMessage = await api.sendMessage(chatId, caption);
+        sentMessageIds.push(captionMessage.message_id);
+      }
+      return;
+    }
+    if (attachment.kind === 'document') {
+      const message = await api.sendDocument(chatId, attachment.fileId, caption ? { caption } : undefined);
+      sentMessageIds.push(message.message_id);
+      groups.push({ kind: 'single', count: 1 });
+      return;
+    }
+    if (attachment.kind === 'audio') {
+      const message = await api.sendAudio(chatId, attachment.fileId, caption ? { caption } : undefined);
+      sentMessageIds.push(message.message_id);
+      groups.push({ kind: 'single', count: 1 });
+      return;
+    }
+    if (attachment.kind === 'animation') {
+      const message = await api.sendAnimation(chatId, attachment.fileId, caption ? { caption } : undefined);
+      sentMessageIds.push(message.message_id);
+      groups.push({ kind: 'single', count: 1 });
+      return;
+    }
+    if (attachment.kind === 'photo') {
+      const message = await api.sendPhoto(chatId, attachment.fileId, caption ? { caption } : undefined);
+      sentMessageIds.push(message.message_id);
+      groups.push({ kind: 'single', count: 1 });
+      return;
+    }
+    if (attachment.kind === 'video') {
+      const message = await api.sendVideo(chatId, attachment.fileId, caption ? { caption } : undefined);
+      sentMessageIds.push(message.message_id);
+      groups.push({ kind: 'single', count: 1 });
+      return;
+    }
+    const message = await api.sendDocument(chatId, attachment.fileId, caption ? { caption } : undefined);
+    sentMessageIds.push(message.message_id);
+    groups.push({ kind: 'single', count: 1 });
+  };
+
+  for (let i = 0; i < albumCandidates.length; i += 10) {
+    const chunk = albumCandidates.slice(i, i + 10);
+    const chunkMedia = buildAlbumMedia(chunk, albumCaption);
     try {
-      const messages = await api.sendMediaGroup(chatId, chunk);
+      const messages = await api.sendMediaGroup(chatId, chunkMedia);
       messages.forEach((message) => sentMessageIds.push(message.message_id));
-      groups.push({ kind: 'album', count: chunk.length });
+      groups.push({ kind: 'album', count: chunkMedia.length });
     } catch (error) {
       const errorMessage = error instanceof Error ? error.message : String(error);
       logWarn('Failed to send media group', { chatId, error: errorMessage });
+      for (let index = 0; index < chunk.length; index += 1) {
+        try {
+          await sendSingleAttachment(chunk[index], null, index);
+        } catch (singleError) {
+          const singleMessage = singleError instanceof Error ? singleError.message : String(singleError);
+          logWarn('Failed to send attachment after album fallback', {
+            chatId,
+            kind: chunk[index].kind,
+            error: singleMessage
+          });
+        }
+      }
     }
   }
 
   for (const attachment of remaining) {
-    const caption = normalizeCaption(attachment.caption ?? options?.captionBlock);
     try {
-      if (attachment.kind === 'voice') {
-        const message = await api.sendVoice(chatId, attachment.fileId, caption ? { caption } : undefined);
-        sentMessageIds.push(message.message_id);
-        groups.push({ kind: 'single', count: 1 });
-        continue;
-      }
-      if (attachment.kind === 'video_note') {
-        const message = await api.sendVideoNote(chatId, attachment.fileId);
-        sentMessageIds.push(message.message_id);
-        groups.push({ kind: 'single', count: 1 });
-        if (caption) {
-          const captionMessage = await api.sendMessage(chatId, caption);
-          sentMessageIds.push(captionMessage.message_id);
-        }
-        continue;
-      }
-      if (attachment.kind === 'document') {
-        const message = await api.sendDocument(chatId, attachment.fileId, caption ? { caption } : undefined);
-        sentMessageIds.push(message.message_id);
-        groups.push({ kind: 'single', count: 1 });
-        continue;
-      }
-      if (attachment.kind === 'audio') {
-        const message = await api.sendAudio(chatId, attachment.fileId, caption ? { caption } : undefined);
-        sentMessageIds.push(message.message_id);
-        groups.push({ kind: 'single', count: 1 });
-        continue;
-      }
-      if (attachment.kind === 'animation') {
-        const message = await api.sendAnimation(chatId, attachment.fileId, caption ? { caption } : undefined);
-        sentMessageIds.push(message.message_id);
-        groups.push({ kind: 'single', count: 1 });
-        continue;
-      }
-      const message = await api.sendDocument(chatId, attachment.fileId, caption ? { caption } : undefined);
-      sentMessageIds.push(message.message_id);
-      groups.push({ kind: 'single', count: 1 });
+      await sendSingleAttachment(attachment, options?.captionBlock);
     } catch (error) {
       const errorMessage = error instanceof Error ? error.message : String(error);
       logWarn('Failed to send attachment', { chatId, kind: attachment.kind, error: errorMessage });

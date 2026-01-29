@@ -647,11 +647,11 @@
     "notes_caption_all": "یک کپشن برای همه",
     "notes_caption_by_category": "کپشن بر اساس دسته",
     "notes_caption_skip": "رد کردن کپشن‌ها",
-    "notes_photo": "عکس‌ها ({count})",
-    "notes_video": "ویدئوها ({count})",
-    "notes_voice": "ویس‌ها ({count})",
-    "notes_video_note": "ویدئو نوت‌ها ({count})",
-    "notes_document": "فایل‌ها ({count})",
+    "notes_photo": "مشاهده عکس‌ها",
+    "notes_video": "مشاهده ویدئوها",
+    "notes_voice": "مشاهده ویس‌ها",
+    "notes_video_note": "مشاهده ویدئوها",
+    "notes_document": "مشاهده فایل‌ها",
     "notes_prev": "قبلی",
     "notes_next": "بعدی",
     "reminders_view_full": "مشاهده توضیح کامل",
@@ -676,7 +676,8 @@
     "rewards_deactivate": "غیرفعال کردن",
     "rewards_delete": "حذف پاداش",
     "rewards_add": "➕ افزودن پاداش",
-    "settings_speed_test": "⚡ تست سرعت / پینگ",
+    "settings_speed_test": "تست سرعت / پینگ",
+    "settings_emoji_toggle": "ایموجی: {state}",
     "reports_xp": "📊 خلاصه XP",
     "reports_sleep": "😴 خواب",
     "reports_study": "📚 مطالعه",

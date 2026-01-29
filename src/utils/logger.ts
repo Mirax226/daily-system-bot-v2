@@ -1,3 +1,5 @@
+import { config } from '../config';
+
 export type LogLevel = 'info' | 'warn' | 'error';
 
 export interface LogMeta {
@@ -13,15 +15,31 @@ export interface LogEvent {
   env?: string;
 }
 
-const projectId = 'daily-system';
-const endpoint = process.env.PATH_APPLIER_LOG_URL;
-const minLevelRaw = process.env.PATH_APPLIER_LOG_MIN_LEVEL;
+const projectId = config.logReporter.projectId ?? 'daily-system';
+const endpoint = (() => {
+  if (!config.logReporter.ingestUrl) return null;
+  if (!config.logReporter.ingestKey) return config.logReporter.ingestUrl;
+  const url = new URL(config.logReporter.ingestUrl);
+  url.searchParams.set('key', config.logReporter.ingestKey);
+  return url.toString();
+})();
+const levelsRaw = config.logReporter.levels;
 
 const isLogLevel = (value: string | undefined): value is LogLevel => {
   return value === 'info' || value === 'warn' || value === 'error';
 };
 
-const minLevel: LogLevel = isLogLevel(minLevelRaw) ? minLevelRaw : 'error';
+const parseLevels = (value: string | undefined): Set<LogLevel> => {
+  if (!value) return new Set(['error']);
+  const tokens = value
+    .split(',')
+    .map((token) => token.trim().toLowerCase())
+    .filter(Boolean);
+  const parsed = tokens.filter((token): token is LogLevel => isLogLevel(token));
+  return parsed.length ? new Set(parsed) : new Set(['error']);
+};
+
+const enabledLevels = parseLevels(levelsRaw);
 
 export const levelToNumber = (level: LogLevel): number => {
   switch (level) {
@@ -34,7 +52,7 @@ export const levelToNumber = (level: LogLevel): number => {
   }
 };
 
-const minLevelNumber = levelToNumber(minLevel);
+const minLevelNumber = Math.min(...[...enabledLevels].map(levelToNumber));
 
 const sendRemoteLog = async (event: LogEvent): Promise<void> => {
   if (!endpoint) return;
@@ -77,7 +95,9 @@ const logWithLevel = (level: LogLevel, message: string, meta?: LogMeta): void =>
     }
   }
 
+  if (!config.logReporter.enabled) return;
   if (!endpoint) return;
+  if (!enabledLevels.has(level)) return;
   if (levelToNumber(level) < minLevelNumber) return;
 
   const event: LogEvent = {
@@ -86,7 +106,7 @@ const logWithLevel = (level: LogLevel, message: string, meta?: LogMeta): void =>
     meta,
     timestamp: new Date().toISOString(),
     projectId,
-    env: process.env.NODE_ENV
+    env: config.logReporter.env
   };
 
   void sendRemoteLog(event);

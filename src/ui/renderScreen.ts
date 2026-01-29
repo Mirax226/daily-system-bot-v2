@@ -64,7 +64,23 @@ export const renderScreen = async (ctx: Context, params: RenderScreenParams): Pr
       return line;
     }) ?? [];
 
-  const text = safeTruncate(safePlain([resolvedTitle, '', ...resolvedLines].join('\n')), maxLength);
+  const normalizedLines = [...resolvedLines];
+  if (resolvedTitle && normalizedLines[0] === resolvedTitle) {
+    normalizedLines.shift();
+  }
+
+  const parts: string[] = [];
+  if (resolvedTitle) {
+    parts.push(resolvedTitle);
+  }
+  if (normalizedLines.length > 0) {
+    if (resolvedTitle) {
+      parts.push('');
+    }
+    parts.push(...normalizedLines);
+  }
+
+  const text = safeTruncate(safePlain(parts.join('\n')), maxLength);
   const replyMarkup = params.inlineKeyboard;
 
   if (ctx.callbackQuery?.message) {
